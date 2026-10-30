@@ -1,0 +1,1472 @@
+//! Artist and album presentation. Networking, history and playback stay with the
+//! application; these widgets only return the action the user chose.
+use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke};
+
+use crate::{
+    cover_art::CoverCache,
+    i18n::Language,
+    icons::{self, Icon},
+    model::{AlbumRef, ArtistRef},
+    theme,
+};
+
+pub struct ArtistView<'a> {
+    pub language: Language,
+    pub name: &'a str,
+    pub image_url: Option<&'a str>,
+    pub track_count: usize,
+    pub loading: bool,
+    pub playing: bool,
+}
+
+pub struct AlbumView<'a> {
+    pub language: Language,
+    pub title: &'a str,
+    pub artists: &'a [ArtistRef],
+    pub creator: Option<&'a crate::web_audio::PlaylistCreator>,
+    pub image_url: Option<&'a str>,
+    pub subtitle: &'a str,
+    pub track_count: usize,
+    pub loading: bool,
+    pub playing: bool,
+    pub can_edit_playlist: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Play,
+    Shuffle,
+    OpenAlbum(AlbumRef),
+    OpenArtist(ArtistRef),
+    OpenCreator(i64),
+    EditPlaylist,
+}
+
+/// The names remain separate click targets even when VK supplies one combined
+/// display string. Legacy metadata is resolved by its full name by the caller;
+/// commas and ampersands inside an artist name are never guessed separators.
+pub fn artist_links(ui: &mut egui::Ui, artists: &[ArtistRef], fallback: &str) -> Option<ArtistRef> {
+    artist_links_with_font(
+        ui,
+        artists,
+        fallback,
+        egui::TextStyle::Small.resolve(ui.style()),
+    )
+}
+
+/// Uses the same canonical links at a caller-selected caption size.
+pub fn artist_links_with_font(
+    ui: &mut egui::Ui,
+    artists: &[ArtistRef],
+    fallback: &str,
+    font: FontId,
+) -> Option<ArtistRef> {
+    let fallback_artist;
+    let artists = if artists.is_empty() && !fallback.trim().is_empty() {
+        fallback_artist = [ArtistRef {
+            id: String::new(),
+            name: fallback.to_owned(),
+        }];
+        &fallback_artist[..]
+    } else {
+        artists
+    };
+    let height = ui.fonts_mut(|fonts| fonts.row_height(&font)).max(16.0);
+    let (line, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(0.0), height),
+        Sense::hover(),
+    );
+    let mut left = line.left();
+    let mut action = None;
+    for (index, artist) in artists.iter().enumerate() {
+        if left >= line.right() - 1.0 {
+            break;
+        }
+        if index != 0 {
+            let separator = ui
+                .painter()
+                .layout_no_wrap(", ".into(), font.clone(), theme::MUTED);
+            if left + separator.size().x >= line.right() {
+                break;
+            }
+            ui.painter().galley(
+                egui::pos2(left, line.center().y - separator.size().y * 0.5),
+                separator.clone(),
+                theme::MUTED,
+            );
+            left += separator.size().x;
+        }
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            artist.name.clone(),
+            font.clone(),
+            theme::MUTED,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(line.right() - left);
+        let galley = ui.painter().layout_job(job);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(left, line.top()),
+            egui::vec2(galley.size().x.min(line.right() - left), line.height()),
+        );
+        let response = ui.interact(
+            rect,
+            ui.id()
+                .with(("artist-link", index, &artist.id, &artist.name)),
+            Sense::click(),
+        );
+        if response.clicked() {
+            response.request_focus();
+            action = Some(artist.clone());
+        }
+        let color = if response.hovered() || response.has_focus() {
+            ui.visuals().text_color()
+        } else {
+            theme::MUTED
+        };
+        ui.painter()
+            .with_clip_rect(ui.clip_rect().intersect(line))
+            .galley_with_override_text_color(
+                egui::pos2(left, line.center().y - galley.size().y * 0.5),
+                galley.clone(),
+                color,
+            );
+        if response.hovered() || response.has_focus() {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), rect.bottom() - 1.0),
+                    egui::pos2(rect.right(), rect.bottom() - 1.0),
+                ],
+                Stroke::new(0.7, color),
+            );
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), &artist.name)
+        });
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        left += galley.size().x;
+        if galley.elided {
+            break;
+        }
+    }
+    action
+}
+
+pub fn artist_header(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: ArtistView<'_>,
+) -> Option<Action> {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 238.0), Sense::hover());
+    let portrait_size = 214.0_f32.min((width * 0.43).max(0.0));
+    let color = if ui.is_rect_visible(rect) {
+        covers.header_color(ui.ctx(), view.image_url, portrait_size)
+    } else {
+        None
+    };
+    background(ui.painter(), rect, color);
+    if width >= 380.0 {
+        let portrait = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - portrait_size - 12.0, rect.top() + 12.0),
+            egui::Vec2::splat(portrait_size),
+        );
+        artwork(ui, covers, portrait, view.image_url, "artist-portrait");
+        // The portrait recedes into the page's dark blue surface rather than
+        // placing text over a bright face or introducing an unreadable crop.
+        fade(ui.painter(), rect, color);
+    }
+    let inner = rect.shrink(22.0);
+    let text_right = if width >= 540.0 {
+        rect.right() - portrait_size * 0.65
+    } else {
+        inner.right()
+    };
+    let mut text = child(
+        ui,
+        "artist-heading",
+        egui::Rect::from_min_max(inner.min, egui::pos2(text_right, inner.bottom() - 48.0)),
+    );
+    kicker(&mut text, view.language.text("ИСПОЛНИТЕЛЬ", "ARTIST"));
+    text.add_space(20.0);
+    text.add(
+        egui::Label::new(
+            RichText::new(view.name)
+                .size(if width < 500.0 { 28.0 } else { 36.0 })
+                .family(theme::semibold()),
+        )
+        .truncate()
+        .selectable(false),
+    );
+    text.add_space(4.0);
+    text.add(
+        egui::Label::new(
+            RichText::new(
+                view.language
+                    .text("Популярные треки и релизы", "Popular tracks and releases"),
+            )
+            .color(theme::MUTED),
+        )
+        .truncate()
+        .selectable(false),
+    );
+    let mut buttons = child(
+        ui,
+        "artist-controls",
+        egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 38.0), inner.max),
+    );
+    controls(
+        &mut buttons,
+        view.language,
+        view.track_count,
+        view.loading,
+        view.playing,
+    )
+}
+
+pub fn album_header(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: AlbumView<'_>,
+) -> Option<Action> {
+    let label = view.language.text("АЛЬБОМ", "ALBUM");
+    collection_header(ui, covers, view, label, false)
+}
+
+pub fn playlist_header(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: AlbumView<'_>,
+) -> Option<Action> {
+    let label = view.language.text("ПЛЕЙЛИСТ", "PLAYLIST");
+    collection_header(ui, covers, view, label, true)
+}
+
+/// VK descriptions stay plain text, with their paragraph breaks intact. The
+/// caller places this below the playlist header and before its track list.
+pub fn playlist_description(ui: &mut egui::Ui, description: &str) {
+    if description.trim().is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    let mut rect = ui.available_rect_before_wrap();
+    rect.min.x = (rect.left() + 8.0).min(rect.right());
+    rect.max.x = (rect.right() - 8.0).max(rect.left());
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("playlist-description")
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+        |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(description).size(14.0).color(theme::MUTED))
+                    .wrap()
+                    .selectable(false),
+            );
+        },
+    );
+}
+
+fn playlist_creator(
+    ui: &mut egui::Ui,
+    language: Language,
+    creator: &crate::web_audio::PlaylistCreator,
+) -> Option<Action> {
+    if creator.owner_id == 0 || creator.name.trim().is_empty() {
+        return None;
+    }
+    let width = ui.available_width().max(0.0);
+    let chevron = ui
+        .painter()
+        .layout_no_wrap("›".into(), FontId::proportional(18.0), theme::MUTED);
+    let gap = 5.0;
+    let name_width = (width - chevron.size().x - gap).max(0.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        creator.name.clone(),
+        FontId::proportional(14.0),
+        theme::MUTED,
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(name_width);
+    let name = ui.painter().layout_job(job);
+    let size = egui::vec2((name.size().x + gap + chevron.size().x).min(width), 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let color = if response.hovered() || response.has_focus() {
+        ui.visuals().text_color()
+    } else {
+        theme::MUTED
+    };
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    painter.galley_with_override_text_color(
+        egui::pos2(rect.left(), rect.center().y - name.size().y * 0.5),
+        name,
+        color,
+    );
+    painter.galley_with_override_text_color(
+        egui::pos2(
+            rect.right() - chevron.size().x,
+            rect.center().y - chevron.size().y * 0.5,
+        ),
+        chevron,
+        color,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &creator.name)
+    });
+    let clicked = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(language.text("Открыть создателя в VK", "Open creator in VK"))
+        .clicked();
+    clicked.then_some(Action::OpenCreator(creator.owner_id))
+}
+
+fn collection_header(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: AlbumView<'_>,
+    kind: &str,
+    playlist: bool,
+) -> Option<Action> {
+    let width = ui.available_width();
+    let wide = width >= 520.0;
+    let height = if wide { 226.0 } else { 320.0 };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let inner = rect.shrink(20.0);
+    let art_size = if wide {
+        180.0
+    } else {
+        108.0_f32.min(inner.width())
+    };
+    let color = if ui.is_rect_visible(rect) {
+        covers.header_color(ui.ctx(), view.image_url, art_size)
+    } else {
+        None
+    };
+    background(ui.painter(), rect, color);
+    let art = egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size));
+    artwork(ui, covers, art, view.image_url, "album-cover");
+    let text_origin = if wide {
+        egui::pos2(art.right() + 24.0, inner.top() + 4.0)
+    } else {
+        egui::pos2(inner.left(), art.bottom() + 14.0)
+    };
+    let mut text = child(
+        ui,
+        "album-heading",
+        egui::Rect::from_min_max(
+            text_origin,
+            egui::pos2(
+                inner.right()
+                    - if playlist && view.can_edit_playlist && wide {
+                        38.0
+                    } else {
+                        0.0
+                    },
+                inner.bottom() - 45.0,
+            ),
+        ),
+    );
+    kicker(&mut text, kind);
+    text.add_space(if wide { 12.0 } else { 2.0 });
+    text.add(
+        egui::Label::new(
+            RichText::new(view.title)
+                .size(if wide { 30.0 } else { 24.0 })
+                .family(theme::semibold()),
+        )
+        .truncate()
+        .selectable(false),
+    );
+    text.add_space(3.0);
+    let mut action = if playlist {
+        view.creator
+            .and_then(|creator| playlist_creator(&mut text, view.language, creator))
+    } else {
+        artist_links(&mut text, view.artists, "").map(Action::OpenArtist)
+    };
+    if !view.subtitle.is_empty() {
+        text.add(
+            egui::Label::new(RichText::new(view.subtitle).small().color(theme::MUTED))
+                .truncate()
+                .selectable(false),
+        );
+    }
+    let mut buttons = child(
+        ui,
+        "album-controls",
+        egui::Rect::from_min_max(egui::pos2(text_origin.x, inner.bottom() - 38.0), inner.max),
+    );
+    action = controls(
+        &mut buttons,
+        view.language,
+        view.track_count,
+        view.loading,
+        view.playing,
+    )
+    .or(action);
+    if playlist && view.can_edit_playlist {
+        let edit_rect = egui::Rect::from_min_size(
+            egui::pos2(inner.right() - 30.0, inner.top()),
+            egui::vec2(30.0, 30.0),
+        );
+        let response = ui
+            .add_enabled_ui(!view.loading, |ui| {
+                let response = ui.interact(
+                    edit_rect,
+                    ui.id().with("playlist-hero-edit"),
+                    Sense::click(),
+                );
+                if response.hovered() || response.has_focus() {
+                    ui.painter().rect_filled(edit_rect, 8.0, theme::SELECTED);
+                }
+                icons::paint(
+                    ui.painter(),
+                    edit_rect.shrink(5.0),
+                    Icon::Edit,
+                    if response.hovered() || response.has_focus() {
+                        ui.visuals().text_color()
+                    } else {
+                        theme::MUTED
+                    },
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        view.language
+                            .text("Редактировать плейлист", "Edit playlist"),
+                    )
+                });
+                response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(
+                        view.language
+                            .text("Редактировать плейлист", "Edit playlist"),
+                    )
+            })
+            .inner;
+        if response.clicked() {
+            action = Some(Action::EditPlaylist);
+        }
+    }
+    action
+}
+
+/// Releases retain the order VK supplies. No release is labelled "latest" just
+/// because it happens to be the first item in an unordered response.
+pub fn releases(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    language: Language,
+    albums: &[AlbumRef],
+) -> Option<Action> {
+    if albums.is_empty() {
+        return None;
+    }
+    ui.add_space(22.0);
+    theme::inset_heading(ui, |ui| {
+        ui.add(
+            egui::Label::new(
+                RichText::new(language.text("Релизы", "Releases"))
+                    .size(20.0)
+                    .family(theme::semibold()),
+            )
+            .selectable(false),
+        )
+    });
+    ui.add_space(8.0);
+    let columns = ((ui.available_width() + 14.0) / 174.0)
+        .floor()
+        .clamp(1.0, 5.0) as usize;
+    let width = ((ui.available_width() - 14.0 * columns.saturating_sub(1) as f32) / columns as f32)
+        .max(1.0);
+    let mut action = None;
+    for row in albums.chunks(columns) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            for album in row {
+                ui.push_id(("release", album.owner_id, album.id), |ui| {
+                    let art_size = (width - 24.0).clamp(1.0, 200.0);
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(width, art_size + 65.0), Sense::click());
+                    let fill = if response.hovered() || response.has_focus() {
+                        Color32::from_rgb(31, 38, 49)
+                    } else {
+                        theme::SURFACE
+                    };
+                    ui.painter().rect_filled(rect, 12.0, fill);
+                    if response.has_focus() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            12.0,
+                            Stroke::new(1.0, theme::ACCENT),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let art = egui::Rect::from_min_size(
+                        rect.min + egui::vec2((width - art_size) * 0.5, 12.0),
+                        egui::Vec2::splat(art_size),
+                    );
+                    artwork(ui, covers, art, album.cover_url.as_deref(), "release-art");
+                    let mut text = child(
+                        ui,
+                        "release-title",
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + 12.0, art.bottom() + 11.0),
+                            rect.max - egui::vec2(12.0, 6.0),
+                        ),
+                    );
+                    text.spacing_mut().item_spacing.y = 2.0;
+                    text.add(
+                        egui::Label::new(RichText::new(&album.title).family(theme::semibold()))
+                            .truncate()
+                            .selectable(false),
+                    );
+                    text.add(
+                        egui::Label::new(
+                            RichText::new(language.text("Альбом", "Album"))
+                                .small()
+                                .color(theme::MUTED),
+                        )
+                        .selectable(false),
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            &album.title,
+                        )
+                    });
+                    if response.clicked() {
+                        response.request_focus();
+                        action = Some(Action::OpenAlbum(album.clone()));
+                    }
+                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                });
+            }
+        });
+        ui.add_space(6.0);
+    }
+    action
+}
+
+fn child(ui: &mut egui::Ui, id: &'static str, rect: egui::Rect) -> egui::Ui {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id)
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_clip_rect(ui.clip_rect().intersect(rect));
+    child
+}
+
+fn artwork(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    rect: egui::Rect,
+    url: Option<&str>,
+    id: &'static str,
+) {
+    let mut image = child(ui, id, rect);
+    covers.show(&mut image, url, rect.width());
+}
+
+fn kicker(ui: &mut egui::Ui, text: &str) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .small()
+                .color(Color32::from_rgb(151, 181, 220)),
+        )
+        .selectable(false),
+    );
+}
+
+fn backdrop(color: Option<Color32>) -> (Color32, Color32) {
+    let Some(color) = color else {
+        return (Color32::from_rgb(26, 49, 79), Color32::from_rgb(20, 29, 43));
+    };
+    let tint = |weight: f32| {
+        let channel = |base, accent| {
+            (f32::from(base) * (1.0 - weight) + f32::from(accent) * weight).round() as u8
+        };
+        Color32::from_rgb(
+            channel(theme::BACKGROUND.r(), color.r()),
+            channel(theme::BACKGROUND.g(), color.g()),
+            channel(theme::BACKGROUND.b(), color.b()),
+        )
+    };
+    (tint(0.23), tint(0.07))
+}
+
+fn background(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
+    let (left, right) = backdrop(color);
+    for step in 0..32 {
+        let fraction = step as f32 / 31.0;
+        let channel = |left: u8, right: u8| {
+            (f32::from(left) + (f32::from(right) - f32::from(left)) * fraction).round() as u8
+        };
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + rect.width() * step as f32 / 32.0, rect.top()),
+            egui::pos2(
+                rect.left() + rect.width() * (step + 1) as f32 / 32.0,
+                rect.bottom(),
+            ),
+        );
+        painter
+            .with_clip_rect(painter.clip_rect().intersect(strip))
+            .rect_filled(
+                rect,
+                16.0,
+                Color32::from_rgb(
+                    channel(left.r(), right.r()),
+                    channel(left.g(), right.g()),
+                    channel(left.b(), right.b()),
+                ),
+            );
+    }
+}
+
+fn fade(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
+    let tint = color.map_or(Color32::from_rgb(22, 36, 57), |color| {
+        backdrop(Some(color)).0
+    });
+    for step in 0..32 {
+        let fraction = step as f32 / 31.0;
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + rect.width() * step as f32 / 32.0, rect.top()),
+            egui::pos2(
+                rect.left() + rect.width() * (step + 1) as f32 / 32.0,
+                rect.bottom(),
+            ),
+        );
+        let alpha = ((1.0 - fraction).powf(0.6) * 245.0).round() as u8;
+        painter
+            .with_clip_rect(painter.clip_rect().intersect(strip))
+            .rect_filled(
+                rect,
+                16.0,
+                Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), alpha),
+            );
+    }
+}
+
+fn controls(
+    ui: &mut egui::Ui,
+    language: Language,
+    track_count: usize,
+    loading: bool,
+    playing: bool,
+) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let label = if loading && track_count == 0 {
+            language.text("Загружаем…", "Loading…")
+        } else if playing {
+            language.text("Пауза", "Pause")
+        } else {
+            language.text("Слушать", "Listen")
+        };
+        let icon = if playing { Icon::Pause } else { Icon::Play };
+        let play = ui
+            .scope(|ui| {
+                ui.style_mut().visuals.widgets.inactive.bg_fill = theme::PRIMARY;
+                ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+                ui.style_mut().visuals.widgets.hovered.bg_fill = theme::ACCENT;
+                ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+                icons::button(ui, icon, label, track_count > 0)
+            })
+            .inner;
+        if play.clicked() {
+            action = Some(Action::Play);
+        }
+        let shuffle_label = language.text("Перемешать", "Shuffle");
+        let font = FontId::new(14.0, theme::semibold());
+        let galley =
+            ui.painter()
+                .layout_no_wrap(shuffle_label.into(), font, ui.visuals().text_color());
+        let width = galley.size().x + 50.0;
+        if ui.available_width() >= width {
+            let shuffle = ui
+                .add_enabled_ui(track_count > 1, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(width, 36.0), Sense::click());
+                    let visual = ui.style().interact(&response);
+                    ui.painter().rect(
+                        rect,
+                        8.0,
+                        visual.bg_fill,
+                        visual.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                    shuffle_icon(
+                        ui.painter(),
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(12.0, 9.0),
+                            egui::vec2(18.0, 18.0),
+                        ),
+                        visual.fg_stroke.color,
+                    );
+                    ui.painter().galley_with_override_text_color(
+                        rect.min + egui::vec2(36.0, (36.0 - galley.size().y) * 0.5),
+                        galley,
+                        visual.fg_stroke.color,
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            shuffle_label,
+                        )
+                    });
+                    response
+                })
+                .inner;
+            if shuffle.clicked() {
+                shuffle.request_focus();
+                action = Some(Action::Shuffle);
+            }
+        }
+    });
+    action
+}
+
+fn shuffle_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    icons::paint(painter, rect, Icon::Shuffle, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playlist_description_keeps_paragraphs_literal_text_and_wraps_inside_both_gutters() {
+        let description = "Первая строка описания.\n\nSecond paragraph with <b>literal markup</b> and a very long reference: https://example.test/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\nLast line.";
+        for width in [180.0, 320.0, 760.0] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut result = None;
+            for tick in 1..=3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 1100.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        playlist_description(ui, description);
+                    },
+                );
+                output.textures_delta.clear();
+                result = Some(output);
+            }
+            let output = result.unwrap();
+            let text = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == description => Some(text),
+                    _ => None,
+                })
+                .expect("Description is rendered as unchanged plain text");
+            assert!(
+                text.galley.rows.len() >= 5,
+                "Paragraph and explicit line breaks must remain"
+            );
+            let bounds = text.visual_bounding_rect();
+            assert!(bounds.left() >= 7.0, "Left gutter lost: {bounds:?}");
+            assert!(
+                bounds.right() <= width - 7.0,
+                "Description escaped the right gutter at {width}: {bounds:?}"
+            );
+            assert_eq!(text.galley.job.sections[0].format.font_id.size, 14.0);
+            assert_eq!(text.galley.job.sections[0].format.color, theme::MUTED);
+            assert!(output.viewport_output.values().all(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .all(|command| matches!(command, egui::ViewportCommand::SetTheme(_)))
+            }));
+        }
+    }
+
+    #[test]
+    fn missing_playlist_description_has_no_text_or_spacing() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for text in ["", " ", "\n\t\r\n"] {
+                let before = ui.cursor();
+                playlist_description(ui, text);
+                assert_eq!(ui.cursor(), before);
+            }
+        });
+        output.textures_delta.clear();
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| matches!(shape.shape, egui::Shape::Text(_)))
+        );
+    }
+
+    #[test]
+    fn playlist_creator_is_below_the_title_and_name_and_chevron_open_the_exact_owner() {
+        for language in [Language::Russian, Language::English] {
+            for owner in [42, -77] {
+                let context = egui::Context::default();
+                theme::install(&context);
+                let mut covers = CoverCache::new();
+                let creator = crate::web_audio::PlaylistCreator {
+                    owner_id: owner,
+                    name: "Cynthoni".into(),
+                };
+                let mut render = |tick, events| {
+                    let mut action = None;
+                    let mut output = context.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(700.0, 360.0),
+                            )),
+                            time: Some(f64::from(tick) * 0.1),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            action = playlist_header(
+                                ui,
+                                &mut covers,
+                                AlbumView {
+                                    language,
+                                    title: "Creator playlist",
+                                    artists: &[],
+                                    creator: Some(&creator),
+                                    image_url: None,
+                                    subtitle: "",
+                                    track_count: 2,
+                                    loading: false,
+                                    playing: false,
+                                    can_edit_playlist: false,
+                                },
+                            );
+                        },
+                    );
+                    output.textures_delta.clear();
+                    (output, action)
+                };
+                let mut output = render(1, Vec::new()).0;
+                for tick in 2..4 {
+                    output = render(tick, Vec::new()).0;
+                }
+                let find = |label: &str| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.text() == label => {
+                                Some(text.visual_bounding_rect())
+                            }
+                            _ => None,
+                        })
+                        .unwrap()
+                };
+                let title = find("Creator playlist");
+                let name = find("Cynthoni");
+                let arrow = find("›");
+                assert!(name.top() > title.bottom());
+                assert!(arrow.left() > name.right());
+                assert!((arrow.center().y - name.center().y).abs() < 4.0);
+                let creator_color = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == "Cynthoni" => {
+                            Some(text.galley.job.sections[0].format.color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(creator_color, theme::MUTED);
+                for (tick, target) in [(4, name.center()), (8, arrow.center())] {
+                    render(tick, pointer(target, true));
+                    let (_, action) = render(tick + 1, pointer(target, false));
+                    assert_eq!(action, Some(Action::OpenCreator(owner)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_playlist_without_verified_creator_does_not_display_artists_or_a_fake_creator_link() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let artist = ArtistRef {
+            id: "unrelated-artist".into(),
+            name: "Music artist is not the playlist creator".into(),
+        };
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            playlist_header(
+                ui,
+                &mut covers,
+                AlbumView {
+                    language: Language::English,
+                    title: "Playlist",
+                    artists: std::slice::from_ref(&artist),
+                    creator: None,
+                    image_url: None,
+                    subtitle: "",
+                    track_count: 1,
+                    loading: false,
+                    playing: false,
+                    can_edit_playlist: false,
+                },
+            );
+        });
+        output.textures_delta.clear();
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| matches!(&shape.shape,egui::Shape::Text(text)
+            if text.galley.text()=="›" || text.galley.text()==artist.name))
+        );
+    }
+
+    #[test]
+    fn playlist_header_has_its_own_kind_and_keeps_the_blue_play_action() {
+        for language in [Language::Russian, Language::English] {
+            let context = egui::Context::default();
+            theme::install(&context);
+            let mut covers = CoverCache::new();
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 360.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    playlist_header(
+                        ui,
+                        &mut covers,
+                        AlbumView {
+                            language,
+                            title: "Synthetic playlist",
+                            artists: &[],
+                            creator: None,
+                            image_url: None,
+                            subtitle: "3 tracks",
+                            track_count: 3,
+                            loading: false,
+                            playing: false,
+                            can_edit_playlist: false,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            let contains = |label: &str| {
+                output.shapes.iter().any(|shape| matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label))
+            };
+            assert!(contains(language.text("ПЛЕЙЛИСТ", "PLAYLIST")));
+            assert!(!contains(language.text("АЛЬБОМ", "ALBUM")));
+            assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Rect(rect) if rect.fill==theme::PRIMARY && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
+        }
+    }
+
+    #[test]
+    fn playlist_edit_pencil_is_inside_the_hero_and_never_appears_on_album_or_readonly_pages() {
+        for width in [330.0, 700.0] {
+            for (playlist, can_edit) in [(true, true), (true, false), (false, true)] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                let mut covers = CoverCache::new();
+                let mut tick = 0;
+                let mut action = None;
+                let mut render = |events| {
+                    tick += 1;
+                    let mut output = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 380.0))),
+                        time: Some(f64::from(tick) * 0.1), events, ..Default::default()
+                    }, |ui| {
+                        let view = AlbumView { language: Language::English, title: "A long playlist title that still must not cover its edit control", artists: &[], creator: None, image_url: None, subtitle: "", track_count: 2, loading: false, playing: false, can_edit_playlist: can_edit };
+                        action = if playlist { playlist_header(ui, &mut covers, view) } else { album_header(ui, &mut covers, view) };
+                    });
+                    output.textures_delta.clear();
+                    output
+                };
+                render(Vec::new());
+                render(Vec::new());
+                render(Vec::new());
+                let point = egui::pos2(width - 35.0, 35.0);
+                let hovered = render(vec![egui::Event::PointerMoved(point)]);
+                let edit_rect = hovered.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == theme::SELECTED
+                            && rect.rect.size() == egui::vec2(30.0, 30.0)
+                            && rect.rect.contains(point) =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                });
+                assert_eq!(edit_rect.is_some(), playlist && can_edit);
+                if let Some(rect) = edit_rect {
+                    assert!(
+                        (rect.top() - 20.0).abs() < 0.5
+                            && (width - rect.right() - 20.0).abs() < 0.5
+                    );
+                }
+                render(pointer(point, true));
+                render(pointer(point, false));
+                assert_eq!(
+                    action,
+                    (playlist && can_edit).then_some(Action::EditPlaylist)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn artwork_tints_both_headers_but_play_buttons_stay_blue() {
+        for color in [
+            Color32::from_rgb(220, 30, 30),
+            Color32::from_rgb(30, 220, 30),
+            Color32::from_gray(150),
+        ] {
+            for artist in [false, true] {
+                let context = egui::Context::default();
+                theme::install(&context);
+                let mut covers = CoverCache::new();
+                let url = "https://images.example.test/synthetic-header.jpg";
+                covers.seed_image_for_test(
+                    &context,
+                    url,
+                    180.0,
+                    egui::ColorImage::new([32, 32], vec![color; 32 * 32]),
+                );
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(720.0, 420.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if artist {
+                            artist_header(
+                                ui,
+                                &mut covers,
+                                ArtistView {
+                                    language: Language::English,
+                                    name: "Artist",
+                                    image_url: Some(url),
+                                    track_count: 3,
+                                    loading: false,
+                                    playing: false,
+                                },
+                            );
+                        } else {
+                            album_header(
+                                ui,
+                                &mut covers,
+                                AlbumView {
+                                    language: Language::English,
+                                    title: "Album",
+                                    artists: &[],
+                                    creator: None,
+                                    image_url: Some(url),
+                                    subtitle: "2026",
+                                    track_count: 3,
+                                    loading: false,
+                                    playing: false,
+                                    can_edit_playlist: false,
+                                },
+                            );
+                        }
+                    },
+                );
+                output.textures_delta.clear();
+                let backdrop = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect)
+                            if rect.rect.width() > 600.0 && rect.rect.height() > 220.0 =>
+                        {
+                            Some(rect.fill)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                if color.r() > color.g() {
+                    assert!(backdrop.r() > backdrop.g() + 20);
+                } else if color.g() > color.r() {
+                    assert!(backdrop.g() > backdrop.r() + 20);
+                } else {
+                    assert!(backdrop.b().abs_diff(backdrop.r()) <= 5);
+                }
+                assert!(
+                    backdrop.r().max(backdrop.g()).max(backdrop.b()) <= 75,
+                    "Header must stay dark enough for its text"
+                );
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(rect) if rect.fill==theme::PRIMARY && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
+            }
+        }
+    }
+
+    fn pointer(position: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn links_frame(
+        context: &egui::Context,
+        artists: &[ArtistRef],
+        fallback: &str,
+        width: f32,
+        tick: u32,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<ArtistRef>, f32) {
+        let mut action = None;
+        let mut height = 0.0;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 100.0),
+                )),
+                time: Some(f64::from(tick) * 0.1),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let top = ui.cursor().top();
+                action = artist_links(ui, artists, fallback);
+                height = ui.cursor().top() - top;
+            },
+        );
+        output.textures_delta.clear();
+        (output, action, height)
+    }
+
+    #[test]
+    fn each_canonical_artist_is_an_independent_target_and_names_are_not_split() {
+        let artists = [
+            ArtistRef {
+                id: "artist-1".into(),
+                name: "Name, With Comma".into(),
+            },
+            ArtistRef {
+                id: "artist-2".into(),
+                name: "Second & Artist".into(),
+            },
+        ];
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut output = links_frame(&context, &artists, "Raw display", 600.0, 1, vec![]).0;
+        for tick in 2..4 {
+            output = links_frame(&context, &artists, "Raw display", 600.0, tick, vec![]).0;
+        }
+        for (index, artist) in artists.iter().enumerate() {
+            let target = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == artist.name => {
+                        Some(text.visual_bounding_rect().center())
+                    }
+                    _ => None,
+                })
+                .expect("Artist name must be a separate label");
+            let tick = 4 + index as u32 * 2;
+            links_frame(
+                &context,
+                &artists,
+                "Raw display",
+                600.0,
+                tick,
+                pointer(target, true),
+            );
+            let (_, action, _) = links_frame(
+                &context,
+                &artists,
+                "Raw display",
+                600.0,
+                tick + 1,
+                pointer(target, false),
+            );
+            assert_eq!(action, Some(artist.clone()));
+        }
+    }
+
+    #[test]
+    fn larger_artist_caption_preserves_each_link_and_fits_its_measured_height() {
+        let artists = [
+            ArtistRef {
+                id: "first".into(),
+                name: "First artist".into(),
+            },
+            ArtistRef {
+                id: "second".into(),
+                name: "Second & Artist".into(),
+            },
+        ];
+        let context = egui::Context::default();
+        theme::install(&context);
+        let font = FontId::new(14.0, egui::FontFamily::Proportional);
+        let mut tick = 0;
+        let mut render = |events| {
+            tick += 1;
+            let mut action = None;
+            let mut measured = None;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 100.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let top = ui.cursor().top();
+                    action = artist_links_with_font(ui, &artists, "Raw display", font.clone());
+                    measured = Some((
+                        top,
+                        ui.cursor().top() - top,
+                        ui.fonts_mut(|fonts| fonts.row_height(&font)).max(16.0),
+                    ));
+                },
+            );
+            output.textures_delta.clear();
+            (output, action, measured.unwrap())
+        };
+        let mut output = render(Vec::new()).0;
+        for _ in 0..3 {
+            output = render(Vec::new()).0;
+        }
+        for artist in &artists {
+            let label = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == artist.name => Some(text),
+                    _ => None,
+                })
+                .expect("Each canonical artist keeps a separate larger label");
+            assert!(
+                label
+                    .galley
+                    .job
+                    .sections
+                    .iter()
+                    .all(|section| section.format.font_id.size == 14.0)
+            );
+            let target = label.visual_bounding_rect().center();
+            render(pointer(target, true));
+            let (next, action, (top, height, line_height)) = render(pointer(target, false));
+            assert_eq!(action, Some(artist.clone()));
+            assert_eq!(height, line_height + 8.0);
+            for shape in &next.shapes {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && artists
+                        .iter()
+                        .any(|artist| artist.name == text.galley.text())
+                {
+                    let bounds = text.visual_bounding_rect();
+                    assert!(
+                        bounds.top() >= top - 0.5 && bounds.bottom() <= top + line_height + 0.5
+                    );
+                }
+            }
+            output = next;
+        }
+    }
+
+    #[test]
+    fn narrow_artist_caption_stays_one_line_without_changing_row_height() {
+        let artists = [ArtistRef {
+            id: "long-name".into(),
+            name: "Очень длинное имя исполнителя / A very long artist name ".repeat(6),
+        }];
+        let context = egui::Context::default();
+        theme::install(&context);
+        for width in [28.0, 90.0, 270.0] {
+            let (_, _, height) = links_frame(&context, &artists, "", width, 1, vec![]);
+            assert_eq!(height, 24.0, "16px caption plus ordinary 8px item spacing");
+        }
+    }
+
+    #[test]
+    fn legacy_artist_fallback_keeps_the_entire_display_name() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let fallback = "Artist, With Comma & Ampersand";
+        let mut output = links_frame(&context, &[], fallback, 600.0, 1, vec![]).0;
+        for tick in 2..4 {
+            output = links_frame(&context, &[], fallback, 600.0, tick, vec![]).0;
+        }
+        let target = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == fallback => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        links_frame(&context, &[], fallback, 600.0, 4, pointer(target, true));
+        let (_, action, _) = links_frame(&context, &[], fallback, 600.0, 5, pointer(target, false));
+        assert_eq!(
+            action,
+            Some(ArtistRef {
+                id: String::new(),
+                name: fallback.into()
+            })
+        );
+    }
+
+    #[test]
+    fn detail_headers_keep_long_titles_and_controls_within_their_surfaces() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let artists = [ArtistRef {
+            id: "id".into(),
+            name: "Artist".into(),
+        }];
+        let mut covers = CoverCache::new();
+        for language in [Language::Russian, Language::English] {
+            for width in [320.0, 520.0, 940.0] {
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 1200.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        artist_header(
+                            ui,
+                            &mut covers,
+                            ArtistView {
+                                language,
+                                name: "An artist with a very long displayed name "
+                                    .repeat(4)
+                                    .as_str(),
+                                image_url: None,
+                                track_count: 10,
+                                loading: false,
+                                playing: false,
+                            },
+                        );
+                        album_header(
+                            ui,
+                            &mut covers,
+                            AlbumView {
+                                language,
+                                title: "An album with a very long title ".repeat(4).as_str(),
+                                artists: &artists,
+                                creator: None,
+                                image_url: None,
+                                subtitle: "2026 · 10 tracks",
+                                track_count: 10,
+                                loading: false,
+                                playing: false,
+                                can_edit_playlist: false,
+                            },
+                        );
+                    },
+                );
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        let bounds = text.visual_bounding_rect();
+                        assert!(
+                            bounds.left() >= -1.0 && bounds.right() <= width + 1.0,
+                            "Text exceeds width {width}: {:?}: {bounds:?}",
+                            text.galley.text()
+                        );
+                        assert!(
+                            shape.clip_rect.contains_rect(bounds),
+                            "Text clipped at width {width}: {:?}: {bounds:?} in {:?}",
+                            text.galley.text(),
+                            shape.clip_rect
+                        );
+                    }
+                }
+                output.textures_delta.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn release_card_opens_the_supplied_album_identity() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let album = AlbumRef {
+            id: -41,
+            owner_id: 17,
+            title: "A supplied release".into(),
+            access_key: Some("opaque-access".into()),
+            cover_url: None,
+        };
+        let mut frame = |tick: u32, events: Vec<egui::Event>| {
+            let mut action = None;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 600.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action = releases(
+                        ui,
+                        &mut covers,
+                        Language::Russian,
+                        std::slice::from_ref(&album),
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            (output, action)
+        };
+        let mut output = frame(1, vec![]).0;
+        for tick in 2..4 {
+            output = frame(tick, vec![]).0;
+        }
+        let target = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == album.title => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        frame(4, pointer(target, true));
+        let (_, action) = frame(5, pointer(target, false));
+        assert_eq!(action, Some(Action::OpenAlbum(album)));
+    }
+}

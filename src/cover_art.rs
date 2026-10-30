@@ -1,0 +1,1072 @@
+//! Visible artwork uses small, persistent thumbnails and bounded background
+//! jobs. Disk reads, image decoding and HTTP never run in the UI thread.
+
+use std::{
+    collections::HashMap,
+    io::{Cursor, Read},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+use eframe::egui::{self, Color32, ColorImage, Response, Sense, TextureHandle, TextureOptions};
+use image::{ImageFormat, ImageReader, Limits, imageops::FilterType};
+use reqwest::{Url, blocking::Client, redirect::Policy};
+
+use crate::{
+    cover_cache::DiskCache,
+    icons::{self, Icon},
+    repaint_target::RepaintTarget,
+    theme,
+};
+
+const WORKERS: usize = 3;
+const MAX_PENDING: usize = 48;
+const MAX_TEXTURES: usize = 128;
+const MAX_ENTRIES: usize = 256;
+const MAX_BODY: u64 = 3 * 1024 * 1024;
+const MAX_DECODE: u64 = 32 * 1024 * 1024;
+const MAX_DIMENSION: u32 = 4096;
+const TEXTURE_SIZE: u32 = 256;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct Key {
+    url: String,
+    edge: u32,
+}
+
+struct Job {
+    key: Key,
+    context: RepaintTarget,
+}
+
+struct Reply {
+    key: Key,
+    image: Option<ColorImage>,
+    color: Option<Color32>,
+}
+
+enum State {
+    Pending,
+    Ready(TextureHandle, Option<Color32>, Arc<ColorImage>),
+    Failed,
+}
+
+struct Entry {
+    state: State,
+    touched: u64,
+}
+
+pub struct CoverCache {
+    entries: HashMap<Key, Entry>,
+    jobs: Option<SyncSender<Job>>,
+    replies: Receiver<Reply>,
+    canceled: Arc<AtomicBool>,
+    workers: Vec<JoinHandle<()>>,
+    pending: usize,
+    clock: u64,
+    repaint_target: RepaintTarget,
+}
+
+impl CoverCache {
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::sync_channel::<Job>(MAX_PENDING);
+        let (reply_sender, replies) = mpsc::sync_channel::<Reply>(MAX_PENDING);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let canceled = Arc::new(AtomicBool::new(false));
+        // Synthetic app/UI tests must never read the user's files or contact
+        // arbitrary artwork URLs supplied by fixtures.
+        let enabled = !cfg!(test);
+        let client = enabled.then(http_client).and_then(Result::ok);
+        let disk = Arc::new(DiskCache::new());
+        let mut workers = Vec::new();
+        if enabled {
+            for index in 0..WORKERS {
+                let receiver = receiver.clone();
+                let replies = reply_sender.clone();
+                let canceled = canceled.clone();
+                let client = client.clone();
+                let disk = disk.clone();
+                if let Ok(worker) = thread::Builder::new()
+                    .name(format!("vk-cover-{index}"))
+                    .spawn(move || worker(receiver, replies, canceled, client, disk))
+                {
+                    workers.push(worker);
+                }
+            }
+        }
+        Self {
+            entries: HashMap::new(),
+            jobs: if workers.is_empty() {
+                None
+            } else {
+                Some(sender)
+            },
+            replies,
+            canceled,
+            workers,
+            pending: 0,
+            clock: 0,
+            repaint_target: RepaintTarget::default(),
+        }
+    }
+
+    fn receive(&mut self, context: &egui::Context) {
+        while let Ok(reply) = self.replies.try_recv() {
+            self.pending = self.pending.saturating_sub(1);
+            if !self
+                .entries
+                .get(&reply.key)
+                .is_some_and(|entry| matches!(entry.state, State::Pending))
+            {
+                continue;
+            }
+            let state = if let Some(image) = reply.image {
+                if self
+                    .entries
+                    .values()
+                    .filter(|entry| matches!(entry.state, State::Ready(..)))
+                    .count()
+                    >= MAX_TEXTURES
+                {
+                    self.evict_oldest(true);
+                }
+                let image = Arc::new(image);
+                State::Ready(
+                    context.load_texture("vk-album-cover", image.clone(), TextureOptions::LINEAR),
+                    reply.color,
+                    image,
+                )
+            } else {
+                State::Failed
+            };
+            if let Some(entry) = self.entries.get_mut(&reply.key) {
+                entry.state = state;
+            }
+        }
+    }
+
+    /// Re-upload resident thumbnails after the previous native renderer has
+    /// retired. Pixels share the same bounded lifetime as their cached texture;
+    /// workers, disk entries and pending requests remain untouched.
+    pub fn rebind_context(&mut self, context: &egui::Context) {
+        self.repaint_target.set_context(context);
+        for entry in self.entries.values_mut() {
+            if let State::Ready(texture, _, image) = &mut entry.state {
+                *texture =
+                    context.load_texture("vk-album-cover", image.clone(), TextureOptions::LINEAR);
+            }
+        }
+        self.receive(context);
+    }
+
+    fn evict_oldest(&mut self, textures_only: bool) -> bool {
+        let oldest = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| match entry.state {
+                State::Pending => false,
+                State::Ready(..) => true,
+                State::Failed => !textures_only,
+            })
+            .min_by_key(|(_, entry)| entry.touched)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest {
+            self.entries.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn request(&mut self, context: &egui::Context, key: Key) {
+        if self.entries.contains_key(&key) || self.pending >= MAX_PENDING {
+            return;
+        }
+        if self.entries.len() >= MAX_ENTRIES && !self.evict_oldest(false) {
+            return;
+        }
+        let valid =
+            key.url.len() <= 16_384 && Url::parse(&key.url).is_ok_and(|url| valid_url(&url));
+        let state = if valid {
+            match &self.jobs {
+                Some(jobs) => match jobs.try_send(Job {
+                    key: key.clone(),
+                    context: self.repaint_target.with_context(context),
+                }) {
+                    Ok(()) => {
+                        self.pending += 1;
+                        State::Pending
+                    }
+                    Err(TrySendError::Full(_)) => return,
+                    Err(TrySendError::Disconnected(_)) => State::Failed,
+                },
+                None => State::Failed,
+            }
+        } else {
+            State::Failed
+        };
+        self.entries.insert(
+            key,
+            Entry {
+                state,
+                touched: self.clock,
+            },
+        );
+    }
+
+    /// Allocates a hover-only square: the surrounding track row keeps its click
+    /// behavior. Missing, pending and failed covers share a quiet placeholder.
+    pub fn show(&mut self, ui: &mut egui::Ui, url: Option<&str>, size: f32) -> Response {
+        self.receive(ui.ctx());
+        self.clock = self.clock.wrapping_add(1);
+        let size = size.clamp(1.0, 512.0);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return response;
+        }
+        if let Some(url) = url.filter(|url| !url.is_empty()) {
+            let key = Key {
+                url: url.to_owned(),
+                edge: texture_edge(size),
+            };
+            self.request(ui.ctx(), key.clone());
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.touched = self.clock;
+                if let State::Ready(texture, _, _) = &entry.state {
+                    egui::Image::from_texture(texture)
+                        .corner_radius(6)
+                        .show_loading_spinner(false)
+                        .paint_at(ui, rect);
+                    return response;
+                }
+            }
+        }
+        ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+        icons::paint(
+            ui.painter(),
+            rect.shrink(size * 0.27),
+            Icon::Headphones,
+            theme::MUTED,
+        );
+        response
+    }
+
+    /// Uses the same thumbnail job as artwork rendering. Its representative
+    /// color is already computed by the worker, including on a disk-cache hit.
+    pub fn header_color(
+        &mut self,
+        context: &egui::Context,
+        url: Option<&str>,
+        size: f32,
+    ) -> Option<Color32> {
+        self.receive(context);
+        self.clock = self.clock.wrapping_add(1);
+        let url = url.filter(|url| !url.is_empty())?;
+        let key = Key {
+            url: url.to_owned(),
+            edge: texture_edge(size),
+        };
+        self.request(context, key.clone());
+        let entry = self.entries.get_mut(&key)?;
+        entry.touched = self.clock;
+        match &entry.state {
+            State::Ready(_, color, _) => *color,
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_image_for_test(
+        &mut self,
+        context: &egui::Context,
+        url: &str,
+        size: f32,
+        image: ColorImage,
+    ) {
+        let color = representative_color(&image);
+        let image = Arc::new(image);
+        let texture =
+            context.load_texture("synthetic-cover", image.clone(), TextureOptions::LINEAR);
+        self.entries.insert(
+            Key {
+                url: url.to_owned(),
+                edge: texture_edge(size),
+            },
+            Entry {
+                state: State::Ready(texture, color, image),
+                touched: self.clock,
+            },
+        );
+    }
+}
+
+/// Paints an account button without doing any file or network work. The caller
+/// supplies a cached square texture, translated tooltip and click action.
+pub(crate) fn avatar_button(
+    ui: &mut egui::Ui,
+    texture: Option<&TextureHandle>,
+    initials: &str,
+    size: f32,
+) -> Response {
+    let size = size.clamp(16.0, 128.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Account")
+    });
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let visuals = ui.style().interact(&response);
+    let fill = if response.is_pointer_button_down_on() {
+        theme::SELECTED
+    } else {
+        visuals.bg_fill
+    };
+    ui.painter().circle_filled(rect.center(), size * 0.5, fill);
+    if let Some(texture) = texture {
+        // Decoded images are square; a half-width corner radius produces a
+        // circular texture mask rather than an overlay hiding square corners.
+        egui::Image::from_texture(texture)
+            .corner_radius((size * 0.5).ceil() as u8)
+            .show_loading_spinner(false)
+            .paint_at(ui, rect);
+    } else {
+        let initials: String = initials
+            .chars()
+            .filter(|character| !character.is_control() && !character.is_whitespace())
+            .flat_map(char::to_uppercase)
+            .take(2)
+            .collect();
+        if initials.is_empty() {
+            paint_account_outline(ui.painter(), rect, visuals.fg_stroke.color);
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initials,
+                egui::FontId::new(size * 0.36, theme::semibold()),
+                visuals.fg_stroke.color,
+            );
+        }
+    }
+    let stroke = if response.has_focus() {
+        egui::Stroke::new(2.0, theme::ACCENT)
+    } else if response.hovered() {
+        egui::Stroke::new(1.5, theme::ACCENT)
+    } else {
+        visuals.bg_stroke
+    };
+    ui.painter()
+        .circle_stroke(rect.center(), (size - stroke.width) * 0.5, stroke);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_account_outline(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    icons::paint(
+        painter,
+        rect.shrink(rect.width() * 0.16),
+        Icon::Account,
+        color,
+    );
+}
+
+impl Drop for CoverCache {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+        self.jobs = None;
+        // Active downloads have an eight-second timeout. Detaching avoids
+        // blocking window close; cancellation prevents queued work from running.
+        self.workers.clear();
+    }
+}
+
+fn worker(
+    jobs: Arc<Mutex<Receiver<Job>>>,
+    replies: SyncSender<Reply>,
+    canceled: Arc<AtomicBool>,
+    client: Option<Client>,
+    disk: Arc<DiskCache>,
+) {
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            break;
+        }
+        let job = match jobs.lock() {
+            Ok(receiver) => match receiver.recv() {
+                Ok(job) => job,
+                Err(_) => break,
+            },
+            Err(_) => break,
+        };
+        if canceled.load(Ordering::Acquire) {
+            break;
+        }
+        let image = load_cover(&disk, &job.key.url, job.key.edge, || {
+            fetch_sized(client.as_ref().ok_or(())?, &job.key.url, job.key.edge)
+        })
+        .ok();
+        let color = image.as_ref().and_then(representative_color);
+        if canceled.load(Ordering::Acquire) {
+            break;
+        }
+        if replies
+            .send(Reply {
+                key: job.key,
+                image,
+                color,
+            })
+            .is_err()
+        {
+            break;
+        }
+        job.context.request_repaint();
+    }
+}
+
+/// Samples at most 32×32 pixels. Nearby hues are grouped so photograph shading
+/// does not lose to a few identical bright pixels; monochrome art stays neutral.
+fn representative_color(image: &ColorImage) -> Option<Color32> {
+    #[derive(Clone, Copy, Default)]
+    struct Bin {
+        weight: u32,
+        red: u32,
+        green: u32,
+        blue: u32,
+    }
+    let [width, height] = image.size;
+    if width == 0 || height == 0 || width.checked_mul(height)? > image.pixels.len() {
+        return None;
+    }
+    let mut bins = [Bin::default(); 12];
+    let mut visible = 0_u32;
+    let mut colored = 0_u32;
+    let mut luminance = 0_u64;
+    let columns = width.min(32);
+    let rows = height.min(32);
+    for row in 0..rows {
+        for column in 0..columns {
+            let x = ((column * 2 + 1) * width / (columns * 2)).min(width - 1);
+            let y = ((row * 2 + 1) * height / (rows * 2)).min(height - 1);
+            let [red, green, blue, alpha] = image.pixels[y * width + x].to_srgba_unmultiplied();
+            if alpha < 128 {
+                continue;
+            }
+            let light = (u32::from(red) * 54 + u32::from(green) * 183 + u32::from(blue) * 19) / 256;
+            visible += 1;
+            luminance += u64::from(light);
+            let high = red.max(green).max(blue);
+            let low = red.min(green).min(blue);
+            let chroma = high - low;
+            if light < 12 || high < 48 || chroma < 24 {
+                continue;
+            }
+            colored += 1;
+            let delta = f32::from(chroma);
+            let hue = if high == red {
+                (f32::from(green) - f32::from(blue)) / delta
+            } else if high == green {
+                2.0 + (f32::from(blue) - f32::from(red)) / delta
+            } else {
+                4.0 + (f32::from(red) - f32::from(green)) / delta
+            };
+            let index = ((hue * 2.0).rem_euclid(12.0).floor() as usize).min(11);
+            let weight = u32::from(chroma) + 32;
+            let bin = &mut bins[index];
+            bin.weight += weight;
+            bin.red += u32::from(red) * weight;
+            bin.green += u32::from(green) * weight;
+            bin.blue += u32::from(blue) * weight;
+        }
+    }
+    if visible == 0 {
+        return None;
+    }
+    if colored < (visible / 50).max(1) {
+        return Some(Color32::from_gray((luminance / u64::from(visible)) as u8));
+    }
+    let mut winner = Bin::default();
+    for index in 0..bins.len() {
+        let mut combined = Bin::default();
+        for neighboring in [(index + 11) % 12, index, (index + 1) % 12] {
+            let bin = bins[neighboring];
+            combined.weight += bin.weight;
+            combined.red += bin.red;
+            combined.green += bin.green;
+            combined.blue += bin.blue;
+        }
+        if combined.weight > winner.weight {
+            winner = combined;
+        }
+    }
+    Some(Color32::from_rgb(
+        (winner.red / winner.weight) as u8,
+        (winner.green / winner.weight) as u8,
+        (winner.blue / winner.weight) as u8,
+    ))
+}
+
+fn valid_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(|host| {
+            host.contains('.')
+                && host != "localhost"
+                && ![".localhost", ".local", ".internal", ".lan"]
+                    .iter()
+                    .any(|suffix| host.ends_with(suffix))
+                && host.parse::<std::net::IpAddr>().is_err()
+        })
+}
+
+pub(crate) fn http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(4))
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 || !valid_url(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .user_agent(concat!("vk-fast/", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
+/// Headless diagnostic reports only success; response bytes and URLs are never
+/// printed. Uses the exact same bounded download and decoder as the UI.
+pub(crate) fn check(value: &str) -> bool {
+    http_client().is_ok_and(|client| fetch(&client, value).is_ok())
+}
+
+pub(crate) fn fetch(client: &Client, value: &str) -> Result<ColorImage, ()> {
+    fetch_sized(client, value, TEXTURE_SIZE)
+}
+
+fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()> {
+    if value.len() > 16_384 {
+        return Err(());
+    }
+    let url = Url::parse(value).map_err(|_| ())?;
+    if !valid_url(&url) {
+        return Err(());
+    }
+    let response = client.get(url).send().map_err(|_| ())?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_BODY)
+    {
+        return Err(());
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_BODY + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() as u64 > MAX_BODY {
+        return Err(());
+    }
+    decode_sized(&bytes, edge)
+}
+
+pub(crate) fn decode(bytes: &[u8]) -> Result<ColorImage, ()> {
+    decode_sized(bytes, TEXTURE_SIZE)
+}
+
+fn decode_sized(bytes: &[u8], edge: u32) -> Result<ColorImage, ()> {
+    if bytes.len() as u64 > MAX_BODY {
+        return Err(());
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    if !matches!(
+        reader.format(),
+        Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP)
+    ) {
+        return Err(());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DIMENSION);
+    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|_| ())?;
+    if image.width() == 0 || image.height() == 0 {
+        return Err(());
+    }
+    let size = image
+        .width()
+        .min(image.height())
+        .min(edge.clamp(1, TEXTURE_SIZE));
+    let image = image
+        .resize_to_fill(size, size, FilterType::Triangle)
+        .into_rgba8();
+    Ok(ColorImage::from_rgba_unmultiplied(
+        [size as usize, size as usize],
+        image.as_raw(),
+    ))
+}
+
+fn texture_edge(size: f32) -> u32 {
+    if size <= 64.0 {
+        96
+    } else if size <= 132.0 {
+        160
+    } else {
+        256
+    }
+}
+
+fn load_cover(
+    disk: &DiskCache,
+    url: &str,
+    edge: u32,
+    fetcher: impl FnOnce() -> Result<ColorImage, ()>,
+) -> Result<ColorImage, ()> {
+    // A larger existing thumbnail satisfies a smaller view without HTTP.
+    for candidate in [96, 160, 256]
+        .into_iter()
+        .filter(|candidate| *candidate >= edge)
+    {
+        if let Ok(bytes) = disk.load(url, candidate) {
+            if let Ok(image) = decode_sized(&bytes, edge) {
+                return Ok(image);
+            }
+            disk.remove(url, candidate);
+        }
+    }
+    match fetcher() {
+        Ok(image) => {
+            if let Ok(bytes) = jpeg(&image) {
+                let _ = disk.save(url, edge, &bytes);
+            }
+            Ok(image)
+        }
+        Err(()) => {
+            // A cached small cover remains useful when a bigger view is opened
+            // offline or a CDN temporarily rejects its signed URL.
+            for candidate in [160, 96].into_iter().filter(|candidate| *candidate < edge) {
+                if let Ok(bytes) = disk.load(url, candidate)
+                    && let Ok(image) = decode_sized(&bytes, edge)
+                {
+                    return Ok(image);
+                }
+            }
+            Err(())
+        }
+    }
+}
+
+fn jpeg(image: &ColorImage) -> Result<Vec<u8>, ()> {
+    let [width, height] = image.size;
+    if width == 0
+        || height == 0
+        || width > TEXTURE_SIZE as usize
+        || height > TEXTURE_SIZE as usize
+        || image.pixels.len() != width * height
+    {
+        return Err(());
+    }
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    for pixel in &image.pixels {
+        let [r, g, b, alpha] = pixel.to_srgba_unmultiplied();
+        let alpha = u32::from(alpha);
+        for (channel, background) in [(r, 23_u32), (g, 27_u32), (b, 33_u32)] {
+            rgb.push(((u32::from(channel) * alpha + background * (255 - alpha)) / 255) as u8);
+        }
+    }
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 68)
+        .encode(
+            &rgb,
+            width as u32,
+            height as u32,
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|_| ())?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artwork_palette_recognizes_dominant_hues_and_ignores_bright_outliers() {
+        for color in [
+            Color32::from_rgb(220, 30, 30),
+            Color32::from_rgb(30, 220, 30),
+            Color32::from_rgb(0, 0, 255),
+            Color32::from_rgb(255, 255, 0),
+        ] {
+            let mut pixels = vec![color; 32 * 32];
+            for pixel in pixels.iter_mut().take(80) {
+                *pixel = Color32::WHITE;
+            }
+            for pixel in pixels.iter_mut().skip(80).take(8) {
+                *pixel = Color32::from_rgb(220, 30, 220);
+            }
+            let actual = representative_color(&ColorImage::new([32, 32], pixels)).unwrap();
+            assert!(
+                actual.r().abs_diff(color.r()) <= 3
+                    && actual.g().abs_diff(color.g()) <= 3
+                    && actual.b().abs_diff(color.b()) <= 3
+            );
+        }
+    }
+
+    #[test]
+    fn monochrome_art_stays_neutral_and_transparent_images_have_no_color() {
+        let mut image = ColorImage::new([32, 32], vec![Color32::from_gray(150); 32 * 32]);
+        image.pixels[0] = Color32::from_rgb(240, 20, 20);
+        let gray = representative_color(&image).unwrap();
+        assert_eq!(gray.r(), gray.g());
+        assert_eq!(gray.g(), gray.b());
+        assert!((148..=150).contains(&gray.r()));
+        assert_eq!(
+            representative_color(&ColorImage::new([1, 1], vec![Color32::TRANSPARENT])),
+            None
+        );
+        assert_eq!(
+            representative_color(&ColorImage::new(
+                [1, 1],
+                vec![Color32::from_rgb(10, 90, 180)]
+            )),
+            Some(Color32::from_rgb(10, 90, 180))
+        );
+    }
+
+    #[test]
+    fn header_color_reuses_the_same_ready_thumbnail_without_new_jobs() {
+        let context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let url = "https://images.example.test/synthetic.jpg";
+        let color = Color32::from_rgb(180, 50, 35);
+        cache.seed_image_for_test(
+            &context,
+            url,
+            180.0,
+            ColorImage::new([32, 32], vec![color; 32 * 32]),
+        );
+        assert_eq!(cache.header_color(&context, Some(url), 180.0), Some(color));
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            cache.show(ui, Some(url), 180.0);
+        });
+        output.textures_delta.clear();
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.pending, 0);
+    }
+
+    #[test]
+    fn rebind_reuses_pixels_and_palette_and_receives_pending_covers_in_the_new_context() {
+        let old_context = egui::Context::default();
+        let new_context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let late_job = cache.repaint_target.with_context(&old_context);
+        old_context.request_repaint();
+        let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = notifications.clone();
+        new_context.set_request_repaint_callback(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        let url = "https://images.example.test/resident.jpg";
+        let color = Color32::from_rgb(120, 60, 35);
+        cache.seed_image_for_test(
+            &old_context,
+            url,
+            180.0,
+            ColorImage::filled([32, 32], color),
+        );
+        let resident = Key {
+            url: url.into(),
+            edge: texture_edge(180.0),
+        };
+        let (old_id, pixels) = match &cache.entries[&resident].state {
+            State::Ready(texture, _, pixels) => (texture.id(), Arc::downgrade(pixels)),
+            _ => unreachable!(),
+        };
+        // Mimic a reply completing while the old native renderer is retiring.
+        let pending = Key {
+            url: "https://images.example.test/pending.jpg".into(),
+            edge: 96,
+        };
+        cache.entries.insert(
+            pending.clone(),
+            Entry {
+                state: State::Pending,
+                touched: 0,
+            },
+        );
+        cache.pending = 1;
+        let (sender, replies) = mpsc::sync_channel(1);
+        cache.replies = replies;
+        sender
+            .send(Reply {
+                key: pending.clone(),
+                image: Some(ColorImage::filled([96, 96], Color32::BLUE)),
+                color: Some(Color32::BLUE),
+            })
+            .unwrap();
+        cache.rebind_context(&new_context);
+        late_job.request_repaint();
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        assert!(old_context.tex_manager().read().meta(old_id).is_none());
+        let State::Ready(texture, palette, rebound_pixels) = &cache.entries[&resident].state else {
+            panic!("Resident cover disappeared")
+        };
+        assert_eq!(*palette, Some(color));
+        assert!(Arc::ptr_eq(&pixels.upgrade().unwrap(), rebound_pixels));
+        assert!(
+            new_context
+                .tex_manager()
+                .read()
+                .meta(texture.id())
+                .is_some()
+        );
+        assert!(matches!(cache.entries[&pending].state, State::Ready(..)));
+        assert_eq!(cache.pending, 0);
+        assert!(!cache.canceled.load(Ordering::Acquire));
+        assert!(
+            cache.jobs.is_none() && cache.workers.is_empty(),
+            "No fetch/disk worker is needed to rebind ready pixels"
+        );
+        let mut uploaded = new_context.tex_manager().write().take_delta();
+        assert!(uploaded.set.get(&texture.id()).is_some_and(|images| matches!(&images[0].image,egui::ImageData::Color(image) if Arc::ptr_eq(image,rebound_pixels))));
+        uploaded.clear();
+        old_context.tex_manager().write().take_delta().clear();
+        drop(cache);
+        new_context.tex_manager().write().take_delta().clear();
+    }
+
+    #[test]
+    fn avatar_masks_the_texture_and_keeps_button_clicks() {
+        fn circular_texture(shape: &egui::Shape, texture: egui::TextureId) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => {
+                    rect.brush
+                        .as_ref()
+                        .is_some_and(|brush| brush.fill_texture_id == texture)
+                        && rect.corner_radius == egui::CornerRadius::same(19)
+                        && rect.rect.size() == egui::vec2(38.0, 38.0)
+                }
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| circular_texture(shape, texture))
+                }
+                _ => false,
+            }
+        }
+        let context = egui::Context::default();
+        theme::install(&context);
+        let texture = context.load_texture(
+            "synthetic-avatar",
+            ColorImage::filled([2, 2], egui::Color32::WHITE),
+            TextureOptions::LINEAR,
+        );
+        let texture_id = texture.id();
+        let mut target = egui::Pos2::ZERO;
+        let mut clicked = false;
+        for frame in 0..4 {
+            let mut events = Vec::new();
+            if frame >= 2 {
+                events.push(egui::Event::PointerMoved(target));
+                events.push(egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed: frame == 2,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(200.0, 100.0),
+                    )),
+                    time: Some(f64::from(frame) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let response = avatar_button(ui, Some(&texture), "AB", 38.0);
+                    target = response.rect.center();
+                    clicked |= response.clicked();
+                },
+            );
+            output.textures_delta.clear();
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|shape| circular_texture(&shape.shape, texture_id))
+            );
+        }
+        assert!(clicked);
+    }
+
+    #[test]
+    fn cover_requests_allow_only_public_https_without_credentials() {
+        for value in [
+            "http://example.com/a.jpg",
+            "file:///tmp/a.jpg",
+            "https://localhost/a.jpg",
+            "https://127.0.0.1/a.jpg",
+            "https://[::1]/a.jpg",
+            "https://album.local/a.jpg",
+            "https://user:secret@example.com/a.jpg",
+            "https://example.com:8443/a.jpg",
+        ] {
+            assert!(
+                !Url::parse(value).is_ok_and(|url| valid_url(&url)),
+                "{value}"
+            );
+        }
+        assert!(valid_url(
+            &Url::parse("https://sun9-1.userapi.com/a.jpg?signature=synthetic").unwrap()
+        ));
+    }
+
+    #[test]
+    fn decodes_small_art_but_rejects_invalid_and_oversized_input() {
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([20, 40, 80, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let decoded = decode(bytes.get_ref()).unwrap();
+        assert_eq!(decoded.size, [1, 1]);
+        assert_eq!(decoded.pixels[0], egui::Color32::from_rgb(20, 40, 80));
+        assert!(decode(b"<html>not an image</html>").is_err());
+        assert!(decode(&vec![0; MAX_BODY as usize + 1]).is_err());
+        let oversized = image::RgbaImage::new(MAX_DIMENSION + 1, 1);
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(oversized)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        assert!(decode(bytes.get_ref()).is_err());
+    }
+
+    struct CacheFixture(std::path::PathBuf);
+
+    impl CacheFixture {
+        fn new() -> Self {
+            let mut random = [0_u8; 12];
+            getrandom::fill(&mut random).unwrap();
+            let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+            let path = std::env::temp_dir().join(format!("vk-fast-cover-loader-{suffix}"));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn disk(&self) -> DiskCache {
+            DiskCache::at(Some(self.0.join("covers")), 128 * 1024 * 1024)
+        }
+    }
+
+    impl Drop for CacheFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn small_track_covers_use_96_pixels_and_compact_jpeg_files() {
+        let source = image::RgbImage::from_fn(900, 700, |x, y| {
+            image::Rgb([
+                (x * 3 % 256) as u8,
+                (y * 5 % 256) as u8,
+                ((x + y) % 256) as u8,
+            ])
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(source)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        for (size, expected) in [(40.0, 96), (64.0, 96), (112.0, 160), (180.0, 256)] {
+            let edge = texture_edge(size);
+            assert_eq!(edge, expected);
+            let image = decode_sized(bytes.get_ref(), edge).unwrap();
+            assert_eq!(image.size, [edge as usize; 2]);
+            let compressed = jpeg(&image).unwrap();
+            assert_eq!(image::guess_format(&compressed).unwrap(), ImageFormat::Jpeg);
+            assert!(compressed.len() < 32 * 1024);
+            if edge == 96 {
+                assert!(compressed.len() < 8 * 1024);
+            }
+        }
+    }
+
+    #[test]
+    fn restarting_art_cache_loads_the_thumbnail_without_any_network_request() {
+        let fixture = CacheFixture::new();
+        let url = "https://images.example.test/cover.jpg?signature=synthetic";
+        let image = ColorImage::filled([96, 96], egui::Color32::from_rgb(32, 60, 90));
+        let first = load_cover(&fixture.disk(), url, 96, || Ok(image)).unwrap();
+        assert_eq!(first.size, [96, 96]);
+        let second = load_cover(&fixture.disk(), url, 96, || {
+            panic!("disk hit must not access HTTP")
+        })
+        .unwrap();
+        assert_eq!(second.size, [96, 96]);
+        let [r, g, b, _] = second.pixels[0].to_array();
+        assert!((i16::from(r) - 32).abs() <= 4);
+        assert!((i16::from(g) - 60).abs() <= 4);
+        assert!((i16::from(b) - 90).abs() <= 4);
+    }
+
+    #[test]
+    fn bigger_cached_art_satisfies_small_views_and_small_art_survives_offline() {
+        let fixture = CacheFixture::new();
+        let disk = fixture.disk();
+        let large_url = "https://images.example.test/large.jpg";
+        let small_url = "https://images.example.test/small.jpg";
+        disk.save(
+            large_url,
+            256,
+            &jpeg(&ColorImage::filled([256, 256], egui::Color32::RED)).unwrap(),
+        )
+        .unwrap();
+        disk.save(
+            small_url,
+            96,
+            &jpeg(&ColorImage::filled([96, 96], egui::Color32::BLUE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_cover(&disk, large_url, 96, || panic!(
+                "larger cached art must avoid HTTP"
+            ))
+            .unwrap()
+            .size,
+            [96, 96]
+        );
+        assert_eq!(
+            load_cover(&disk, small_url, 256, || Err(())).unwrap().size,
+            [96, 96]
+        );
+        assert!(disk.load(small_url, 96).is_ok());
+    }
+
+    #[test]
+    fn corrupted_thumbnail_is_replaced_after_a_successful_download() {
+        let fixture = CacheFixture::new();
+        let disk = fixture.disk();
+        let url = "https://images.example.test/corrupted.jpg";
+        disk.save(url, 96, b"not an image").unwrap();
+        let image = load_cover(&disk, url, 96, || {
+            Ok(ColorImage::filled([96, 96], egui::Color32::GREEN))
+        })
+        .unwrap();
+        assert_eq!(image.size, [96, 96]);
+        assert!(decode_sized(&disk.load(url, 96).unwrap(), 96).is_ok());
+    }
+}

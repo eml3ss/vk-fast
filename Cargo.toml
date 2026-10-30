@@ -1,0 +1,57 @@
+[package]
+name = "vk-fast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "VK Fast: experimental VK Music desktop client built with Rust and egui"
+repository = "https://github.com/eml3ss/vk-fast"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"
+base64 = "0.22"
+sha2 = "0.10"
+getrandom = "0.3"
+qrcode = { version = "0.14", default-features = false }
+open = "5"
+html-escape = "0.2"
+encoding_rs = "0.8"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+tauri = { version = "2.12", default-features = false, features = ["wry", "x11", "custom-protocol"] }
+rfd = "0.17.2"
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+raw-window-handle = "0.6.2"
+ebur128 = "0.1.11"
+
+[build-dependencies]
+tauri-build = { version = "2", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+pipewire = { version = "0.10", features = ["v0_3_49"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { version = "0.18.2", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
+
+[features]
+screenshot = []
+
+[profile.release]
+opt-level = 2
+
+[profile.dev.package.ebur128]
+opt-level = 2
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
+souvlaki = { path = "vendor/souvlaki" }

@@ -1,0 +1,17 @@
+{
+  "ca_version": "2026-10-20",
+  "ca_sha256": "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe",
+  "ca_bytes": 200116,
+  "ca_certificates": 118,
+  "ca_url": "https://curl.se/ca/cacert-2026-10-20.pem",
+  "ca_latest_url": "https://curl.se/ca/cacert.pem",
+  "ca_sha256_url": "https://curl.se/ca/cacert-2026-10-20.pem.sha256",
+  "ca_latest_sha256_url": "https://curl.se/ca/cacert.pem.sha256",
+  "documentation_url": "https://curl.se/docs/caextract.html",
+  "license": "MPL-2.0",
+  "retrieved_utc": "2026-10-30",
+  "ffmpeg_version": "9.0.2",
+  "ffmpeg_tls_mbedtls_pristine_sha256": "8c76b19b31269741426b692724e759d1895a9f6dba432386615cca66ca4b17aa",
+  "ffmpeg_tls_mbedtls_patched_sha256": "c6bbf65c34f5c90904c4733328c48b53efdbbc89e7bd87bfaca52f3c419ac8c5",
+  "patch_sha256": "862c252f5946f2c7fee672bc630e08bd42abd0f7e0cc8dad2ee64db635acdb7c"
+}

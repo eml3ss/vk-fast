@@ -1,0 +1,1341 @@
+//! Small local preferences, kept separately from authentication credentials.
+
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+
+use crate::i18n::Language;
+
+const MAX_BYTES: u64 = 4096;
+pub const MAX_CACHE_MB: u32 = 5120;
+pub const DEFAULT_CACHE_MB: u32 = 1024;
+const DEFAULT_VOLUME: f32 = 0.7;
+const DEFAULT_COMPACT_SEEK_BAR: bool = true;
+const DEFAULT_DOUBLE_CLICK_TO_PLAY: bool = true;
+const DEFAULT_SYSTEM_TITLEBAR: bool = false;
+const DEFAULT_NORMALIZE_VOLUME: bool = false;
+const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
+const DEFAULT_LOGGING_ENABLED: bool = false;
+static WRITES: Mutex<()> = Mutex::new(());
+
+#[derive(Deserialize, Serialize)]
+#[serde(default)]
+struct Preferences {
+    #[serde(deserialize_with = "deserialize_volume")]
+    volume: f32,
+    #[serde(deserialize_with = "deserialize_cache_limit")]
+    cache_limit_mb: u32,
+    #[serde(deserialize_with = "deserialize_language")]
+    language: String,
+    #[serde(deserialize_with = "deserialize_compact_seek_bar")]
+    compact_seek_bar: bool,
+    #[serde(deserialize_with = "deserialize_system_titlebar")]
+    system_titlebar: bool,
+    #[serde(deserialize_with = "deserialize_double_click_to_play")]
+    double_click_to_play: bool,
+    #[serde(deserialize_with = "deserialize_normalize_volume")]
+    normalize_volume: bool,
+    #[serde(deserialize_with = "deserialize_minimize_to_tray")]
+    minimize_to_tray: bool,
+    #[serde(deserialize_with = "deserialize_logging_enabled")]
+    logging_enabled: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            volume: DEFAULT_VOLUME,
+            cache_limit_mb: DEFAULT_CACHE_MB,
+            language: "ru".into(),
+            compact_seek_bar: DEFAULT_COMPACT_SEEK_BAR,
+            system_titlebar: DEFAULT_SYSTEM_TITLEBAR,
+            double_click_to_play: DEFAULT_DOUBLE_CLICK_TO_PLAY,
+            normalize_volume: DEFAULT_NORMALIZE_VOLUME,
+            minimize_to_tray: DEFAULT_MINIMIZE_TO_TRAY,
+            logging_enabled: DEFAULT_LOGGING_ENABLED,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+fn deserialize_volume<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .map(|volume| volume as f32)
+        .filter(|volume| valid_volume(*volume))
+        .unwrap_or(DEFAULT_VOLUME))
+}
+
+fn deserialize_cache_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|limit| u32::try_from(limit).ok())
+        .filter(|limit| *limit <= MAX_CACHE_MB)
+        .unwrap_or(DEFAULT_CACHE_MB))
+}
+
+fn language_code(language: Language) -> &'static str {
+    match language {
+        Language::Russian => "ru",
+        Language::English => "en",
+    }
+}
+
+fn deserialize_language<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(language_code(
+        value
+            .as_str()
+            .and_then(Language::from_code)
+            .unwrap_or_default(),
+    )
+    .to_owned())
+}
+
+fn deserialize_compact_seek_bar<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_COMPACT_SEEK_BAR))
+}
+
+fn deserialize_system_titlebar<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_SYSTEM_TITLEBAR))
+}
+
+fn deserialize_double_click_to_play<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_DOUBLE_CLICK_TO_PLAY))
+}
+
+fn deserialize_normalize_volume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_NORMALIZE_VOLUME))
+}
+
+fn deserialize_minimize_to_tray<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_MINIMIZE_TO_TRAY))
+}
+
+fn deserialize_logging_enabled<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_LOGGING_ENABLED))
+}
+
+fn valid_volume(volume: f32) -> bool {
+    volume.is_finite() && (0.0..=1.0).contains(&volume)
+}
+
+fn invalid() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "Invalid VK Fast preferences")
+}
+
+fn preferences_path() -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        Ok(crate::app_paths::config_dir()?.join("preferences.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".config"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "User config directory is unavailable",
+                )
+            })?;
+        Ok(config.join("vk-fast/preferences.json"))
+    }
+}
+
+fn legacy_preferences_path() -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        preferences_path()
+    }
+    #[cfg(not(windows))]
+    {
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".local/state"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "User state directory is unavailable",
+                )
+            })?;
+        Ok(state.join("vk-fast/preferences.json"))
+    }
+}
+
+fn checked_parent(path: &Path, create: bool) -> io::Result<&Path> {
+    let parent = path.parent().ok_or_else(invalid)?;
+    if create {
+        fs::create_dir_all(parent)?;
+    }
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(invalid());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if create {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        } else if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Preferences directory is not private",
+            ));
+        }
+    }
+    Ok(parent)
+}
+
+fn checked_target(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Ok(Some(metadata))
+        }
+        Ok(_) => Err(invalid()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn random_suffix() -> io::Result<String> {
+    let mut bytes = [0_u8; 12];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| io::Error::other("Preferences temporary file name unavailable"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+struct TemporaryFile(Option<PathBuf>);
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn write_at(path: &Path, preferences: &Preferences) -> io::Result<()> {
+    write_mode_at(path, preferences, true).map(|_| ())
+}
+
+fn write_mode_at(path: &Path, preferences: &Preferences, replace: bool) -> io::Result<bool> {
+    let bytes = serde_json::to_vec(preferences).map_err(|_| invalid())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(invalid());
+    }
+    let parent = checked_parent(path, true)?;
+    if checked_target(path)?.is_some() && !replace {
+        return Ok(false);
+    }
+    let (mut file, mut temporary) = loop {
+        let temporary_path = parent.join(format!(".preferences-{}.tmp", random_suffix()?));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary_path) {
+            Ok(file) => break (file, TemporaryFile(Some(temporary_path))),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let temporary_path = temporary.0.as_ref().ok_or_else(invalid)?;
+    if replace {
+        fs::rename(temporary_path, path)?;
+    } else {
+        // A same-directory hard link publishes an already-fsynced file without
+        // replacing a config file another process created during migration.
+        match fs::hard_link(temporary_path, path) {
+            Ok(()) => fs::remove_file(temporary_path)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    temporary.0 = None;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(true)
+}
+
+fn read_bytes_at(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let Some(metadata) = checked_target(path)? else {
+        return Ok(None);
+    };
+    checked_parent(path, false)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Preferences file is not private",
+            ));
+        }
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(invalid());
+    }
+    Ok(Some(bytes))
+}
+
+fn load_json_at(path: &Path) -> io::Result<Option<serde_json::Value>> {
+    let Some(bytes) = read_bytes_at(path)? else {
+        return Ok(None);
+    };
+    let preferences: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if !preferences.is_object() {
+        return Err(invalid());
+    }
+    Ok(Some(preferences))
+}
+
+fn load_preferences_at(path: &Path) -> io::Result<Option<Preferences>> {
+    load_json_at(path)?
+        .map(|json| serde_json::from_value(json).map_err(|_| invalid()))
+        .transpose()
+}
+
+fn load_at(path: &Path) -> io::Result<Option<f32>> {
+    let Some(json) = load_json_at(path)? else {
+        return Ok(None);
+    };
+    match json.get("volume") {
+        Some(value) => value
+            .as_f64()
+            .map(|volume| volume as f32)
+            .filter(|volume| valid_volume(*volume))
+            .map(Some)
+            .ok_or_else(invalid),
+        None if json.get("cache_limit_mb").is_some()
+            || json.get("language").is_some()
+            || json.get("compact_seek_bar").is_some()
+            || json.get("system_titlebar").is_some()
+            || json.get("double_click_to_play").is_some()
+            || json.get("normalize_volume").is_some()
+            || json.get("minimize_to_tray").is_some()
+            || json.get("logging_enabled").is_some() =>
+        {
+            Ok(Some(DEFAULT_VOLUME))
+        }
+        None => Err(invalid()),
+    }
+}
+
+fn save_at(path: &Path, volume: f32) -> io::Result<()> {
+    if !valid_volume(volume) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Volume must be finite and between zero and one",
+        ));
+    }
+    update_at(path, |preferences| preferences.volume = volume)
+}
+
+fn update_at(path: &Path, update: impl FnOnce(&mut Preferences)) -> io::Result<()> {
+    let _guard = WRITES
+        .lock()
+        .map_err(|_| io::Error::other("Preferences writer unavailable"))?;
+    let mut preferences = load_preferences_at(path)?.unwrap_or_default();
+    update(&mut preferences);
+    write_at(path, &preferences)
+}
+
+fn save_cache_at(path: &Path, limit_mb: u32) -> io::Result<()> {
+    if limit_mb > MAX_CACHE_MB {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Cache limit exceeds the five GiB maximum",
+        ));
+    }
+    update_at(path, |preferences| preferences.cache_limit_mb = limit_mb)
+}
+
+fn save_language_at(path: &Path, language: Language) -> io::Result<()> {
+    update_at(path, |preferences| {
+        preferences.language = language_code(language).into();
+    })
+}
+
+fn save_compact_seek_at(path: &Path, compact: bool) -> io::Result<()> {
+    update_at(path, |preferences| preferences.compact_seek_bar = compact)
+}
+
+fn save_system_titlebar_at(path: &Path, system: bool) -> io::Result<()> {
+    update_at(path, |preferences| preferences.system_titlebar = system)
+}
+
+fn save_double_click_at(path: &Path, double_click: bool) -> io::Result<()> {
+    update_at(path, |preferences| {
+        preferences.double_click_to_play = double_click
+    })
+}
+
+fn save_normalize_volume_at(path: &Path, enabled: bool) -> io::Result<()> {
+    update_at(path, |preferences| preferences.normalize_volume = enabled)
+}
+
+fn save_minimize_to_tray_at(path: &Path, enabled: bool) -> io::Result<()> {
+    update_at(path, |preferences| preferences.minimize_to_tray = enabled)
+}
+
+fn save_logging_at(path: &Path, enabled: bool) -> io::Result<()> {
+    update_at(path, |preferences| preferences.logging_enabled = enabled)
+}
+
+fn migrate_at(legacy: &Path, destination: &Path) -> io::Result<()> {
+    let _guard = WRITES
+        .lock()
+        .map_err(|_| io::Error::other("Preferences writer unavailable"))?;
+    if checked_target(destination)?.is_some() {
+        return Ok(());
+    }
+    let Some(original) = read_bytes_at(legacy)? else {
+        return Ok(());
+    };
+    let json: serde_json::Value = serde_json::from_slice(&original).map_err(|_| invalid())?;
+    if !json.is_object() {
+        return Err(invalid());
+    }
+    let preferences: Preferences = serde_json::from_value(json).map_err(|_| invalid())?;
+    if !write_mode_at(destination, &preferences, false)? {
+        return Ok(());
+    }
+    // Do not delete changes saved by an older running version after our read.
+    // Such a file can remain as a legacy copy; the new config always takes priority.
+    remove_legacy_if_unchanged(legacy, &original)
+}
+
+fn remove_legacy_if_unchanged(legacy: &Path, original: &[u8]) -> io::Result<()> {
+    if read_bytes_at(legacy)?.as_deref() == Some(original) {
+        fs::remove_file(legacy)?;
+        #[cfg(unix)]
+        File::open(legacy.parent().ok_or_else(invalid)?)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub fn load_volume() -> Option<f32> {
+    load_at(&preferences_path().ok()?).ok().flatten()
+}
+
+pub fn save_volume(volume: f32) -> io::Result<()> {
+    save_at(&preferences_path()?, volume)
+}
+
+pub fn load_cache_limit_mb() -> u32 {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_CACHE_MB, |preferences| preferences.cache_limit_mb)
+}
+
+pub fn save_cache_limit_mb(limit_mb: u32) -> io::Result<()> {
+    save_cache_at(&preferences_path()?, limit_mb)
+}
+
+pub fn load_language() -> Language {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .and_then(|preferences| Language::from_code(&preferences.language))
+        .unwrap_or_default()
+}
+
+pub fn save_language(language: Language) -> io::Result<()> {
+    save_language_at(&preferences_path()?, language)
+}
+
+pub fn load_compact_seek_bar() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_COMPACT_SEEK_BAR, |preferences| {
+            preferences.compact_seek_bar
+        })
+}
+
+pub fn save_compact_seek_bar(compact: bool) -> io::Result<()> {
+    save_compact_seek_at(&preferences_path()?, compact)
+}
+
+pub fn load_system_titlebar() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_SYSTEM_TITLEBAR, |preferences| {
+            preferences.system_titlebar
+        })
+}
+
+pub fn save_system_titlebar(system: bool) -> io::Result<()> {
+    save_system_titlebar_at(&preferences_path()?, system)
+}
+
+pub fn load_double_click_to_play() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_DOUBLE_CLICK_TO_PLAY, |preferences| {
+            preferences.double_click_to_play
+        })
+}
+
+pub fn save_double_click_to_play(double_click: bool) -> io::Result<()> {
+    save_double_click_at(&preferences_path()?, double_click)
+}
+
+pub fn load_normalize_volume() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_NORMALIZE_VOLUME, |preferences| {
+            preferences.normalize_volume
+        })
+}
+
+pub fn save_normalize_volume(enabled: bool) -> io::Result<()> {
+    save_normalize_volume_at(&preferences_path()?, enabled)
+}
+
+pub fn load_minimize_to_tray() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_MINIMIZE_TO_TRAY, |preferences| {
+            preferences.minimize_to_tray
+        })
+}
+
+pub fn save_minimize_to_tray(enabled: bool) -> io::Result<()> {
+    save_minimize_to_tray_at(&preferences_path()?, enabled)
+}
+
+pub fn load_logging_enabled() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_LOGGING_ENABLED, |preferences| {
+            preferences.logging_enabled
+        })
+}
+
+pub fn save_logging_enabled(enabled: bool) -> io::Result<()> {
+    save_logging_at(&preferences_path()?, enabled)
+}
+
+/// Explicit startup migration. Loaders never create, move, or remove files.
+pub fn migrate_legacy() -> io::Result<()> {
+    let destination = preferences_path()?;
+    if checked_target(&destination)?.is_some() {
+        return Ok(());
+    }
+    migrate_at(&legacy_preferences_path()?, &destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "vk-fast-preferences-test-{}",
+                random_suffix().unwrap()
+            ));
+            fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(path)
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn logging_is_opt_in_and_its_atomic_updates_preserve_existing_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        assert!(!Preferences::default().logging_enabled);
+        save_at(&path, 0.375).unwrap();
+        let mut value = serde_json::json!({"volume":0.375,"normalize_volume":true,"compact_seek_bar":false,"future_setting":{"keep":true}});
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!load_preferences_at(&path).unwrap().unwrap().logging_enabled);
+        for enabled in [true, false] {
+            save_logging_at(&path, enabled).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.logging_enabled, enabled);
+            assert_eq!(preferences.volume, 0.375);
+            assert!(preferences.normalize_volume && !preferences.compact_seek_bar);
+            assert_eq!(preferences.extra["future_setting"]["keep"], true);
+        }
+        for malformed in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(42),
+        ] {
+            value["logging_enabled"] = malformed;
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(!load_preferences_at(&path).unwrap().unwrap().logging_enabled);
+        }
+        fs::write(&path, br#"{"logging_enabled":true}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+    }
+
+    #[test]
+    fn fresh_profiles_enable_compact_seek_and_double_click_with_custom_titlebar() {
+        let directory = TestDirectory::new();
+        let missing = directory.0.join("config/preferences.json");
+        assert!(load_preferences_at(&missing).unwrap().is_none());
+        for preferences in [
+            Preferences::default(),
+            serde_json::from_value(serde_json::json!({})).unwrap(),
+        ] {
+            assert!(preferences.compact_seek_bar && preferences.double_click_to_play);
+            assert!(!preferences.system_titlebar);
+            assert!(!preferences.normalize_volume && !preferences.minimize_to_tray);
+            assert_eq!(preferences.volume, DEFAULT_VOLUME);
+        }
+        assert!(
+            !missing.exists(),
+            "Reading defaults must not create settings"
+        );
+    }
+
+    #[test]
+    fn new_feature_toggles_preserve_explicit_old_choices_and_migrate_together() {
+        let directory = TestDirectory::new();
+        let legacy = directory.0.join("state/preferences.json");
+        let destination = directory.0.join("config/preferences.json");
+        save_at(&legacy, 0.375).unwrap();
+        fs::write(
+            &legacy,
+            serde_json::to_vec(&serde_json::json!({
+                "volume":0.375, "cache_limit_mb":384, "language":"en",
+                "compact_seek_bar":false, "double_click_to_play":false,
+                "system_titlebar":true, "future_setting":{"enabled":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (normalize, tray) in [(true, false), (false, true), (true, true)] {
+            save_normalize_volume_at(&legacy, normalize).unwrap();
+            save_minimize_to_tray_at(&legacy, tray).unwrap();
+            let preferences = load_preferences_at(&legacy).unwrap().unwrap();
+            assert_eq!(preferences.normalize_volume, normalize);
+            assert_eq!(preferences.minimize_to_tray, tray);
+            assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
+            assert!(preferences.system_titlebar);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        }
+        save_at(&legacy, 0.625).unwrap();
+        save_cache_at(&legacy, 512).unwrap();
+        migrate_at(&legacy, &destination).unwrap();
+        let preferences = load_preferences_at(&destination).unwrap().unwrap();
+        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
+        assert!(preferences.system_titlebar);
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 512);
+        assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read_dir(destination.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_feature_toggles_recover_independently_and_single_flag_files_keep_volume() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.375).unwrap();
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "volume":0.375, "cache_limit_mb":384, "language":"en",
+                    "compact_seek_bar":"invalid", "double_click_to_play":[],
+                    "system_titlebar":true, "normalize_volume":bad,
+                    "minimize_to_tray":bad, "future_setting":"kept"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.compact_seek_bar && preferences.double_click_to_play);
+            assert!(preferences.system_titlebar);
+            assert!(!preferences.normalize_volume && !preferences.minimize_to_tray);
+            assert_eq!(preferences.volume, 0.375);
+            save_normalize_volume_at(&path, true).unwrap();
+            save_minimize_to_tray_at(&path, true).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+            assert_eq!(preferences.extra["future_setting"], "kept");
+        }
+        for key in ["normalize_volume", "minimize_to_tray"] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({key:true})).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+        }
+    }
+
+    #[test]
+    fn volume_survives_reopening_and_atomic_replacement_privately() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("state/preferences.json");
+        assert!(load_at(&path).unwrap().is_none());
+        save_at(&path, 0.375).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.375));
+        save_at(&path, 0.0).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.0));
+        save_at(&path, 1.0).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(1.0));
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_oversized_and_out_of_range_preferences_are_rejected() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.5).unwrap();
+        for volume in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+            assert!(save_at(&path, volume).is_err());
+            assert_eq!(load_at(&path).unwrap(), Some(0.5));
+        }
+        for text in [
+            "not JSON",
+            "{}",
+            r#"{"volume":null}"#,
+            r#"{"volume":"0.5"}"#,
+            r#"{"volume":-0.1}"#,
+            r#"{"volume":1.1}"#,
+            r#"{"volume":1e1000}"#,
+        ] {
+            fs::write(&path, text).unwrap();
+            assert!(load_at(&path).is_err());
+        }
+        fs::write(&path, vec![b' '; MAX_BYTES as usize + 1]).unwrap();
+        assert!(load_at(&path).is_err());
+    }
+
+    #[test]
+    fn cache_limit_migrates_old_volume_and_both_saves_preserve_other_field() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.25).unwrap();
+        fs::write(&path, r#"{"volume":0.375}"#).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(preferences.volume, 0.375);
+        assert_eq!(preferences.cache_limit_mb, DEFAULT_CACHE_MB);
+        save_cache_at(&path, 256).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.375));
+        save_at(&path, 0.625).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 256);
+        for limit in [0, MAX_CACHE_MB] {
+            save_cache_at(&path, limit).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.cache_limit_mb, limit);
+            assert_eq!(preferences.volume, 0.625);
+        }
+        assert!(save_cache_at(&path, MAX_CACHE_MB + 1).is_err());
+        assert_eq!(
+            load_preferences_at(&path).unwrap().unwrap().cache_limit_mb,
+            MAX_CACHE_MB
+        );
+        fs::write(&path, r#"{"cache_limit_mb":128}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+    }
+
+    #[test]
+    fn malformed_optional_fields_recover_independently() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.25).unwrap();
+        for limit in [
+            serde_json::json!(null),
+            serde_json::json!("256"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(5121),
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let value = serde_json::json!({"volume":0.375,"cache_limit_mb":limit});
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, DEFAULT_CACHE_MB);
+            assert_eq!(load_at(&path).unwrap(), Some(0.375));
+            save_at(&path, 0.625).unwrap();
+            assert_eq!(
+                load_preferences_at(&path).unwrap().unwrap().cache_limit_mb,
+                DEFAULT_CACHE_MB
+            );
+        }
+        fs::write(&path, r#"{"volume":"invalid","cache_limit_mb":384}"#).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(preferences.volume, DEFAULT_VOLUME);
+        assert_eq!(preferences.cache_limit_mb, 384);
+        save_cache_at(&path, 512).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+        assert_eq!(
+            load_preferences_at(&path).unwrap().unwrap().cache_limit_mb,
+            512
+        );
+    }
+
+    #[test]
+    fn language_is_optional_recovers_independently_and_all_saves_preserve_fields() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.25).unwrap();
+        for language in [
+            serde_json::json!(null),
+            serde_json::json!(12),
+            serde_json::json!("fr"),
+            serde_json::json!("EN"),
+            serde_json::json!({}),
+        ] {
+            let value = serde_json::json!({
+                "volume":0.375,"cache_limit_mb":384,"language":language,
+                "future_setting":{"enabled":true}
+            });
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "ru");
+            save_language_at(&path, Language::English).unwrap();
+            save_at(&path, 0.625).unwrap();
+            save_cache_at(&path, 512).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.volume, 0.625);
+            assert_eq!(preferences.cache_limit_mb, 512);
+            assert_eq!(preferences.language, "en");
+            assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        }
+        fs::write(&path, r#"{"volume":0.5,"cache_limit_mb":256}"#).unwrap();
+        assert_eq!(load_preferences_at(&path).unwrap().unwrap().language, "ru");
+    }
+
+    #[test]
+    fn compact_seek_bar_is_optional_and_each_layout_survives_reopening() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        assert!(load_preferences_at(&path).unwrap().is_none());
+        save_at(&path, 0.375).unwrap();
+        fs::write(
+            &path,
+            r#"{"volume":0.375,"cache_limit_mb":384,"language":"en","future_setting":{"enabled":true}}"#,
+        )
+        .unwrap();
+        assert!(
+            load_preferences_at(&path)
+                .unwrap()
+                .unwrap()
+                .compact_seek_bar
+        );
+        for compact in [true, false, true] {
+            save_compact_seek_at(&path, compact).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.compact_seek_bar, compact);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        }
+        save_at(&path, 0.625).unwrap();
+        save_cache_at(&path, 512).unwrap();
+        save_language_at(&path, Language::Russian).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert!(preferences.compact_seek_bar);
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 512);
+        assert_eq!(preferences.language, "ru");
+        assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn malformed_compact_seek_bar_recovers_without_discarding_valid_preferences() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.5).unwrap();
+        for compact in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(-1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "volume":0.375,"cache_limit_mb":384,"language":"en",
+                    "compact_seek_bar":compact,"future_setting":"preserved"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.compact_seek_bar);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            save_compact_seek_at(&path, true).unwrap();
+            assert!(
+                load_preferences_at(&path)
+                    .unwrap()
+                    .unwrap()
+                    .compact_seek_bar
+            );
+            assert_eq!(
+                load_preferences_at(&path).unwrap().unwrap().extra["future_setting"],
+                "preserved"
+            );
+        }
+        fs::write(&path, r#"{"compact_seek_bar":true}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+    }
+
+    #[test]
+    fn titlebar_choice_defaults_to_custom_and_survives_other_preference_updates() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        assert!(load_preferences_at(&path).unwrap().is_none());
+        save_at(&path, 0.375).unwrap();
+        fs::write(
+            &path,
+            r#"{"volume":0.375,"cache_limit_mb":384,"language":"en","compact_seek_bar":true,"future_setting":{"enabled":true}}"#,
+        )
+        .unwrap();
+        assert!(!load_preferences_at(&path).unwrap().unwrap().system_titlebar);
+        for system in [true, false, true] {
+            save_system_titlebar_at(&path, system).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.system_titlebar, system);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert!(preferences.compact_seek_bar);
+            assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        }
+        save_at(&path, 0.625).unwrap();
+        save_cache_at(&path, 512).unwrap();
+        save_language_at(&path, Language::Russian).unwrap();
+        save_compact_seek_at(&path, false).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert!(preferences.system_titlebar);
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 512);
+        assert_eq!(preferences.language, "ru");
+        assert!(!preferences.compact_seek_bar);
+        assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn malformed_titlebar_choice_recovers_without_discarding_other_preferences() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.5).unwrap();
+        for system in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(-1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "volume":0.375,"cache_limit_mb":384,"language":"en",
+                    "compact_seek_bar":true,"system_titlebar":system,
+                    "future_setting":"preserved"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(!preferences.system_titlebar);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert!(preferences.compact_seek_bar);
+            save_system_titlebar_at(&path, true).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.system_titlebar);
+            assert_eq!(preferences.extra["future_setting"], "preserved");
+        }
+        fs::write(&path, r#"{"system_titlebar":true}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+        assert!(load_preferences_at(&path).unwrap().unwrap().system_titlebar);
+    }
+
+    #[test]
+    fn track_click_mode_defaults_to_double_and_persists_without_losing_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        assert!(Preferences::default().double_click_to_play);
+        save_at(&path, 0.375).unwrap();
+        fs::write(
+            &path,
+            r#"{"volume":0.375,"cache_limit_mb":384,"language":"en","compact_seek_bar":true,"system_titlebar":true,"future_setting":{"enabled":true}}"#,
+        )
+        .unwrap();
+        assert!(
+            load_preferences_at(&path)
+                .unwrap()
+                .unwrap()
+                .double_click_to_play
+        );
+        for double_click in [true, false, true] {
+            save_double_click_at(&path, double_click).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(preferences.double_click_to_play, double_click);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert!(preferences.compact_seek_bar && preferences.system_titlebar);
+            assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        }
+        save_at(&path, 0.625).unwrap();
+        save_cache_at(&path, 512).unwrap();
+        save_language_at(&path, Language::Russian).unwrap();
+        save_compact_seek_at(&path, false).unwrap();
+        save_system_titlebar_at(&path, false).unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert!(preferences.double_click_to_play);
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 512);
+        assert_eq!(preferences.language, "ru");
+        assert!(!preferences.compact_seek_bar && !preferences.system_titlebar);
+        assert_eq!(preferences.extra["future_setting"]["enabled"], true);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn malformed_track_click_mode_recovers_without_discarding_other_preferences() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.5).unwrap();
+        for mode in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(-1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "volume":0.375,"cache_limit_mb":384,"language":"en",
+                    "compact_seek_bar":true,"system_titlebar":true,
+                    "double_click_to_play":mode,"future_setting":"preserved"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.double_click_to_play);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert!(preferences.compact_seek_bar && preferences.system_titlebar);
+            save_double_click_at(&path, true).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.double_click_to_play);
+            assert_eq!(preferences.extra["future_setting"], "preserved");
+        }
+        fs::write(&path, r#"{"double_click_to_play":true}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+        assert!(
+            load_preferences_at(&path)
+                .unwrap()
+                .unwrap()
+                .double_click_to_play
+        );
+    }
+
+    #[test]
+    fn explicit_migration_moves_only_preferences_and_loaders_do_not_create_config() {
+        let directory = TestDirectory::new();
+        let legacy = directory.0.join("state/vk-fast/preferences.json");
+        let config = directory.0.join("config/vk-fast/preferences.json");
+        save_at(&legacy, 0.375).unwrap();
+        save_cache_at(&legacy, 256).unwrap();
+        save_language_at(&legacy, Language::English).unwrap();
+        save_compact_seek_at(&legacy, true).unwrap();
+        save_system_titlebar_at(&legacy, true).unwrap();
+        save_double_click_at(&legacy, true).unwrap();
+        save_normalize_volume_at(&legacy, true).unwrap();
+        save_minimize_to_tray_at(&legacy, true).unwrap();
+        let unrelated = legacy.parent().unwrap().join("unrelated.json");
+        fs::write(&unrelated, b"synthetic unrelated state").unwrap();
+        assert!(load_preferences_at(&config).unwrap().is_none());
+        assert!(!config.exists());
+        assert!(legacy.exists());
+        migrate_at(&legacy, &config).unwrap();
+        assert!(!legacy.exists());
+        let preferences = load_preferences_at(&config).unwrap().unwrap();
+        assert_eq!(preferences.volume, 0.375);
+        assert_eq!(preferences.cache_limit_mb, 256);
+        assert_eq!(preferences.language, "en");
+        assert!(preferences.compact_seek_bar);
+        assert!(preferences.system_titlebar);
+        assert!(preferences.double_click_to_play);
+        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert_eq!(fs::read(&unrelated).unwrap(), b"synthetic unrelated state");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(config.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn migration_never_replaces_existing_config_or_removes_changed_legacy_data() {
+        let directory = TestDirectory::new();
+        let legacy = directory.0.join("state/preferences.json");
+        let config = directory.0.join("config/preferences.json");
+        save_at(&legacy, 0.25).unwrap();
+        save_language_at(&legacy, Language::English).unwrap();
+        save_at(&config, 0.75).unwrap();
+        save_cache_at(&config, 512).unwrap();
+        let original_legacy = fs::read(&legacy).unwrap();
+        let original_config = fs::read(&config).unwrap();
+        migrate_at(&legacy, &config).unwrap();
+        assert_eq!(fs::read(&legacy).unwrap(), original_legacy);
+        assert_eq!(fs::read(&config).unwrap(), original_config);
+        assert!(!write_mode_at(&config, &Preferences::default(), false).unwrap());
+        assert_eq!(fs::read(&config).unwrap(), original_config);
+        save_at(&legacy, 0.875).unwrap();
+        remove_legacy_if_unchanged(&legacy, &original_legacy).unwrap();
+        assert_eq!(load_at(&legacy).unwrap(), Some(0.875));
+    }
+
+    #[test]
+    fn invalid_legacy_file_is_preserved_without_creating_new_preferences() {
+        let directory = TestDirectory::new();
+        let legacy = directory.0.join("state/preferences.json");
+        let config = directory.0.join("config/preferences.json");
+        save_at(&legacy, 0.5).unwrap();
+        fs::write(&legacy, b"malformed preferences").unwrap();
+        assert!(migrate_at(&legacy, &config).is_err());
+        assert!(!config.exists());
+        assert_eq!(fs::read(&legacy).unwrap(), b"malformed preferences");
+        // The old format had no language field; malformed optional language
+        // must not discard otherwise valid volume and cache settings either.
+        fs::write(
+            &legacy,
+            r#"{"volume":0.25,"cache_limit_mb":384,"language":"unsupported"}"#,
+        )
+        .unwrap();
+        migrate_at(&legacy, &config).unwrap();
+        let preferences = load_preferences_at(&config).unwrap().unwrap();
+        assert_eq!(preferences.volume, 0.25);
+        assert_eq!(preferences.cache_limit_mb, 384);
+        assert_eq!(preferences.language, "ru");
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn concurrent_volume_cache_and_language_updates_preserve_each_other() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.5).unwrap();
+        let volume_path = path.clone();
+        let volume = std::thread::spawn(move || {
+            for value in [0.1, 0.2, 0.375] {
+                save_at(&volume_path, value).unwrap();
+            }
+        });
+        let cache_path = path.clone();
+        let cache = std::thread::spawn(move || {
+            for limit in [128, 256, 384] {
+                save_cache_at(&cache_path, limit).unwrap();
+            }
+        });
+        let language_path = path.clone();
+        let language = std::thread::spawn(move || {
+            for language in [Language::English, Language::Russian, Language::English] {
+                save_language_at(&language_path, language).unwrap();
+            }
+        });
+        let compact_path = path.clone();
+        let compact = std::thread::spawn(move || {
+            for compact in [true, false, true] {
+                save_compact_seek_at(&compact_path, compact).unwrap();
+            }
+        });
+        let titlebar_path = path.clone();
+        let titlebar = std::thread::spawn(move || {
+            for system in [true, false, true] {
+                save_system_titlebar_at(&titlebar_path, system).unwrap();
+            }
+        });
+        let click_path = path.clone();
+        let click = std::thread::spawn(move || {
+            for double_click in [true, false, true] {
+                save_double_click_at(&click_path, double_click).unwrap();
+            }
+        });
+        let normalize_path = path.clone();
+        let normalize = std::thread::spawn(move || {
+            for enabled in [true, false, true] {
+                save_normalize_volume_at(&normalize_path, enabled).unwrap();
+            }
+        });
+        let tray_path = path.clone();
+        let tray = std::thread::spawn(move || {
+            for enabled in [true, false, true] {
+                save_minimize_to_tray_at(&tray_path, enabled).unwrap();
+            }
+        });
+        volume.join().unwrap();
+        cache.join().unwrap();
+        language.join().unwrap();
+        compact.join().unwrap();
+        titlebar.join().unwrap();
+        click.join().unwrap();
+        normalize.join().unwrap();
+        tray.join().unwrap();
+        let preferences = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(preferences.volume, 0.375);
+        assert_eq!(preferences.cache_limit_mb, 384);
+        assert_eq!(preferences.language, "en");
+        assert!(preferences.compact_seek_bar);
+        assert!(preferences.system_titlebar);
+        assert!(preferences.double_click_to_play);
+        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preference_symlinks_and_unsafe_permissions_are_rejected() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = TestDirectory::new();
+        let target = directory.0.join("real.json");
+        let alias = directory.0.join("preferences.json");
+        save_at(&target, 0.5).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_at(&target).is_err());
+        symlink(&target, &alias).unwrap();
+        assert!(load_at(&alias).is_err());
+        assert!(save_at(&alias, 0.5).is_err());
+        let real_parent = directory.0.join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        let linked_parent = directory.0.join("linked-parent");
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(save_at(&linked_parent.join("preferences.json"), 0.5).is_err());
+    }
+}

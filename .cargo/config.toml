@@ -1,0 +1,4 @@
+# Public VK Fast application settings. Embedded into the binary by option_env!.
+[env]
+VK_FAST_VK_CLIENT_ID = "54863250"
+VK_FAST_VK_REDIRECT_URI = "https://eml3ss.github.io/vk-fast-auth/callback/"

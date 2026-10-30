@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# These files are verified byte-for-byte by the decoder build recipe.
+*.pem -text
+*.patch -text whitespace=-blank-at-eol

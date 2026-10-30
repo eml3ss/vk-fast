@@ -1,0 +1,22 @@
+# Local build outputs and toolchains.
+/target/
+/.build/
+/dist/
+/gen/
+
+# Portable runtime data and credentials.
+/config/
+/cache/
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+
+# Temporary files.
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
