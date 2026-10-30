@@ -12,6 +12,25 @@ use crate::{
 };
 
 pub const MAX_HINTS: usize = 10;
+const INPUT_PADDING_X: i8 = 12;
+const INPUT_ICON_SIZE: f32 = 18.0;
+const INPUT_ICON_GAP: f32 = 8.0;
+
+fn input_hint(language: Language) -> &'static str {
+    language.text(
+        "Треки, исполнители, альбомы, плейлисты",
+        "Tracks, artists, albums, playlists",
+    )
+}
+
+pub fn preferred_input_width(ui: &egui::Ui, language: Language) -> f32 {
+    let hint = ui.painter().layout_no_wrap(
+        input_hint(language).into(),
+        egui::FontSelection::Default.resolve(ui.style()),
+        theme::MUTED,
+    );
+    hint.size().x + f32::from(INPUT_PADDING_X) * 2.0 + INPUT_ICON_SIZE + INPUT_ICON_GAP
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -39,13 +58,13 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Searc
     egui::Frame::new()
         .fill(theme::SURFACE)
         .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(12, 7))
+        .inner_margin(egui::Margin::symmetric(INPUT_PADDING_X, 7))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().interact_size.y = 24.0;
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = INPUT_ICON_GAP;
             ui.horizontal(|ui| {
-                icons::show(ui, Icon::Search, theme::MUTED, 18.0);
+                icons::show(ui, Icon::Search, theme::MUTED, INPUT_ICON_SIZE);
                 let show_clear = !query.is_empty();
                 let width = (ui.available_width() - if show_clear { 32.0 } else { 0.0 }).max(0.0);
                 let edit = ui.add(
@@ -54,10 +73,7 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Searc
                         .char_limit(512)
                         .frame(egui::Frame::NONE)
                         .desired_width(width)
-                        .hint_text(language.text(
-                            "Треки, исполнители, альбомы, плейлисты",
-                            "Tracks, artists, albums, playlists",
-                        )),
+                        .hint_text(input_hint(language)),
                 );
                 state.changed = edit.changed();
                 state.focused = edit.has_focus();

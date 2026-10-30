@@ -3623,7 +3623,14 @@ impl MusicApp {
                 } else {
                     0.0
                 };
-            let search_width = (ui.available_width() - 96.0 - caption_room).max(80.0);
+            let available = (ui.available_width() - 96.0 - caption_room).max(80.0);
+            let search_width = if self.settings_open {
+                available
+            } else {
+                let drag_width = if self.system_titlebar { 0.0 } else { 32.0 };
+                search_ui::preferred_input_width(ui, language)
+                    .min((available - drag_width).max(80.0))
+            };
             let input = ui
                 .allocate_ui_with_layout(
                     egui::vec2(search_width, 38.0),
@@ -11656,6 +11663,41 @@ mod tests {
         assert!(chrome_commands(&pressed).is_empty());
         account_ui_frame(&ctx, &mut app, size, &mut tick, seek_pointer(search, false));
         assert!(ctx.text_edit_focused());
+        let search_rect = account_ui_shapes(&output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == SURFACE
+                        && rect.rect.top() < 50.0
+                        && rect.rect.left() >= 252.0
+                        && rect.rect.width() > 200.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("Global search frame");
+        let hint = account_ui_text_rect(&output, "Tracks, artists, albums, playlists").unwrap();
+        assert!((8.0..=18.0).contains(&(search_rect.right() - hint.right())));
+        let caption_gap = egui::pos2(search_rect.right() + 16.0, search_rect.center().y);
+        let pressed = account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut tick,
+            seek_pointer(caption_gap, true),
+        );
+        assert_eq!(
+            chrome_commands(&pressed),
+            [egui::ViewportCommand::StartDrag]
+        );
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut tick,
+            seek_pointer(caption_gap, false),
+        );
         let blank = egui::pos2(120.0, 12.0);
         let pressed = account_ui_frame(&ctx, &mut app, size, &mut tick, seek_pointer(blank, true));
         assert_eq!(
