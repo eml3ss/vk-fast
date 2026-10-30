@@ -8,7 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -23,10 +23,61 @@ use crate::{
     i18n::Language, model::Profile, web_audio::WebAudioClient, web_session::SessionCookie,
 };
 
+#[path = "tauri_login_flow.rs"]
+mod flow;
+
 const CHILD_MARKER: &str = "VK_FAST_WEB_LOGIN_CHILD";
 const FRAME: &[u8] = b"VK_FAST_WEB_LOGIN:";
 const MAX_REPLY: usize = 128 * 1024;
-const LOGIN_URL: &str = "https://id.vk.ru/auth?app_id=7913379&redirect_uri=https%3A%2F%2Fvk.ru%2Ffeed&response_type=silent_token";
+const LOGIN_URL: &str = "https://vk.ru/";
+
+type WindowFlow = Arc<Mutex<flow::LoginWindowFlow>>;
+
+enum Visibility {
+    Show,
+    Checking(u64),
+    Recover(u64),
+}
+
+/// Check navigation state on the UI thread as well as when work is queued.
+/// A delayed Show must not reveal the feed after a newer navigation hid it.
+fn update_visibility(
+    window: &tauri::WebviewWindow,
+    flow: &WindowFlow,
+    done: &Arc<AtomicBool>,
+    language: Language,
+    action: Visibility,
+) {
+    let view = window.clone();
+    let flow = flow.clone();
+    let done = done.clone();
+    let _ = window.run_on_main_thread(move || {
+        if done.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(mut flow) = flow.lock() else { return };
+        let show = match action {
+            Visibility::Checking(ticket) => {
+                if flow.verification_started(ticket) {
+                    let _ = view.hide();
+                    let _ =
+                        view.set_title(language.text("Проверяем вход VK…", "Checking VK sign-in…"));
+                }
+                return;
+            }
+            Visibility::Show => flow.show_if_allowed(),
+            Visibility::Recover(ticket) => flow.verification_failed(ticket),
+        };
+        if show {
+            let _ = view.set_title(language.text("Вход в VK", "Sign in to VK"));
+            if view.show().is_err() {
+                flow.show_failed();
+            } else {
+                let _ = view.set_focus();
+            }
+        }
+    });
+}
 
 #[derive(Clone, Default)]
 pub struct Control {
@@ -425,6 +476,9 @@ fn fingerprint(cookies: &[SessionCookie]) -> [u8; 32] {
     }
     hash.finalize().into()
 }
+fn verified_session_matches(cookies: &[SessionCookie], expected: [u8; 32]) -> bool {
+    has_session(cookies) && fingerprint(cookies) == expected
+}
 fn finish_once(outcome: &Mutex<Option<Reply>>, done: &AtomicBool, reply: Reply) -> bool {
     let Ok(mut value) = outcome.lock() else {
         return false;
@@ -467,13 +521,20 @@ pub fn run_helper(language: Language) -> Result<(), String> {
     };
     let outcome = Arc::new(Mutex::new(None));
     let done = Arc::new(AtomicBool::new(false));
+    let visibility = Arc::new(Mutex::new(flow::LoginWindowFlow::default()));
+    let finished_page = Arc::new(AtomicU64::new(u64::MAX));
+    let (wake, wakes) = std::sync::mpsc::sync_channel(1);
     let setup_outcome = outcome.clone();
     let setup_done = done.clone();
+    let setup_visibility = visibility.clone();
     let app = tauri::Builder::default()
         .setup(move |app| {
             let url = LOGIN_URL
                 .parse()
                 .map_err(|_| io::Error::other("Invalid VK login URL"))?;
+            let page_visibility = setup_visibility.clone();
+            let page_done = setup_done.clone();
+            let page_finished = finished_page.clone();
             let mut window = WebviewWindowBuilder::new(app, "vk-login", WebviewUrl::External(url))
                 .title(language.text("Вход в VK", "Sign in to VK"))
                 .inner_size(500.0, 650.0)
@@ -486,7 +547,31 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 .devtools(false)
                 .general_autofill_enabled(false)
                 .user_agent(crate::web_audio::USER_AGENT)
-                .on_navigation(navigation_allowed);
+                .on_navigation(navigation_allowed)
+                .on_page_load(move |window, page| {
+                    if page_done.load(Ordering::Acquire) || !navigation_allowed(page.url()) {
+                        return;
+                    }
+                    let started = page.event() == tauri::webview::PageLoadEvent::Started;
+                    if let Ok(mut flow) = page_visibility.lock() {
+                        // This hook runs before the destination is painted.
+                        // Native cookie APIs and HTTP stay on the worker.
+                        if flow.page_event(page.url(), started) {
+                            let _ = window.hide();
+                        } else if started && flow.show_if_allowed() {
+                            let _ = window.set_title(language.text("Вход в VK", "Sign in to VK"));
+                            if window.show().is_err() {
+                                flow.show_failed();
+                            } else {
+                                let _ = window.set_focus();
+                            }
+                        }
+                        if !started && flow.finished_login_return(page.url()) {
+                            page_finished.store(flow.ticket(), Ordering::Release);
+                        }
+                    }
+                    let _ = wake.try_send(());
+                });
             #[cfg(windows)]
             {
                 window = window
@@ -507,43 +592,108 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 .spawn(move || {
                     let mut previous = None;
                     let mut retry = Instant::now();
-                    let mut shown = false;
                     while !poll_done.load(Ordering::Acquire) {
                         // Tauri marshals this native operation to its runtime. Calling
                         // it from this worker avoids blocking the GTK/WebView loop.
+                        let ticket = match setup_visibility.lock() {
+                            Ok(flow) => flow.ticket(),
+                            Err(_) => break,
+                        };
                         let cookies = snapshot(&window);
+                        if !setup_visibility
+                            .lock()
+                            .is_ok_and(|flow| flow.is_current(ticket))
+                        {
+                            previous = None;
+                            continue;
+                        }
                         let candidate = has_session(&cookies);
-                        let current = fingerprint(&cookies);
+                        let current = (ticket, fingerprint(&cookies));
                         if candidate && (previous != Some(current) || Instant::now() >= retry) {
                             previous = Some(current);
                             retry = Instant::now() + Duration::from_secs(10);
-                            let _ = window.set_title(
-                                language.text("Проверяем вход VK…", "Checking VK sign-in…"),
+                            update_visibility(
+                                &window,
+                                &setup_visibility,
+                                &poll_done,
+                                language,
+                                Visibility::Checking(ticket),
                             );
                             let verified = (|| {
                                 let client = WebAudioClient::new(cookies.clone()).ok()?;
                                 let profile = client.session_profile().ok()?;
-                                client.page(profile.id, 0).ok()?;
                                 Some(profile)
                             })();
-                            if let Some(profile) = verified {
-                                if finish_once(
-                                    &poll_outcome,
-                                    &poll_done,
-                                    Reply::Success { profile, cookies },
-                                ) {
-                                    handle.exit(0);
+                            // A same-document sign-in can rotate the SID without
+                            // any navigation event. Discard a stale verification
+                            // before it can publish an account or reveal the UI.
+                            let latest = snapshot(&window);
+                            if !verified_session_matches(&latest, current.1)
+                                || !setup_visibility
+                                    .lock()
+                                    .is_ok_and(|flow| flow.is_current(ticket))
+                            {
+                                previous = None;
+                                if !has_session(&latest) {
+                                    update_visibility(
+                                        &window,
+                                        &setup_visibility,
+                                        &poll_done,
+                                        language,
+                                        Visibility::Recover(ticket),
+                                    );
                                 }
-                                break;
+                                continue;
                             }
+                            if let Some(profile) = verified {
+                                let cookies = latest;
+                                let view = window.clone();
+                                let flow = setup_visibility.clone();
+                                let outcome = poll_outcome.clone();
+                                let done = poll_done.clone();
+                                let handle = handle.clone();
+                                let _ = window.run_on_main_thread(move || {
+                                    let Ok(mut flow) = flow.lock() else { return };
+                                    if flow.is_current(ticket)
+                                        && finish_once(
+                                            &outcome,
+                                            &done,
+                                            Reply::Success { profile, cookies },
+                                        )
+                                    {
+                                        flow.cancel();
+                                        let _ = view.hide();
+                                        handle.exit(0);
+                                    }
+                                });
+                            } else {
+                                update_visibility(
+                                    &window,
+                                    &setup_visibility,
+                                    &poll_done,
+                                    language,
+                                    Visibility::Recover(ticket),
+                                );
+                            }
+                        } else if !candidate && finished_page.load(Ordering::Acquire) == ticket {
+                            update_visibility(
+                                &window,
+                                &setup_visibility,
+                                &poll_done,
+                                language,
+                                Visibility::Recover(ticket),
+                            );
                         }
-                        if !shown {
-                            let _ = window.set_title(language.text("Вход в VK", "Sign in to VK"));
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                            shown = true;
-                        }
-                        thread::sleep(Duration::from_millis(800));
+                        update_visibility(
+                            &window,
+                            &setup_visibility,
+                            &poll_done,
+                            language,
+                            Visibility::Show,
+                        );
+                        // Page events wake this immediately; the fallback also
+                        // catches cookies set by same-document/SPA transitions.
+                        let _ = wakes.recv_timeout(Duration::from_millis(100));
                     }
                 })?;
             Ok(())
@@ -557,6 +707,9 @@ pub fn run_helper(language: Language) -> Result<(), String> {
             event,
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
         ) {
+            if let Ok(mut flow) = visibility.lock() {
+                flow.cancel();
+            }
             let _ = finish_once(&exit_outcome, &exit_done, Reply::Canceled);
         }
     });
@@ -645,5 +798,26 @@ mod tests {
         ] {
             assert!(!navigation_allowed(&target.parse().unwrap()));
         }
+    }
+
+    #[test]
+    fn a_profile_check_cannot_accept_a_rotated_or_expired_session() {
+        let original = cookies();
+        let checked = fingerprint(&original);
+        assert!(verified_session_matches(&original, checked));
+        let mut latest = original.clone();
+        latest[0].value = "synthetic-new-account-session".into();
+        assert!(!verified_session_matches(&latest, checked));
+        latest = original.clone();
+        latest[0].expires_unix = Some(1);
+        assert!(!verified_session_matches(&latest, checked));
+        assert!(!verified_session_matches(&[], checked));
+        latest = original;
+        let mut language = latest[0].clone();
+        language.name = "remixlang".into();
+        language.value = "0".into();
+        latest.push(language);
+        latest.reverse();
+        assert!(verified_session_matches(&latest, checked));
     }
 }
