@@ -164,6 +164,7 @@ pub struct EpiIntegration {
     pending_full_output: egui::FullOutput,
 
     ui_platform_state: super::winit_integration::UiPlatformState,
+    ui_frame_clock: super::ui_frame_clock::UiFrameClock,
 
     /// A due native wake already ticked logic, even if its compositor redraw
     /// has not arrived yet. Its eventual UI pass must not double-apply it.
@@ -229,6 +230,11 @@ impl EpiIntegration {
             pending_raw_input: Default::default(),
             pending_full_output: Default::default(),
             ui_platform_state: Default::default(),
+            ui_frame_clock: super::ui_frame_clock::UiFrameClock::new(
+                window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz()),
+            ),
             logic_updated_without_ui: false,
             close: false,
             can_drag_window: false,
@@ -287,11 +293,14 @@ impl EpiIntegration {
         viewport_ui_cb: Option<&DeferredViewportUiCallback>,
         raw_input: egui::RawInput,
     ) -> egui::FullOutput {
-        let raw_input = self.prepare_raw_input(app, raw_input);
+        let mut raw_input = self.prepare_raw_input(app, raw_input);
+        let is_root_viewport = viewport_ui_cb.is_none();
+        if is_root_viewport {
+            raw_input.predicted_dt = self.ui_frame_clock.begin_ui(raw_input.time);
+        }
 
         let close_requested = raw_input.viewport().close_requested();
 
-        let is_root_viewport = viewport_ui_cb.is_none();
         let logic_updated_without_ui =
             is_root_viewport && core::mem::take(&mut self.logic_updated_without_ui);
 
@@ -320,6 +329,12 @@ impl EpiIntegration {
         }
 
         if is_root_viewport {
+            self.ui_frame_clock.end_ui(
+                full_output
+                    .viewport_output
+                    .get(&ViewportId::ROOT)
+                    .is_some_and(|output| output.repaint_delay.is_zero()),
+            );
             self.ui_platform_state
                 .remember_ui(&full_output.platform_output);
         }
@@ -570,6 +585,7 @@ mod background_event_tests {
             pending_raw_input: egui::RawInput::default(),
             pending_full_output: egui::FullOutput::default(),
             ui_platform_state: Default::default(),
+            ui_frame_clock: super::super::ui_frame_clock::UiFrameClock::new(None),
             logic_updated_without_ui: false,
             close: false,
             can_drag_window: false,
@@ -579,6 +595,81 @@ mod background_event_tests {
                 "close-test".into(),
                 None,
             ),
+        }
+    }
+
+    #[test]
+    fn background_logic_and_discarded_passes_preserve_high_refresh_ui_time_after_idle() {
+        struct ClockApp {
+            time: f64,
+            immediate: bool,
+            stable: f32,
+        }
+        impl epi::App for ClockApp {
+            fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+                input.time = Some(self.time);
+            }
+            fn logic(&mut self, ctx: &egui::Context, _: &mut epi::Frame) {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut epi::Frame) {
+                if ui.ctx().current_pass_index() == 0 {
+                    self.stable = ui.input(|input| input.stable_dt);
+                    ui.ctx().request_discard("synthetic second layout pass");
+                }
+                if self.immediate {
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        for hz in [60.0, 120.0, 144.0, 240.0, 280.0, 360.0] {
+            let mut integration = integration();
+            integration.ui_frame_clock =
+                super::super::ui_frame_clock::UiFrameClock::new(Some((hz * 1000.0) as u32));
+            let mut app = ClockApp {
+                time: 0.0,
+                immediate: true,
+                stable: 0.0,
+            };
+            for frame in 0..12 {
+                app.time = f64::from(frame) / hz;
+                for _ in 0..3 {
+                    integration.update_logic_only(&mut app, input(false));
+                }
+                let mut output = integration.update(&mut app, None, input(false));
+                output.textures_delta.clear();
+                assert!(
+                    (f64::from(app.stable) - 1.0 / hz).abs() < 0.000_01,
+                    "UI prediction must follow the actual frame period, not logic wakes"
+                );
+            }
+            app.immediate = false;
+            for tick in 1..12 {
+                app.time = 1.0 + f64::from(tick) * 0.1;
+                for _ in 0..3 {
+                    integration.update_logic_only(&mut app, input(false));
+                }
+                let mut output = integration.update(&mut app, None, input(false));
+                output.textures_delta.clear();
+            }
+            app.time = 10.0;
+            app.immediate = true;
+            for _ in 0..3 {
+                integration.update_logic_only(&mut app, input(false));
+            }
+            let mut wheel = input(false);
+            wheel.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -1.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            });
+            let mut output = integration.update(&mut app, None, wheel);
+            output.textures_delta.clear();
+            assert!(
+                (f64::from(app.stable) - 1.0 / hz).abs() < 0.000_01,
+                "idle playback timers must not become the first wheel timestep"
+            );
         }
     }
 

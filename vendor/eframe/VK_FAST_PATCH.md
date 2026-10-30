@@ -67,6 +67,14 @@ Changes:
   cursor with the default arrow or resets text composition/caret state. IME
   interruption actions are not replayed, while clipboard and native viewport
   commands produced by application logic remain live.
+- Root UI animation prediction has its own clock, updated only by actual
+  `run_ui` frames. Multiple CPU-only `run_logic` wakes consume egui's repaint
+  history; without a separate UI prediction this made `stable_dt` fall back to
+  16.667ms even while a 280Hz window painted every 3.57ms. The clock is seeded
+  from native monitor refresh when available and learns the real interval of
+  continuous, immediately requested UI frames. Long pauses and 100ms playback
+  timers retain the last continuous cadence instead of becoming animation
+  steps. No additional repaint requests, timer, FPS cap or vsync change is used.
 
 Headless regressions cover accepted/canceled background close, fresh close
 logic after an earlier timer tick, three separate external wakes and repeated
@@ -78,6 +86,9 @@ hidden startup, and fresh reveal state for a recreated window without a GPU.
 `native/windows_startup.rs` additionally checks hidden/non-maximized constructor
 attributes, cloak-before-maximize ordering, normal restore dimensions, rejected
 cloak startup, ownership during setup failure and hidden-paint uncloak behavior.
+`native/ui_frame_clock.rs` and an actual egui integration regression cover
+60/120/144/240/280/360Hz, three CPU-only wakes per UI frame, discarded UI passes
+and the first wheel event after playback-only idle timers.
 
 A native probe was also run on Wayland using only its own test
 window: after floating/minimizing it, three independent worker-thread repaint

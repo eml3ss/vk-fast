@@ -21,6 +21,8 @@ mod discord_rpc_app;
 mod playlist_actions;
 #[path = "system_media_app.rs"]
 mod system_media_app;
+#[path = "track_view_cache.rs"]
+mod track_view_cache;
 #[path = "tray_app.rs"]
 mod tray_app;
 #[cfg(test)]
@@ -931,6 +933,7 @@ pub struct MusicApp {
     profile_cleanup: Option<Receiver<Result<(), ()>>>,
     workers: Vec<thread::JoinHandle<()>>,
     library: Library,
+    track_view_cache: track_view_cache::TrackViewCache,
     page: MusicPage,
     scrolling: Scrolling,
     back_history: Vec<NavigationLocation>,
@@ -1233,6 +1236,7 @@ impl MusicApp {
             profile_cleanup: None,
             workers: Vec::new(),
             library: Library::default(),
+            track_view_cache: track_view_cache::TrackViewCache::default(),
             page: MusicPage::default(),
             scrolling: Scrolling::default(),
             back_history: Vec::new(),
@@ -1522,6 +1526,7 @@ impl MusicApp {
         self.avatar_refresh_ready = false;
         self.avatar_refresh_url = None;
         self.library = Library::default();
+        self.track_view_cache = track_view_cache::TrackViewCache::default();
         self.recent.clear();
         self.scrolling.stop();
         self.back_history.clear();
@@ -2292,6 +2297,7 @@ impl MusicApp {
                         }
                         self.recent
                             .retain(|track| track.key() != resolved.track.key());
+                        self.track_view_cache.invalidate();
                         self.recent.insert(0, resolved.track.clone());
                         self.recent.truncate(recent_cache::MAX_RECENT);
                         self.save_recent(ctx);
@@ -2767,6 +2773,7 @@ impl MusicApp {
                 self.save_library(ctx);
             }
             Ok(Reply::Connected(session, music_error, explicit_login, cached, recent, resume)) => {
+                self.track_view_cache.invalidate();
                 if explicit_login {
                     self.avatar_refresh_ready = true;
                     self.avatar_refresh_url = session.profile.avatar_url.clone();
@@ -4022,16 +4029,31 @@ impl MusicApp {
     }
 
     fn search_track_rows(&mut self, ui: &mut egui::Ui, tracks: &[Track]) -> Option<TrackAction> {
-        if tracks.is_empty() {
-            return None;
-        }
         let active = matches!(
             self.player.snapshot().state,
             PlaybackState::Playing | PlaybackState::Loading
         );
+        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows")
+    }
+
+    // Reserve the complete list height, but lay out only rows in the viewport.
+    // Detail pages share this with search so large playlists do not create
+    // widgets and text layouts for every off-screen track.
+    fn clipped_track_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        tracks: &[Track],
+        columns: usize,
+        active: bool,
+        id: &'static str,
+    ) -> Option<TrackAction> {
+        if tracks.is_empty() {
+            return None;
+        }
         let stride = 58.0;
+        let rows = tracks.len().div_ceil(columns);
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), tracks.len() as f32 * stride - 4.0),
+            egui::vec2(ui.available_width(), rows as f32 * stride - 4.0),
             Sense::hover(),
         );
         let first = ((ui.clip_rect().top() - rect.top()) / stride)
@@ -4041,14 +4063,14 @@ impl MusicApp {
             .ceil()
             .max(0.0) as usize
             + 1)
-        .min(tracks.len());
+        .min(rows);
         if first >= last {
             return None;
         }
         let mut action = None;
         ui.scope_builder(
             egui::UiBuilder::new()
-                .id_salt("search-track-rows")
+                .id_salt(id)
                 .max_rect(egui::Rect::from_min_max(
                     egui::pos2(rect.left(), rect.top() + first as f32 * stride),
                     rect.max,
@@ -4056,10 +4078,27 @@ impl MusicApp {
                 .layout(Layout::top_down(Align::Min)),
             |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                for (index, track) in tracks.iter().enumerate().take(last).skip(first) {
-                    if let Some(intent) = self.track_row(ui, track, index, active) {
-                        action = Some(intent);
-                    }
+                for row in first..last {
+                    let row_id = ui.make_persistent_id(("clipped-track-row", row));
+                    ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+                        if columns == 1 {
+                            if let Some(intent) = self.track_row(ui, &tracks[row], row, active) {
+                                action = Some(intent);
+                            }
+                        } else {
+                            ui.columns(columns, |uis| {
+                                for (column, column_ui) in uis.iter_mut().enumerate() {
+                                    let index = row * columns + column;
+                                    if let Some(track) = tracks.get(index)
+                                        && let Some(intent) =
+                                            self.track_row(column_ui, track, index, active)
+                                    {
+                                        action = Some(intent);
+                                    }
+                                }
+                            });
+                        }
+                    });
                 }
             },
         );
@@ -4447,6 +4486,9 @@ impl MusicApp {
         {
             return;
         }
+        if result.is_ok() {
+            self.track_view_cache.invalidate();
+        }
         match result {
             Ok(HomeReply::Catalog(sources)) => {
                 self.home_collections = sources
@@ -4509,17 +4551,8 @@ impl MusicApp {
             .get(&track.key())
             .copied()
             .or_else(|| {
-                self.library
-                    .tracks
-                    .iter()
-                    .find(|saved| {
-                        saved.key() == track.key()
-                            || saved.release_key == Some(track.key())
-                            || track.release_key == Some(saved.key())
-                            || (track.release_key.is_some()
-                                && saved.release_key == track.release_key)
-                    })
-                    .map(Track::key)
+                self.track_view_cache
+                    .library_key(&self.library.tracks, track)
             })
             .filter(|key| key.0 == owner)
     }
@@ -4535,10 +4568,10 @@ impl MusicApp {
         {
             return false;
         }
-        self.owned_library_key(track).is_some()
-            || track
-                .library_liked
-                .unwrap_or(track.owner_id == session.profile.id)
+        track
+            .library_liked
+            .unwrap_or(track.owner_id == session.profile.id)
+            || self.owned_library_key(track).is_some()
     }
 
     fn like_button(&self, ui: &mut egui::Ui, track: &Track) -> egui::Response {
@@ -4643,6 +4676,7 @@ impl MusicApp {
     }
 
     fn update_known_tracks(&mut self, mut update: impl FnMut(&mut Track)) {
+        self.track_view_cache.invalidate();
         for track in self
             .library
             .tracks
@@ -4680,6 +4714,7 @@ impl MusicApp {
     }
 
     fn reconcile_library_removals(&mut self) {
+        self.track_view_cache.invalidate();
         // Offset counts VK rows, including removed rows returned by an older
         // request. Only the fresh prefix is adjusted when hiding those rows.
         let mut index = 0;
@@ -4889,6 +4924,7 @@ impl MusicApp {
             .into_iter()
             .map(|track| (track.key(), track))
             .collect();
+        self.track_view_cache.invalidate();
         let removed = &self.removed_from_library;
         let added = &self.like_aliases;
         let enrich = |track: &mut Track| {
@@ -5364,26 +5400,13 @@ impl MusicApp {
                 } else {
                     1
                 };
-                for (row, chunk) in tracks[..count].chunks(columns).enumerate() {
-                    if columns == 1 {
-                        if let Some(intent) = self.track_row(ui, &chunk[0], row, active) {
-                            track_action = Some(intent);
-                        }
-                    } else {
-                        ui.columns(columns, |uis| {
-                            for (column, track) in chunk.iter().enumerate() {
-                                if let Some(intent) = self.track_row(
-                                    &mut uis[column],
-                                    track,
-                                    row * columns + column,
-                                    active,
-                                ) {
-                                    track_action = Some(intent);
-                                }
-                            }
-                        });
-                    }
-                }
+                track_action = self.clipped_track_rows(
+                    ui,
+                    &tracks[..count],
+                    columns,
+                    active,
+                    "detail-track-rows",
+                );
                 if let Some(DetailPage::Album(release) | DetailPage::Playlist(release)) = data {
                     release_info::show(ui, language, tracks, &release.stats);
                 }
@@ -5902,14 +5925,10 @@ impl MusicApp {
             }
             return;
         }
-        let query = self.filter.trim().to_lowercase();
-        let visible: Vec<usize> = self
-            .view_tracks()
-            .iter()
-            .enumerate()
-            .filter(|(_, track)| track.matches(&query))
-            .map(|(i, _)| i)
-            .collect();
+        let filtering = !self.filter.trim().is_empty();
+        let visible = self
+            .track_view_cache
+            .visible(self.view_tracks(), &self.filter);
         if visible.is_empty() {
             ui.label(t(
                 "Среди загруженных треков ничего не найдено.",
@@ -5944,7 +5963,7 @@ impl MusicApp {
                     visible.len(),
                     |ui, range| {
                         for row in range {
-                            let i = visible[row];
+                            let i = visible.source_index(row);
                             let Some(track) = self.view_tracks().get(i).cloned() else {
                                 continue;
                             };
@@ -5971,12 +5990,12 @@ impl MusicApp {
         }
         let near_bottom = scroll.state.offset.y + scroll.inner_rect.height() + row_height * 2.0
             >= scroll.content_size.y;
-        if !near_bottom || !query.is_empty() {
+        if !near_bottom || filtering {
             ctx.data_mut(|data| data.remove::<(i64, usize, usize)>(pagination_id));
         }
         if is_library
             && near_bottom
-            && query.is_empty()
+            && !filtering
             && self.pending.is_none()
             && self.audio_error.is_none()
             && !self.library.exhausted
@@ -8325,6 +8344,7 @@ mod tests {
             profile_cleanup: None,
             workers: Vec::new(),
             library: Library::default(),
+            track_view_cache: track_view_cache::TrackViewCache::default(),
             page: MusicPage::default(),
             scrolling: Scrolling::default(),
             back_history: Vec::new(),
@@ -14053,6 +14073,95 @@ mod tests {
     }
 
     #[test]
+    fn long_detail_lists_only_build_visible_widgets_and_keep_the_last_row_reachable() {
+        for columns in [1, 2] {
+            let ctx = egui::Context::default();
+            let mut app = account_ui_app(&ctx, Language::English);
+            let mut tracks = page(1001, &(1..=1001).collect::<Vec<_>>()).items;
+            for track in &mut tracks {
+                track.title = format!("Visible track {}", track.id);
+            }
+            let expected_height = tracks.len().div_ceil(columns) as f32 * 58.0 - 4.0;
+            let bottom_offset = expected_height - 720.0;
+            let mut tick = 0;
+            for offset in [0.0, 58.0 * 200.0, bottom_offset] {
+                let mut content_height = 0.0;
+                let mut output = egui::FullOutput::default();
+                for _ in 0..3 {
+                    tick += 1;
+                    output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1040.0, 720.0),
+                            )),
+                            time: Some(f64::from(tick) / 144.0),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            let scroll = theme::scroll_area(
+                                ui,
+                                egui::ScrollArea::vertical()
+                                    .id_salt("clipped-list-test")
+                                    .vertical_scroll_offset(offset)
+                                    .auto_shrink([false, false]),
+                                |ui| {
+                                    app.clipped_track_rows(
+                                        ui,
+                                        &tracks,
+                                        columns,
+                                        false,
+                                        "test-rows",
+                                    );
+                                },
+                            );
+                            content_height = scroll.content_size.y;
+                        },
+                    );
+                    output.textures_delta.clear();
+                }
+                assert!((content_height - expected_height).abs() < 1.0);
+                let widgets = ctx.viewport(|viewport| {
+                    viewport
+                        .prev_pass
+                        .widgets
+                        .layers()
+                        .map(|(_, widgets)| widgets.len())
+                        .sum::<usize>()
+                });
+                assert!(widgets < 500, "Off-screen rows created widgets: {widgets}");
+                let labels: Vec<_> = account_ui_shapes(&output)
+                    .into_iter()
+                    .filter_map(|shape| match shape {
+                        egui::Shape::Text(text)
+                            if text.galley.text().starts_with("Visible track ") =>
+                        {
+                            Some(text.galley.text().to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    !labels.is_empty(),
+                    "No visible rows: columns={columns}, offset={offset}"
+                );
+                if offset == 0.0 {
+                    assert!(labels.iter().any(|label| label == "Visible track 1"));
+                } else if offset == bottom_offset {
+                    assert!(labels.iter().any(|label| label == "Visible track 1001"));
+                } else {
+                    let expected = format!("Visible track {}", 200 * columns + 1);
+                    assert!(
+                        labels.contains(&expected),
+                        "Incorrect row after scrolling: {labels:?}"
+                    );
+                }
+            }
+            assert!(app.workers.is_empty());
+        }
+    }
+
+    #[test]
     fn reset_discards_late_results() {
         let ctx = egui::Context::default();
         let mut app = MusicApp::new(&ctx, false, Language::Russian);
@@ -14066,5 +14175,148 @@ mod tests {
         );
         app.poll(&ctx);
         assert!(app.library.tracks.is_empty());
+    }
+
+    #[test]
+    fn clipped_track_row_ids_and_click_keys_survive_scrolling_with_a_header_in_both_layouts() {
+        fn render(
+            ctx: &egui::Context,
+            app: &mut MusicApp,
+            tracks: &[Track],
+            columns: usize,
+            offset: f32,
+            events: Vec<egui::Event>,
+            tick: &mut u32,
+        ) -> (egui::FullOutput, Option<TrackAction>) {
+            *tick += 1;
+            let mut action = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1040.0, 720.0),
+                    )),
+                    time: Some(f64::from(*tick) / 144.0),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    theme::scroll_area(
+                        ui,
+                        egui::ScrollArea::vertical()
+                            .id_salt("stable-detail-rows")
+                            .vertical_scroll_offset(offset)
+                            .auto_shrink([false, false]),
+                        |ui| {
+                            ui.allocate_space(egui::vec2(ui.available_width(), 120.0));
+                            action = app.clipped_track_rows(
+                                ui,
+                                tracks,
+                                columns,
+                                false,
+                                "stable-track-rows",
+                            );
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            (output, action)
+        }
+        fn primary_row(
+            ctx: &egui::Context,
+            output: &egui::FullOutput,
+            title: &str,
+        ) -> (egui::Id, egui::Rect) {
+            let title = account_ui_text_rect(output, title).expect("Visible target track");
+            ctx.viewport(|viewport| {
+                viewport
+                    .prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, widgets)| widgets.iter())
+                    .find(|widget| {
+                        widget.sense.senses_click()
+                            && (widget.rect.height() - 54.0).abs() < 0.5
+                            && widget.rect.contains(title.center())
+                    })
+                    .map(|widget| (widget.id, widget.rect))
+                    .expect("Primary track row response")
+            })
+        }
+        for columns in [1, 2] {
+            let ctx = egui::Context::default();
+            let mut app = account_ui_app(&ctx, Language::English);
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let mut tracks = page(1001, &(1..=1001).collect::<Vec<_>>()).items;
+            for track in &mut tracks {
+                track.title = format!("Stable track {}", track.id);
+            }
+            let target = &tracks[203 * columns + columns - 1];
+            let mut tick = 0;
+            let first_offset = 120.0 + 58.0 * 200.0;
+            let mut output = egui::FullOutput::default();
+            for _ in 0..3 {
+                output = render(
+                    &ctx,
+                    &mut app,
+                    &tracks,
+                    columns,
+                    first_offset,
+                    Vec::new(),
+                    &mut tick,
+                )
+                .0;
+            }
+            let first = primary_row(&ctx, &output, &target.title);
+            let second_offset = first_offset + 58.0;
+            for _ in 0..3 {
+                output = render(
+                    &ctx,
+                    &mut app,
+                    &tracks,
+                    columns,
+                    second_offset,
+                    Vec::new(),
+                    &mut tick,
+                )
+                .0;
+            }
+            let second = primary_row(&ctx, &output, &target.title);
+            assert_eq!(
+                first.0, second.0,
+                "Primary row ID moved at {columns} columns"
+            );
+            assert!(
+                (first.1.width() - second.1.width()).abs() < 0.5,
+                "Row width changed: {first:?} to {second:?}"
+            );
+            assert!((first.1.top() - second.1.top() - 58.0).abs() < 0.5);
+            let point = account_ui_text_rect(&output, &target.title)
+                .unwrap()
+                .center();
+            let (_, pressed) = render(
+                &ctx,
+                &mut app,
+                &tracks,
+                columns,
+                second_offset,
+                seek_pointer(point, true),
+                &mut tick,
+            );
+            assert!(pressed.is_none());
+            let (_, released) = render(
+                &ctx,
+                &mut app,
+                &tracks,
+                columns,
+                second_offset,
+                seek_pointer(point, false),
+                &mut tick,
+            );
+            assert!(matches!(released, Some(TrackAction::Play(key)) if key == target.key()));
+            assert!(app.playback_pending.is_none() && app.workers.is_empty());
+        }
     }
 }

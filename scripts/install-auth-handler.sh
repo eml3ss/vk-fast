@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-binary=$(realpath -- "${1:-$project_dir/target/debug/vk-fast}")
+binary=$(realpath -- "${1:-$project_dir/target/release/vk-fast}")
 if [[ ! -x "$binary" || "$binary" == *$'\n'* || "$binary" == *$'\r'* ]]; then
     echo 'VK Fast executable is unavailable.' >&2
     exit 1

@@ -53,7 +53,7 @@ Node.js, npm и Tauri CLI для сборки приложения не нужн
 Из каталога проекта на Linux:
 
 ```sh
-cargo run --locked
+cargo run --release --locked
 ```
 
 Оптимизированная сборка:

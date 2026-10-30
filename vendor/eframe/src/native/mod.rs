@@ -2,6 +2,7 @@ mod app_icon;
 mod epi_integration;
 mod event_loop_context;
 mod first_frame;
+mod ui_frame_clock;
 #[cfg(any(target_os = "windows", test))]
 mod windows_startup;
 pub mod run;
