@@ -149,6 +149,9 @@ struct Viewport {
     /// None for immediate viewports.
     viewport_ui_cb: Option<Arc<DeferredViewportUiCallback>>,
 
+    #[cfg(target_os = "windows")]
+    startup: Option<super::windows_startup::WindowStartup>,
+
     // These three live and die together.
     // TODO(emilk): clump them together into one struct!
     gl_surface: Option<glutin::surface::Surface<glutin::surface::WindowSurface>>,
@@ -642,6 +645,8 @@ impl GlowWinitRunning<'_> {
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
 
             let is_visible = viewport.info.visible().unwrap_or(true);
+            #[cfg(target_os = "windows")]
+            let is_visible = is_visible || viewport.startup.is_some();
 
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
@@ -903,6 +908,13 @@ impl GlowWinitRunning<'_> {
                 #[cfg(target_os = "windows")]
                 integration
                     .present_and_show_first_frame(&window, || gl_surface.swap_buffers(context))?;
+                #[cfg(target_os = "windows")]
+                if let Some(startup) = viewport.startup.as_mut() {
+                    startup
+                        .presented()
+                        .map_err(|error| crate::Error::AppCreation(Box::new(error)))?;
+                    viewport.startup = None;
+                }
                 #[cfg(not(target_os = "windows"))]
                 gl_surface.swap_buffers(context)?;
                 frame_timer.resume();
@@ -1144,14 +1156,18 @@ impl GlutinWindowContext {
         log::debug!("trying to create glutin Display with config: {config_template_builder:?}");
 
         // Create GL display. This may probably create a window too on most platforms. Definitely on `MS windows`. Never on Android.
+        #[cfg(target_os = "windows")]
+        let construction_builder = super::windows_startup::construction_builder(&viewport_builder);
+        #[cfg(not(target_os = "windows"))]
+        let construction_builder = viewport_builder.clone();
         let display_builder = glutin_winit::DisplayBuilder::new()
             // we might want to expose this option to users in the future. maybe using an env var or using native_options.
             //
             // The justification for FallbackEgl over PreferEgl is at https://github.com/emilk/egui/pull/2526#issuecomment-1400229576 .
             .with_preference(glutin_winit::ApiPreference::FallbackEgl)
             .with_window_attributes(Some(egui_winit::apply_monitor_to_window_attributes(
-                egui_winit::create_winit_window_attributes(egui_ctx, viewport_builder.clone()),
-                &viewport_builder,
+                egui_winit::create_winit_window_attributes(egui_ctx, construction_builder.clone()),
+                &construction_builder,
                 event_loop,
             )));
 
@@ -1174,6 +1190,16 @@ impl GlutinWindowContext {
                 )
                 .map_err(|e| crate::Error::NoGlutinConfigs(config_template_builder.build(), e))?
         };
+        let window = window.map(Arc::new);
+        #[cfg(target_os = "windows")]
+        let startup = window
+            .as_ref()
+            .map(|window| {
+                super::windows_startup::WindowStartup::prepare(egui_ctx, window, &viewport_builder)
+            })
+            .transpose()
+            .map_err(|error| crate::Error::AppCreation(Box::new(error)))?;
+        #[cfg(not(target_os = "windows"))]
         if let Some(window) = &window {
             egui_winit::apply_viewport_builder_to_window(egui_ctx, window, &viewport_builder);
         }
@@ -1257,7 +1283,9 @@ impl GlutinWindowContext {
                 pending_delta: Default::default(),
                 viewport_ui_cb: None,
                 gl_surface: None,
-                window: window.map(Arc::new),
+                window,
+                #[cfg(target_os = "windows")]
+                startup,
                 egui_winit: None,
             },
         );
@@ -1318,12 +1346,20 @@ impl GlutinWindowContext {
             window
         } else {
             log::debug!("Creating a window for viewport {viewport_id:?}");
+            #[cfg(target_os = "windows")]
+            let construction_builder = if viewport_id == ViewportId::ROOT {
+                super::windows_startup::construction_builder(&viewport.builder)
+            } else {
+                viewport.builder.clone()
+            };
+            #[cfg(not(target_os = "windows"))]
+            let construction_builder = viewport.builder.clone();
             let window_attributes = egui_winit::apply_monitor_to_window_attributes(
                 egui_winit::create_winit_window_attributes(
                     &self.egui_ctx,
-                    viewport.builder.clone(),
+                    construction_builder.clone(),
                 ),
-                &viewport.builder,
+                &construction_builder,
                 event_loop,
             );
             if window_attributes.transparent()
@@ -1352,6 +1388,25 @@ impl GlutinWindowContext {
                     glutin_winit::finalize_window(event_loop, window_attributes, &self.gl_config)?
                 }
             };
+            let window = Arc::new(window);
+            #[cfg(target_os = "windows")]
+            if viewport_id == ViewportId::ROOT {
+                viewport.startup = Some(
+                    super::windows_startup::WindowStartup::prepare(
+                        &self.egui_ctx,
+                        &window,
+                        &viewport.builder,
+                    )
+                    .map_err(|error| crate::Error::AppCreation(Box::new(error)))?,
+                );
+            } else {
+                egui_winit::apply_viewport_builder_to_window(
+                    &self.egui_ctx,
+                    &window,
+                    &viewport.builder,
+                );
+            }
+            #[cfg(not(target_os = "windows"))]
             egui_winit::apply_viewport_builder_to_window(
                 &self.egui_ctx,
                 &window,
@@ -1359,7 +1414,7 @@ impl GlutinWindowContext {
             );
 
             egui_winit::update_viewport_info(&mut viewport.info, &self.egui_ctx, &window, true);
-            viewport.window.insert(Arc::new(window))
+            viewport.window.insert(window)
         };
 
         viewport.egui_winit.get_or_insert_with(|| {
@@ -1628,6 +1683,8 @@ fn initialize_or_update_viewport(
                 window: None,
                 egui_winit: None,
                 gl_surface: None,
+                #[cfg(target_os = "windows")]
+                startup: None,
             })
         }
 
@@ -1647,6 +1704,10 @@ fn initialize_or_update_viewport(
                     ids.this,
                     viewport.builder.title
                 );
+                #[cfg(target_os = "windows")]
+                {
+                    viewport.startup = None;
+                }
                 viewport.window = None;
                 viewport.egui_winit = None;
                 viewport.gl_surface = None;

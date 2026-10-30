@@ -47,6 +47,21 @@ Changes:
   cannot reveal the window, later presents cannot undo hiding to the tray,
   and an explicitly requested initial `visible(false)` stays hidden until an
   application visibility command. Recreated windows receive a fresh gate.
+- A saved maximized Windows Glow root is constructed hidden and non-maximized.
+  Winit's maximize operation calls `ShowWindow(SW_MAXIMIZE)` even for a hidden
+  builder, so a DWM app cloak is acquired before applying restored bounds and
+  maximization in both the WGL `DisplayBuilder` and deferred/EGL creation paths.
+  The GL surface is created at the resulting maximized client size. Restored
+  dimensions are never reapplied to that maximized native window.
+  After a successful full-size swap and the requested automatic Show, the
+  app cloak is released. This completion also runs for explicitly hidden roots,
+  without showing them. A pending startup gets one bootstrap UI/present even if
+  Windows reports occlusion. Cloak ownership is established before native setup;
+  abort cleanup hides before uncloaking. Failure to enable the cloak aborts
+  maximized startup before any maximize/show, while failed uncloak retains
+  ownership and propagates the error for cleanup. Non-maximized startup and
+  non-Windows rendering order are unchanged. DWM cloak requires Windows 8 or
+  newer; VK Fast's supported Windows target is Windows 10 or newer.
 - CPU-only logic output retains the cursor, custom cursor and IME state from
   the last actual UI pass. A timer tick no longer alternates the native hover
   cursor with the default arrow or resets text composition/caret state. IME
@@ -60,6 +75,9 @@ logic after an earlier timer tick, three separate external wakes and repeated
 Wayland swap policy while preserving Windows/X11 vsync.
 `native/first_frame.rs` checks present-before-show, failure/retry, intentional
 hidden startup, and fresh reveal state for a recreated window without a GPU.
+`native/windows_startup.rs` additionally checks hidden/non-maximized constructor
+attributes, cloak-before-maximize ordering, normal restore dimensions, rejected
+cloak startup, ownership during setup failure and hidden-paint uncloak behavior.
 
 A native probe was also run on Wayland using only its own test
 window: after floating/minimizing it, three independent worker-thread repaint
