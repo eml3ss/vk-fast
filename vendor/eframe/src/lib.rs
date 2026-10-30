@@ -166,6 +166,24 @@ mod epi;
 // Re-export everything in `epi` so `eframe` users don't have to care about what `epi` is:
 pub use epi::*;
 
+/// Let a running desktop process activate its window after this process was
+/// launched by user input. This does not activate a window by itself.
+///
+/// Call before notifying the existing instance; Windows may otherwise deny its
+/// focus request. Zero and the all-processes sentinel are deliberately rejected.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+pub fn allow_foreground_activation(process_id: u32) -> bool {
+    if process_id == 0 || process_id == u32::MAX {
+        return false;
+    }
+    // SAFETY: the API accepts a numeric PID and no pointers. A stale or invalid
+    // PID is rejected by Windows; no ownership or memory is transferred.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(process_id) != 0
+    }
+}
+
 pub(crate) mod stopwatch;
 
 // ----------------------------------------------------------------------------

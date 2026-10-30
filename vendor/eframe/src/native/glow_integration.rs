@@ -880,6 +880,9 @@ impl GlowWinitRunning<'_> {
                     }
                 }
 
+                // Wayland needs its existing bootstrap mapping order. Windows
+                // must wait until swap_buffers has supplied the front buffer.
+                #[cfg(not(target_os = "windows"))]
                 integration.post_rendering(&window);
             }
 
@@ -897,6 +900,10 @@ impl GlowWinitRunning<'_> {
                 // through winit. Arm it before committing the next buffer, so
                 // covered windows stop painting without stopping App::logic.
                 window.pre_present_notify();
+                #[cfg(target_os = "windows")]
+                integration
+                    .present_and_show_first_frame(&window, || gl_surface.swap_buffers(context))?;
+                #[cfg(not(target_os = "windows"))]
                 gl_surface.swap_buffers(context)?;
                 frame_timer.resume();
             }

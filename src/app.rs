@@ -1009,6 +1009,7 @@ pub struct MusicApp {
     window_reopen: bool,
     ui_context: egui::Context,
     repaint_target: RepaintTarget,
+    instance_activation: Option<crate::single_instance::Activation>,
     audio_cache: Option<AudioCache>,
     cache_limit_mb: u32,
     cache_stats: Option<CacheStats>,
@@ -1307,6 +1308,7 @@ impl MusicApp {
             window_reopen: false,
             ui_context: ctx.clone(),
             repaint_target: RepaintTarget::new(ctx),
+            instance_activation: None,
             audio_cache,
             cache_limit_mb,
             cache_stats: None,
@@ -1351,6 +1353,25 @@ impl MusicApp {
 
     pub(crate) fn background_context(&self) -> egui::Context {
         self.ui_context.clone()
+    }
+
+    pub(crate) fn attach_instance(&mut self, activation: crate::single_instance::Activation) {
+        activation.set_repaint_target(self.repaint_target.clone());
+        self.instance_activation = Some(activation);
+    }
+
+    fn poll_instance_activation(&mut self, ctx: &egui::Context) {
+        // Do not show a bootstrap-hidden window before its first UI frame has
+        // reached the renderer. Keep early activation queued for the next tick.
+        if ctx.cumulative_frame_nr() > 0
+            && self
+                .instance_activation
+                .as_ref()
+                .is_some_and(crate::single_instance::Activation::take_pending)
+            && !self.tray_quit_requested()
+        {
+            self.show_application(ctx);
+        }
     }
 
     pub fn prepare_reopened_window(&mut self, ctx: &egui::Context) {
@@ -5729,13 +5750,15 @@ impl MusicApp {
                 .color(MUTED),
             );
         } else if self.session.is_none() {
-            ui.label(
-                RichText::new(t(
-                    "Ваша библиотека начнётся с подключения аккаунта",
-                    "Connect your account to see your library",
-                ))
-                .color(MUTED),
-            );
+            theme::inset_heading(ui, |ui| {
+                ui.label(
+                    RichText::new(t(
+                        "Ваша библиотека начнётся с подключения аккаунта",
+                        "Connect your account to see your library",
+                    ))
+                    .color(MUTED),
+                )
+            });
         }
         ui.add_space(8.0);
         if self.session.is_some() || !self.view_tracks().is_empty() {
@@ -6825,16 +6848,17 @@ impl MusicApp {
         let bounds = ctx.content_rect();
         let code_entry = self.qr_accepts_code();
         let compact = code_entry || self.qr_error.is_some();
+        let available_height = (bounds.height() - 24.0).max(260.0);
         let qr_size = (bounds.height()
             - if code_entry {
-                440.0
+                380.0
             } else if compact {
-                340.0
+                360.0
             } else {
-                240.0
+                280.0
             })
-        .clamp(96.0, if compact { 144.0 } else { 196.0 });
-        let width = (bounds.width() - 40.0).clamp(300.0, 420.0);
+        .clamp(96.0, if compact && !code_entry { 144.0 } else { 196.0 });
+        let width = (bounds.width() - 40.0).clamp(300.0, if code_entry { 460.0 } else { 420.0 });
         let response = egui::Window::new(t("Вход через QR", "Sign in via QR"))
             .id(egui::Id::new("vk-fast-qr-login"))
             .open(&mut open)
@@ -6843,10 +6867,11 @@ impl MusicApp {
             .resizable(false)
             .scroll(false)
             .min_height(0.0)
-            .default_height(400.0)
-            .max_height((bounds.height() - 24.0).max(260.0))
+            .default_height(if code_entry { 560.0 } else { 440.0 })
+            .max_height(available_height)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .default_width(width)
+            .min_width(width)
             .max_width(width)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -6879,7 +6904,6 @@ impl MusicApp {
                 ui.separator();
                 ui.vertical_centered(|ui| {
                     let control_width = 128.0;
-                    let row_width = control_width * 2.0 + ui.spacing().item_spacing.x;
                     if let Some(texture) = &self.qr_texture {
                         ui.add(
                             egui::Image::from_texture(texture)
@@ -6991,27 +7015,21 @@ impl MusicApp {
                             .wrap(),
                         );
                     }
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(row_width, 36.0),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            let refresh_button = ui.add_sized(
-                                [control_width, 36.0],
-                                egui::Button::new(t("Обновить QR", "Refresh QR")),
-                            );
-                            let cancel_button = ui.add_sized(
-                                [control_width, 36.0],
-                                egui::Button::new(t("Отмена", "Cancel")),
-                            );
-                            actions = [refresh_button.rect, cancel_button.rect];
-                            if refresh_button.clicked() {
-                                refresh = true;
-                            }
-                            if cancel_button.clicked() {
-                                cancel = true;
-                            }
-                        },
+                    let refresh_button = ui.add_sized(
+                        [control_width, 36.0],
+                        egui::Button::new(t("Обновить QR", "Refresh QR")),
                     );
+                    let cancel_button = ui.add_sized(
+                        [control_width, 36.0],
+                        egui::Button::new(t("Отмена", "Cancel")),
+                    );
+                    actions = [refresh_button.rect, cancel_button.rect];
+                    if refresh_button.clicked() {
+                        refresh = true;
+                    }
+                    if cancel_button.clicked() {
+                        cancel = true;
+                    }
                 })
                 .response
                 .rect
@@ -7747,12 +7765,21 @@ impl MusicApp {
 }
 
 impl eframe::App for MusicApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BACKGROUND.to_normalized_gamma_f32()
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.background_tick(ctx, Some(frame));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render(ui);
+        if ui.ctx().cumulative_frame_nr() == 0 {
+            // An activation queued during startup is handled after presenting
+            // this first frame, preserving the native no-flash reveal order.
+            ui.ctx().request_repaint();
+        }
         #[cfg(feature = "screenshot")]
         self.capture(ui);
     }
@@ -7761,6 +7788,7 @@ impl eframe::App for MusicApp {
 impl MusicApp {
     pub(super) fn background_tick(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         self.poll_system_tray(ctx, frame);
+        self.poll_instance_activation(ctx);
         self.poll_system_media(ctx, frame);
         self.poll(ctx);
         self.poll_profile_cleanup();
@@ -8328,6 +8356,7 @@ mod tests {
             window_reopen: false,
             ui_context: ctx.clone(),
             repaint_target: RepaintTarget::new(ctx),
+            instance_activation: None,
             audio_cache: None,
             cache_limit_mb: preferences::DEFAULT_CACHE_MB,
             cache_stats: None,
@@ -11457,6 +11486,48 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn queued_launch_activation_waits_for_the_first_ui_frame_and_survives_window_recreation() {
+        let contexts = [egui::Context::default(), egui::Context::default()];
+        let mut app = account_ui_app(&contexts[0], Language::English);
+        app.resume_position = Some(42.0);
+        let activation = crate::single_instance::Activation::default();
+        app.attach_instance(activation.clone());
+
+        for (index, ctx) in contexts.iter().enumerate() {
+            if index != 0 {
+                app.prepare_reopened_window(ctx);
+            }
+            activation.request_for_test();
+            let hidden = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+                app.poll_instance_activation(ctx);
+            });
+            assert!(
+                hidden
+                    .viewport_commands
+                    .get(&egui::ViewportId::ROOT)
+                    .is_none_or(|commands| !commands
+                        .contains(&egui::ViewportCommand::Visible(true))
+                        && !commands.contains(&egui::ViewportCommand::Focus))
+            );
+
+            let mut first_frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label("Synthetic initial frame");
+            });
+            first_frame.textures_delta.clear();
+            let shown = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+                app.poll_instance_activation(ctx);
+            });
+            let commands = &shown.viewport_commands[&egui::ViewportId::ROOT];
+            assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
+            assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(commands.contains(&egui::ViewportCommand::Focus));
+            assert!(!activation.take_pending());
+            assert_eq!(app.resume_position, Some(42.0));
+            assert_eq!(app.player.decoder_starts(), 0);
+        }
+    }
+
     fn custom_caption_glyphs(
         output: &egui::FullOutput,
         size: egui::Vec2,
@@ -13593,6 +13664,7 @@ mod tests {
                 app.qr_expires = Some(Instant::now() + Duration::from_secs(60));
                 app.qr_code_input = "012345".into();
                 let mut frame = 0;
+                let mut waiting_size = None;
                 for stage in [
                     qr_auth::Stage::Waiting,
                     qr_auth::Stage::Scanned,
@@ -13626,6 +13698,9 @@ mod tests {
                             shapes = output.shapes;
                         }
                         let (window, content, confirmation, actions) = rects.unwrap();
+                        if stage == qr_auth::Stage::Waiting && !show_error {
+                            waiting_size.get_or_insert(window.size());
+                        }
                         for label in [
                             language.text("Вход через QR", "Sign in via QR"),
                             language.text("Введите код", "Enter your code"),
@@ -13662,15 +13737,36 @@ mod tests {
                                 "QR controls have different widths: {controls:?}"
                             );
                             assert!(content.expand(1.0).contains_rect(actual));
+                            for control in controls {
+                                assert!(
+                                    (control.center().x - window.center().x).abs() <= 1.0,
+                                    "QR control is not individually centered: {control:?}"
+                                );
+                            }
                         }
+                        assert!(
+                            actions[1].top() >= actions[0].bottom() + 4.0,
+                            "Cancel is not stacked below Refresh: {actions:?}"
+                        );
                         assert!(shapes.iter().all(|shape| centered_labels(&shape.shape)));
                         if let Some([field, button]) = confirmation {
+                            let waiting = waiting_size.unwrap();
+                            assert!(
+                                window.width() >= waiting.x + 32.0
+                                    && window.height() >= waiting.y + 24.0,
+                                "Confirmation window did not grow: {window:?}, waiting {waiting:?}"
+                            );
                             assert!(
                                 button.top() >= field.bottom(),
                                 "Confirmation is not below its field"
                             );
                             assert!((field.center().x - window.center().x).abs() <= 1.0);
                             assert!((button.center().x - window.center().x).abs() <= 1.0);
+                            assert!(
+                                actions[0].top() >= button.bottom() + 4.0,
+                                "Refresh is not stacked below Confirm"
+                            );
+                            assert!((button.width() - actions[0].width()).abs() <= 1.0);
                             assert!(
                                 shapes.iter().any(|shape| blue_button(&shape.shape, button)),
                                 "Confirmation is not blue"

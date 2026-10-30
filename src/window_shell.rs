@@ -163,10 +163,11 @@ impl<A: ResidentApp> eframe::App for WindowApp<A> {
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        self.app.as_ref().map_or(
-            egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32(),
-            |app| app.clear_color(visuals),
-        )
+        self.app
+            .as_ref()
+            .map_or(crate::theme::BACKGROUND.to_normalized_gamma_f32(), |app| {
+                app.clear_color(visuals)
+            })
     }
 
     fn persist_egui_memory(&self) -> bool {

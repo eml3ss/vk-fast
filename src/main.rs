@@ -45,6 +45,7 @@ mod search_ui;
 mod seek_bar;
 mod session_store;
 mod settings_search;
+mod single_instance;
 mod system_media;
 mod system_tray;
 mod tauri_login;
@@ -217,21 +218,36 @@ fn main() -> eframe::Result {
         eprintln!("--lang requires a value: ru or en.");
         std::process::exit(2);
     }
+    let language_override = if let Some(option) = args.windows(2).find(|pair| pair[0] == "--lang") {
+        let Some(language) = i18n::Language::from_code(&option[1]) else {
+            eprintln!("Unsupported language. Use --lang ru or --lang en.");
+            std::process::exit(2);
+        };
+        Some(language)
+    } else {
+        None
+    };
+    // Helpers and CLI checks above remain independent. Claim the GUI instance
+    // before touching preferences, sessions, audio or diagnostic files.
+    let instance = match single_instance::acquire(|process_id| {
+        #[cfg(windows)]
+        let _ = eframe::allow_foreground_activation(process_id);
+        #[cfg(not(windows))]
+        let _ = process_id;
+    })
+    .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+    {
+        single_instance::Acquisition::Primary(primary) => primary,
+        single_instance::Acquisition::AlreadyRunning => return Ok(()),
+    };
+    let activation = instance.activations();
     if preferences::migrate_legacy().is_err() {
         eprintln!("Не удалось перенести настройки VK Fast в каталог конфигурации.");
     }
     if diagnostics::init(preferences::load_logging_enabled()).is_err() {
         eprintln!("Could not enable VK Fast diagnostic logging.");
     }
-    let language = if let Some(option) = args.windows(2).find(|pair| pair[0] == "--lang") {
-        let Some(language) = i18n::Language::from_code(&option[1]) else {
-            eprintln!("Unsupported language. Use --lang ru or --lang en.");
-            std::process::exit(2);
-        };
-        language
-    } else {
-        preferences::load_language()
-    };
+    let language = language_override.unwrap_or_else(preferences::load_language);
     let demo = args.iter().any(|arg| arg == "--demo");
     let sign_in = args.iter().any(|arg| arg == "--login");
     let qr_sign_in = args.iter().any(|arg| arg == "--qr-login");
@@ -252,6 +268,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc: &eframe::CreationContext<'_>| {
             let mut app = app::MusicApp::new(&cc.egui_ctx, demo, language);
+            app.attach_instance(activation);
             if qr_sign_in {
                 app.connect_qr(&cc.egui_ctx);
             } else if args.iter().any(|arg| arg == "--oauth-login") {
@@ -280,6 +297,7 @@ fn main() -> eframe::Result {
         }),
     );
     diagnostics::shutdown();
+    drop(instance);
     result
 }
 

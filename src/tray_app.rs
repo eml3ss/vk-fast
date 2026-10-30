@@ -122,9 +122,6 @@ impl MusicApp {
     }
 
     pub(super) fn poll_system_tray(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
-        if self.demo {
-            return;
-        }
         #[cfg(target_os = "linux")]
         {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -137,6 +134,9 @@ impl MusicApp {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = frame;
+        if self.demo {
+            return;
+        }
         if self.minimize_to_tray && !self.tray.attempted {
             self.tray.attempted = true;
             match SystemTray::new(self.repaint_target.with_context(ctx), self.language) {

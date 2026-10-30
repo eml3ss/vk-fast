@@ -487,6 +487,12 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 .general_autofill_enabled(false)
                 .user_agent(crate::web_audio::USER_AGENT)
                 .on_navigation(navigation_allowed);
+            #[cfg(windows)]
+            {
+                window = window
+                    .theme(Some(tauri::Theme::Dark))
+                    .background_color(tauri::webview::Color(15, 17, 21, 255));
+            }
             // Use the same app artwork for the auxiliary login window. On
             // Windows this comes from the executable's canonical ICO resource.
             if let Some(icon) = app.default_window_icon() {

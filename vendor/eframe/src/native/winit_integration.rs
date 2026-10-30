@@ -9,6 +9,35 @@ use egui::ViewportId;
 #[cfg(feature = "accesskit")]
 use egui_winit::accesskit_winit;
 
+/// Interaction state belongs to the last UI pass, not a CPU-only logic tick.
+/// In particular, `run_logic` may return a default cursor and no IME output
+/// simply because it did not run any widgets.
+#[derive(Default)]
+pub(crate) struct UiPlatformState {
+    cursor_icon: egui::CursorIcon,
+    cursor_image: Option<egui::output::CustomCursorImage>,
+    ime: Option<egui::output::IMEOutput>,
+}
+
+impl UiPlatformState {
+    pub fn remember_ui(&mut self, output: &egui::PlatformOutput) {
+        self.cursor_icon = output.cursor_icon;
+        self.cursor_image.clone_from(&output.cursor_image);
+        self.ime.clone_from(&output.ime);
+    }
+
+    pub fn preserve_for_logic(&self, output: &mut egui::PlatformOutput) {
+        output.cursor_icon = self.cursor_icon;
+        output.cursor_image.clone_from(&self.cursor_image);
+        output.ime.clone_from(&self.ime);
+        if let Some(ime) = &mut output.ime {
+            // An interruption is an action emitted by a UI pass, not state
+            // to replay on every background timer/media wake.
+            ime.should_interrupt_composition = false;
+        }
+    }
+}
+
 /// Returns `true` if the window is invisible or minimized.
 ///
 /// These windows don't receive `RedrawRequested` events on Windows,
@@ -206,5 +235,47 @@ pub(crate) fn on_accesskit_window_event(
             // so there's no need to repaint.
             EventResult::Wait
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn background_cursor_retains_custom_image_and_ime_without_replaying_interrupt_actions() {
+        let image = egui::output::CustomCursorImage {
+            rgba: std::sync::Arc::from([255_u8; 4]),
+            size: [1, 1],
+            hotspot: [0, 0],
+        };
+        let ui = egui::PlatformOutput {
+            cursor_icon: egui::CursorIcon::Text,
+            cursor_image: Some(image.clone()),
+            ime: Some(egui::output::IMEOutput {
+                purpose: egui::IMEPurpose::Normal,
+                rect: egui::Rect::EVERYTHING,
+                cursor_rect: egui::Rect::NOTHING,
+                should_interrupt_composition: true,
+            }),
+            ..Default::default()
+        };
+        let mut state = UiPlatformState::default();
+        state.remember_ui(&ui);
+        let mut logic = egui::PlatformOutput {
+            commands: vec![egui::OutputCommand::CopyText("synthetic".into())],
+            ..Default::default()
+        };
+        state.preserve_for_logic(&mut logic);
+        assert_eq!(logic.cursor_icon, egui::CursorIcon::Text);
+        assert_eq!(logic.cursor_image, Some(image));
+        assert!(!logic.ime.as_ref().unwrap().should_interrupt_composition);
+        assert_eq!(logic.commands.len(), 1);
+
+        state.remember_ui(&egui::PlatformOutput::default());
+        state.preserve_for_logic(&mut logic);
+        assert_eq!(logic.cursor_icon, egui::CursorIcon::Default);
+        assert!(logic.cursor_image.is_none() && logic.ime.is_none());
+        assert_eq!(logic.commands.len(), 1);
     }
 }

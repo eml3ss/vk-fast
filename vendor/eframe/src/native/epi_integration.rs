@@ -154,7 +154,7 @@ pub struct EpiIntegration {
     pub frame: epi::Frame,
     last_auto_save: Instant,
     pub beginning: Instant,
-    is_first_frame: bool,
+    first_frame: super::first_frame::FirstFrame,
     pub egui_ctx: egui::Context,
 
     /// Input that we have received, but not yet given to egui,
@@ -162,6 +162,8 @@ pub struct EpiIntegration {
     pending_raw_input: egui::RawInput,
 
     pending_full_output: egui::FullOutput,
+
+    ui_platform_state: super::winit_integration::UiPlatformState,
 
     /// A due native wake already ticked logic, even if its compositor redraw
     /// has not arrived yet. Its eventual UI pass must not double-apply it.
@@ -226,6 +228,7 @@ impl EpiIntegration {
             last_auto_save: Instant::now(),
             pending_raw_input: Default::default(),
             pending_full_output: Default::default(),
+            ui_platform_state: Default::default(),
             logic_updated_without_ui: false,
             close: false,
             can_drag_window: false,
@@ -235,7 +238,7 @@ impl EpiIntegration {
             beginning: Instant::now()
                 .checked_sub(web_time::Duration::from_secs_f64(egui_ctx.time()))
                 .unwrap_or_else(Instant::now),
-            is_first_frame: true,
+            first_frame: super::first_frame::FirstFrame::new(native_options.viewport.visible),
             egui_ctx,
         }
     }
@@ -316,6 +319,10 @@ impl EpiIntegration {
             self.handle_close_request(canceled);
         }
 
+        if is_root_viewport {
+            self.ui_platform_state
+                .remember_ui(&full_output.platform_output);
+        }
         self.pending_full_output.append(full_output);
         core::mem::take(&mut self.pending_full_output)
     }
@@ -361,10 +368,12 @@ impl EpiIntegration {
 
         let close_requested = raw_input.viewport().close_requested();
 
-        let logic_output = self.egui_ctx.run_logic(&raw_input, |ctx| {
+        let mut logic_output = self.egui_ctx.run_logic(&raw_input, |ctx| {
             profiling::scope!("App::logic");
             app.logic(ctx, &mut self.frame);
         });
+        self.ui_platform_state
+            .preserve_for_logic(&mut logic_output.platform_output);
         self.logic_updated_without_ui = true;
 
         // No pass consumed the input, so save it for the next one:
@@ -410,12 +419,31 @@ impl EpiIntegration {
         self.frame.info.cpu_usage = Some(seconds);
     }
 
+    #[cfg(any(not(target_os = "windows"), feature = "wgpu_no_default_features"))]
     pub fn post_rendering(&mut self, window: &winit::window::Window) {
         profiling::function_scope!();
-        if core::mem::take(&mut self.is_first_frame) {
-            // We keep hidden until we've painted something. See https://github.com/emilk/egui/pull/2279
+        self.present_and_show_first_frame(window, || Ok::<_, core::convert::Infallible>(()))
+            .unwrap_or_else(|never| match never {});
+    }
+
+    /// Windows must have a front buffer before showing the HWND. Painting into
+    /// an OpenGL back buffer alone still leaves a default surface on screen.
+    pub fn present_and_show_first_frame<E>(
+        &mut self,
+        window: &winit::window::Window,
+        present: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        #[cfg(target_os = "windows")]
+        let theme = if self.egui_ctx.global_style().visuals.dark_mode {
+            winit::window::Theme::Dark
+        } else {
+            winit::window::Theme::Light
+        };
+        self.first_frame.present(present, || {
+            #[cfg(target_os = "windows")]
+            window.set_theme(Some(theme));
             window.set_visible(true);
-        }
+        })
     }
 
     // ------------------------------------------------------------------------
@@ -537,10 +565,11 @@ mod background_event_tests {
             frame: epi::Frame::_new_kittest(),
             last_auto_save: Instant::now(),
             beginning: Instant::now(),
-            is_first_frame: false,
+            first_frame: super::super::first_frame::FirstFrame::new(Some(false)),
             egui_ctx: egui::Context::default(),
             pending_raw_input: egui::RawInput::default(),
             pending_full_output: egui::FullOutput::default(),
+            ui_platform_state: Default::default(),
             logic_updated_without_ui: false,
             close: false,
             can_drag_window: false,
@@ -739,5 +768,174 @@ mod background_event_tests {
         app.cancel_close = false;
         assert!(integration.update_close_request(&mut app, input(true)));
         assert_eq!((app.logic, app.ui), (3, 2));
+    }
+
+    #[test]
+    fn background_logic_keeps_the_hover_cursor_until_the_next_real_ui_pass() {
+        struct Hover {
+            rect: egui::Rect,
+            ui: usize,
+        }
+        impl epi::App for Hover {
+            fn logic(&mut self, ctx: &egui::Context, _: &mut epi::Frame) {
+                ctx.copy_text("synthetic clipboard command".into());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("logic remains active".into()));
+            }
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut epi::Frame) {
+                self.ui += 1;
+                self.rect = ui
+                    .button("Clickable")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .rect;
+            }
+        }
+        let mut integration = integration();
+        let mut app = Hover {
+            rect: egui::Rect::NOTHING,
+            ui: 0,
+        };
+        let mut raw = input(false);
+        raw.focused = true;
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().focused = Some(true);
+        for _ in 0..3 {
+            let mut output = integration.update(&mut app, None, raw.clone());
+            output.textures_delta.clear();
+        }
+        raw.events
+            .push(egui::Event::PointerMoved(app.rect.center()));
+        let mut output = integration.update(&mut app, None, raw.clone());
+        output.textures_delta.clear();
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        let ui_calls = app.ui;
+        raw.events.clear();
+        for _ in 0..10 {
+            let output = integration.update_logic_only(&mut app, raw.clone());
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            assert!(output.platform_output.commands.iter().any(|command|
+                matches!(command, egui::OutputCommand::CopyText(text) if text == "synthetic clipboard command")));
+            assert!(output.viewport_commands[&ViewportId::ROOT].iter().any(|command|
+                matches!(command, egui::ViewportCommand::Title(title) if title == "logic remains active")));
+        }
+        assert_eq!(app.ui, ui_calls);
+
+        // A real UI hover transition still changes the native cursor normally.
+        raw.events
+            .push(egui::Event::PointerMoved(egui::pos2(450.0, 250.0)));
+        let mut output = integration.update(&mut app, None, raw.clone());
+        output.textures_delta.clear();
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default
+        );
+        raw.events.clear();
+        for _ in 0..3 {
+            let output = integration.update_logic_only(&mut app, raw.clone());
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                egui::CursorIcon::Default
+            );
+        }
+    }
+
+    #[test]
+    fn background_logic_preserves_text_ime_and_does_not_reset_the_caret_blink() {
+        struct Text {
+            value: String,
+            request_focus: bool,
+            rect: egui::Rect,
+        }
+        impl epi::App for Text {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut epi::Frame) {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.value).id(egui::Id::new("caret-blink")),
+                );
+                self.rect = response.rect;
+                if self.request_focus {
+                    response.request_focus();
+                    self.request_focus = false;
+                }
+            }
+        }
+        fn has_caret(shape: &egui::Shape, stroke: egui::Stroke) -> bool {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_caret(shape, stroke)),
+                egui::Shape::LineSegment { stroke: actual, .. } => *actual == stroke,
+                _ => false,
+            }
+        }
+        let mut integration = integration();
+        let stroke = egui::Stroke::new(3.0, egui::Color32::from_rgb(253, 17, 229));
+        integration.egui_ctx.all_styles_mut(|style| {
+            style.visuals.text_cursor.stroke = stroke;
+            style.visuals.text_cursor.on_duration = 0.5;
+            style.visuals.text_cursor.off_duration = 0.5;
+            style.visuals.text_cursor.preview = false;
+            style.visuals.text_cursor.blink = true;
+        });
+        let mut app = Text {
+            value: "synthetic".into(),
+            request_focus: true,
+            rect: egui::Rect::NOTHING,
+        };
+        let mut raw = input(false);
+        raw.focused = true;
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().focused = Some(true);
+        for _ in 0..3 {
+            integration.beginning = Instant::now();
+            let mut output = integration.update(&mut app, None, raw.clone());
+            output.textures_delta.clear();
+        }
+        raw.events
+            .push(egui::Event::PointerMoved(app.rect.center()));
+        for (time, visible) in [
+            (0.1, true),
+            (0.4, true),
+            (0.6, false),
+            (0.9, false),
+            (1.1, true),
+        ] {
+            // The integration normally takes this clock from Instant; advancing
+            // its origin makes the blink test deterministic without sleeping.
+            integration.beginning = Instant::now() - Duration::from_secs_f64(time);
+            let mut output = integration.update(&mut app, None, raw.clone());
+            output.textures_delta.clear();
+            assert_eq!(output.platform_output.cursor_icon, egui::CursorIcon::Text);
+            assert!(output.platform_output.ime.is_some());
+            assert_eq!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|shape| has_caret(&shape.shape, stroke)),
+                visible,
+                "caret at {time}"
+            );
+            let ime = output.platform_output.ime;
+            raw.events.clear();
+            for _ in 0..8 {
+                let output = integration.update_logic_only(&mut app, raw.clone());
+                assert_eq!(output.platform_output.cursor_icon, egui::CursorIcon::Text);
+                assert_eq!(output.platform_output.ime, ime);
+            }
+        }
+
+        integration
+            .egui_ctx
+            .memory_mut(|memory| memory.surrender_focus(egui::Id::new("caret-blink")));
+        let mut output = integration.update(&mut app, None, raw.clone());
+        output.textures_delta.clear();
+        assert!(output.platform_output.ime.is_none());
+        assert!(
+            integration
+                .update_logic_only(&mut app, raw)
+                .platform_output
+                .ime
+                .is_none()
+        );
     }
 }

@@ -7,6 +7,11 @@ The upstream MIT and Apache-2.0 license texts are included unchanged.
 
 Changes:
 
+- A safe Windows `allow_foreground_activation(pid)` wrapper lets a newly
+  user-launched secondary process transfer foreground permission to the
+  existing instance before notifying it. Zero and the all-processes sentinel
+  are rejected; the application itself remains free of unsafe code.
+
 - Consume a native close request synchronously, without depending on a
   compositor `RedrawRequested` callback. A close pass runs both application
   hooks to preserve `ViewportCommand::CancelClose`, retains pending output if
@@ -30,12 +35,31 @@ Changes:
 - Both Glow and WGPU expose the same CPU-only dispatch. Save/destroy/on_exit
   handling is unchanged; a minimized/covered Wayland surface never needs GPU
   presentation to process a close or playback command.
+- On Windows, Glow reveals the initially hidden root only after its first
+  successful `swap_buffers`. Previously `post_rendering` made the HWND visible
+  while the first frame was still in the OpenGL back buffer, exposing an
+  uninitialized/default surface. Before showing, the native window theme is
+  matched to the rendered egui visuals using winit's safe `set_theme` API.
+  WGPU already invokes its reveal hook after its painter presents. Other
+  platforms keep their existing bootstrap/present order, including Wayland's
+  non-blocking swap and frame-callback notification.
+- First-frame reveal is one-shot per native window lifetime: a failed present
+  cannot reveal the window, later presents cannot undo hiding to the tray,
+  and an explicitly requested initial `visible(false)` stays hidden until an
+  application visibility command. Recreated windows receive a fresh gate.
+- CPU-only logic output retains the cursor, custom cursor and IME state from
+  the last actual UI pass. A timer tick no longer alternates the native hover
+  cursor with the default arrow or resets text composition/caret state. IME
+  interruption actions are not replayed, while clipboard and native viewport
+  commands produced by application logic remain live.
 
 Headless regressions cover accepted/canceled background close, fresh close
 logic after an earlier timer tick, three separate external wakes and repeated
 100ms deadlines without any UI pass, and no double logic when painting resumes.
 `native/run.rs` checks redraw/logic and hidden bootstrap routing; Glow checks
 Wayland swap policy while preserving Windows/X11 vsync.
+`native/first_frame.rs` checks present-before-show, failure/retry, intentional
+hidden startup, and fresh reveal state for a recreated window without a GPU.
 
 A native probe was also run on Wayland using only its own test
 window: after floating/minimizing it, three independent worker-thread repaint
