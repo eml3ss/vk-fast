@@ -22,6 +22,7 @@ const DEFAULT_SYSTEM_TITLEBAR: bool = false;
 const DEFAULT_NORMALIZE_VOLUME: bool = false;
 const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
 const DEFAULT_LOGGING_ENABLED: bool = false;
+const DEFAULT_DISCORD_RPC_ENABLED: bool = false;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -45,6 +46,8 @@ struct Preferences {
     minimize_to_tray: bool,
     #[serde(deserialize_with = "deserialize_logging_enabled")]
     logging_enabled: bool,
+    #[serde(deserialize_with = "deserialize_discord_rpc_enabled")]
+    discord_rpc_enabled: bool,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -61,6 +64,7 @@ impl Default for Preferences {
             normalize_volume: DEFAULT_NORMALIZE_VOLUME,
             minimize_to_tray: DEFAULT_MINIMIZE_TO_TRAY,
             logging_enabled: DEFAULT_LOGGING_ENABLED,
+            discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
             extra: serde_json::Map::new(),
         }
     }
@@ -146,6 +150,13 @@ fn deserialize_logging_enabled<'de, D: serde::Deserializer<'de>>(
 ) -> Result<bool, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_bool().unwrap_or(DEFAULT_LOGGING_ENABLED))
+}
+
+fn deserialize_discord_rpc_enabled<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(DEFAULT_DISCORD_RPC_ENABLED))
 }
 
 fn valid_volume(volume: f32) -> bool {
@@ -371,7 +382,8 @@ fn load_at(path: &Path) -> io::Result<Option<f32>> {
             || json.get("double_click_to_play").is_some()
             || json.get("normalize_volume").is_some()
             || json.get("minimize_to_tray").is_some()
-            || json.get("logging_enabled").is_some() =>
+            || json.get("logging_enabled").is_some()
+            || json.get("discord_rpc_enabled").is_some() =>
         {
             Ok(Some(DEFAULT_VOLUME))
         }
@@ -438,6 +450,12 @@ fn save_minimize_to_tray_at(path: &Path, enabled: bool) -> io::Result<()> {
 
 fn save_logging_at(path: &Path, enabled: bool) -> io::Result<()> {
     update_at(path, |preferences| preferences.logging_enabled = enabled)
+}
+
+fn save_discord_rpc_at(path: &Path, enabled: bool) -> io::Result<()> {
+    update_at(path, |preferences| {
+        preferences.discord_rpc_enabled = enabled
+    })
 }
 
 fn migrate_at(legacy: &Path, destination: &Path) -> io::Result<()> {
@@ -581,6 +599,19 @@ pub fn save_logging_enabled(enabled: bool) -> io::Result<()> {
     save_logging_at(&preferences_path()?, enabled)
 }
 
+pub fn load_discord_rpc_enabled() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_DISCORD_RPC_ENABLED, |preferences| {
+            preferences.discord_rpc_enabled
+        })
+}
+
+pub fn save_discord_rpc_enabled(enabled: bool) -> io::Result<()> {
+    save_discord_rpc_at(&preferences_path()?, enabled)
+}
+
 /// Explicit startup migration. Loaders never create, move, or remove files.
 pub fn migrate_legacy() -> io::Result<()> {
     let destination = preferences_path()?;
@@ -644,6 +675,116 @@ mod tests {
         }
         fs::write(&path, br#"{"logging_enabled":true}"#).unwrap();
         assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+    }
+
+    #[test]
+    fn discord_rpc_is_opt_in_and_persists_and_migrates_without_losing_preferences() {
+        let directory = TestDirectory::new();
+        let legacy = directory.0.join("state/preferences.json");
+        let destination = directory.0.join("config/preferences.json");
+        assert!(!Preferences::default().discord_rpc_enabled);
+        assert!(load_preferences_at(&legacy).unwrap().is_none());
+        assert!(
+            !legacy.exists(),
+            "Loading defaults must not create settings"
+        );
+        save_at(&legacy, 0.375).unwrap();
+        fs::write(
+            &legacy,
+            serde_json::to_vec(&serde_json::json!({
+                "volume":0.375, "cache_limit_mb":384, "language":"en",
+                "compact_seek_bar":false, "double_click_to_play":false,
+                "system_titlebar":true, "normalize_volume":true,
+                "minimize_to_tray":true, "logging_enabled":true,
+                "future_setting":{"keep":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !load_preferences_at(&legacy)
+                .unwrap()
+                .unwrap()
+                .discord_rpc_enabled
+        );
+        for enabled in [true, false, true] {
+            save_discord_rpc_at(&legacy, enabled).unwrap();
+            let preferences = load_preferences_at(&legacy).unwrap().unwrap();
+            assert_eq!(preferences.discord_rpc_enabled, enabled);
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.cache_limit_mb, 384);
+            assert_eq!(preferences.language, "en");
+            assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
+            assert!(preferences.system_titlebar && preferences.normalize_volume);
+            assert!(preferences.minimize_to_tray && preferences.logging_enabled);
+            assert_eq!(preferences.extra["future_setting"]["keep"], true);
+        }
+        save_at(&legacy, 0.625).unwrap();
+        save_language_at(&legacy, Language::Russian).unwrap();
+        save_cache_at(&legacy, 512).unwrap();
+        migrate_at(&legacy, &destination).unwrap();
+        let preferences = load_preferences_at(&destination).unwrap().unwrap();
+        assert!(preferences.discord_rpc_enabled && preferences.logging_enabled);
+        assert_eq!(preferences.volume, 0.625);
+        assert_eq!(preferences.cache_limit_mb, 512);
+        assert_eq!(preferences.language, "ru");
+        assert_eq!(preferences.extra["future_setting"]["keep"], true);
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn malformed_discord_rpc_values_recover_independently_and_single_flag_keeps_volume() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.375).unwrap();
+        for malformed in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(1.5),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "volume":0.375, "language":"en", "logging_enabled":true,
+                    "normalize_volume":true, "minimize_to_tray":true,
+                    "discord_rpc_enabled":malformed, "future_setting":"kept"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(!preferences.discord_rpc_enabled);
+            assert!(
+                preferences.logging_enabled
+                    && preferences.normalize_volume
+                    && preferences.minimize_to_tray
+            );
+            assert_eq!(preferences.volume, 0.375);
+            assert_eq!(preferences.language, "en");
+            save_discord_rpc_at(&path, true).unwrap();
+            let preferences = load_preferences_at(&path).unwrap().unwrap();
+            assert!(preferences.discord_rpc_enabled && preferences.logging_enabled);
+            assert_eq!(preferences.extra["future_setting"], "kept");
+        }
+        for enabled in [false, true] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"discord_rpc_enabled":enabled})).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+            assert_eq!(
+                load_preferences_at(&path)
+                    .unwrap()
+                    .unwrap()
+                    .discord_rpc_enabled,
+                enabled
+            );
+        }
     }
 
     #[test]
@@ -1301,6 +1442,12 @@ mod tests {
                 save_minimize_to_tray_at(&tray_path, enabled).unwrap();
             }
         });
+        let discord_path = path.clone();
+        let discord = std::thread::spawn(move || {
+            for enabled in [true, false, true] {
+                save_discord_rpc_at(&discord_path, enabled).unwrap();
+            }
+        });
         volume.join().unwrap();
         cache.join().unwrap();
         language.join().unwrap();
@@ -1309,6 +1456,7 @@ mod tests {
         click.join().unwrap();
         normalize.join().unwrap();
         tray.join().unwrap();
+        discord.join().unwrap();
         let preferences = load_preferences_at(&path).unwrap().unwrap();
         assert_eq!(preferences.volume, 0.375);
         assert_eq!(preferences.cache_limit_mb, 384);
@@ -1317,6 +1465,7 @@ mod tests {
         assert!(preferences.system_titlebar);
         assert!(preferences.double_click_to_play);
         assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert!(preferences.discord_rpc_enabled);
     }
 
     #[cfg(unix)]

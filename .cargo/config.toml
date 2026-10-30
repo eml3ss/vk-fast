@@ -2,3 +2,4 @@
 [env]
 VK_FAST_VK_CLIENT_ID = "54863250"
 VK_FAST_VK_REDIRECT_URI = "https://eml3ss.github.io/vk-fast-auth/callback/"
+VK_FAST_DISCORD_APPLICATION_ID = "1565752977157922916"

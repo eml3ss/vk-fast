@@ -19,6 +19,7 @@ mod decoder_binary;
 mod decoder_diagnostics;
 mod detail_ui;
 mod diagnostics;
+mod discord_rpc;
 mod home_ui;
 mod i18n;
 mod icons;

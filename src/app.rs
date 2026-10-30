@@ -15,6 +15,8 @@ use zeroize::Zeroize;
 #[cfg(test)]
 #[path = "current_settings_tests.rs"]
 mod current_settings_tests;
+#[path = "discord_rpc_app.rs"]
+mod discord_rpc_app;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
 #[path = "system_media_app.rs"]
@@ -171,6 +173,18 @@ fn configure_logging(enabled: bool) -> bool {
     #[cfg(test)]
     {
         let _ = (enabled, crate::diagnostics::set_enabled);
+        true
+    }
+}
+
+fn save_discord_preference(enabled: bool) -> bool {
+    #[cfg(not(test))]
+    {
+        preferences::save_discord_rpc_enabled(enabled).is_ok()
+    }
+    #[cfg(test)]
+    {
+        let _ = (enabled, preferences::save_discord_rpc_enabled);
         true
     }
 }
@@ -983,6 +997,9 @@ pub struct MusicApp {
     logging_enabled: bool,
     logging_save_failed: bool,
     logging_runtime_failed: bool,
+    discord_rpc: discord_rpc_app::State,
+    discord_rpc_enabled: bool,
+    discord_rpc_save_failed: bool,
     playing: Option<Track>,
     playback_pending: Option<Receiver<Result<ResolvedTrack, UiError>>>,
     playback_cancel: Option<Arc<AtomicBool>>,
@@ -1283,6 +1300,9 @@ impl MusicApp {
             logging_save_failed: false,
             logging_runtime_failed: preferences::load_logging_enabled()
                 && !crate::diagnostics::enabled(),
+            discord_rpc: discord_rpc_app::State::default(),
+            discord_rpc_enabled: preferences::load_discord_rpc_enabled(),
+            discord_rpc_save_failed: false,
             playing: None,
             playback_pending: None,
             playback_cancel: None,
@@ -1694,6 +1714,7 @@ impl MusicApp {
     }
 
     fn stop_playback(&mut self) {
+        self.discord_rpc.clear();
         self.unavailable_playback.clear();
         self.playlist_controls.cancel_play();
         if let Some(cancel) = self.playback_cancel.take() {
@@ -7245,9 +7266,12 @@ impl MusicApp {
 
     fn settings_section_matches(section: SettingsSection, query: &SettingsQuery) -> bool {
         let fields: &[Setting] = match section {
-            SettingsSection::General => {
-                &[Setting::Language, Setting::MinimizeToTray, Setting::Logging]
-            }
+            SettingsSection::General => &[
+                Setting::Language,
+                Setting::MinimizeToTray,
+                Setting::DiscordRpc,
+                Setting::Logging,
+            ],
             SettingsSection::Interface => &[
                 Setting::SystemTitlebar,
                 Setting::CompactSeek,
@@ -7307,7 +7331,10 @@ impl MusicApp {
                             t("Не удалось сохранить язык.", "Could not save the language."),
                         );
                     }
-                    if query.matches(Setting::MinimizeToTray) || query.matches(Setting::Logging) {
+                    if query.matches(Setting::MinimizeToTray)
+                        || query.matches(Setting::DiscordRpc)
+                        || query.matches(Setting::Logging)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -7342,6 +7369,32 @@ impl MusicApp {
                             t(
                                 "Не удалось сохранить настройку трея.",
                                 "Could not save the tray preference.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::DiscordRpc) || query.matches(Setting::Logging) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::DiscordRpc) {
+                    let mut enabled = self.discord_rpc_enabled;
+                    if theme::switch(ui, &mut enabled, "Discord Rich Presence").changed() {
+                        self.set_discord_rpc_enabled(enabled);
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Показывать текущий трек в Discord с кнопкой GitHub проекта VK Fast.",
+                            "Show the current track in Discord with a button to VK Fast on GitHub.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.discord_rpc_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку Discord.",
+                                "Could not save the Discord preference.",
                             ),
                         );
                     }
@@ -7867,6 +7920,7 @@ impl MusicApp {
         self.poll_qr(ctx);
         self.poll_cache(ctx);
         self.publish_system_media();
+        self.publish_discord_rpc();
         if self.qr_open {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -7896,6 +7950,7 @@ impl Drop for MusicApp {
     fn drop(&mut self) {
         self.tray.detach();
         self.system_media.detach();
+        self.discord_rpc.detach();
         // Capture committed media time before Stop resets the engine snapshot.
         let resume = self.playback_resume_snapshot();
         if let Some(control) = self.web_login.take() {
@@ -8336,6 +8391,9 @@ mod tests {
             logging_enabled: false,
             logging_save_failed: false,
             logging_runtime_failed: false,
+            discord_rpc: discord_rpc_app::State::default(),
+            discord_rpc_enabled: false,
+            discord_rpc_save_failed: false,
             playing: None,
             playback_pending: None,
             playback_cancel: None,

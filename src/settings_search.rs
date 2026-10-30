@@ -16,6 +16,7 @@ pub enum Setting {
     NormalizeVolume,
     MinimizeToTray,
     Logging,
+    DiscordRpc,
     CacheLimit,
     CacheClear,
     CacheStatus,
@@ -64,6 +65,9 @@ impl Query {
             }
             Setting::Logging => {
                 "общие логи логирование журнал диагностика отладка запись файла ошибки general logs logging log diagnostic diagnostics debug file errors"
+            }
+            Setting::DiscordRpc => {
+                "общие дискорд активность статус музыка general discord rpc rich presence status activity music"
             }
             Setting::CacheLimit => {
                 "кеш кэш лимит размер гигабайты хранение диск cache limit size budget storage disk gib gb"
@@ -138,6 +142,27 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Respo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_rpc_matches_general_and_activity_terms_in_both_languages() {
+        for query in [
+            "Discord Rich Presence",
+            "GENERAL DISCORD",
+            "rpc status",
+            "activity music",
+            "ДИСКОРД",
+            "общие активность",
+            "статус музыка",
+        ] {
+            assert!(
+                Query::new(query).matches(Setting::DiscordRpc),
+                "Missing {query}"
+            );
+        }
+        assert!(!Query::new("discord").matches(Setting::Logging));
+        assert!(!Query::new("cache limit").matches(Setting::DiscordRpc));
+        assert!(!Query::new("активность").matches(Setting::NormalizeVolume));
+    }
 
     #[test]
     fn settings_queries_match_both_languages_case_and_multiple_words() {
