@@ -22,7 +22,7 @@ const DEFAULT_SYSTEM_TITLEBAR: bool = false;
 const DEFAULT_NORMALIZE_VOLUME: bool = false;
 const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
 const DEFAULT_LOGGING_ENABLED: bool = false;
-const DEFAULT_DISCORD_RPC_ENABLED: bool = false;
+const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -678,11 +678,12 @@ mod tests {
     }
 
     #[test]
-    fn discord_rpc_is_opt_in_and_persists_and_migrates_without_losing_preferences() {
+    fn discord_rpc_defaults_to_enabled_and_preserves_disabled_choices_during_updates_and_migration()
+    {
         let directory = TestDirectory::new();
         let legacy = directory.0.join("state/preferences.json");
         let destination = directory.0.join("config/preferences.json");
-        assert!(!Preferences::default().discord_rpc_enabled);
+        assert!(Preferences::default().discord_rpc_enabled);
         assert!(load_preferences_at(&legacy).unwrap().is_none());
         assert!(
             !legacy.exists(),
@@ -702,12 +703,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !load_preferences_at(&legacy)
+            load_preferences_at(&legacy)
                 .unwrap()
                 .unwrap()
                 .discord_rpc_enabled
         );
-        for enabled in [true, false, true] {
+        for enabled in [false, true, false] {
             save_discord_rpc_at(&legacy, enabled).unwrap();
             let preferences = load_preferences_at(&legacy).unwrap().unwrap();
             assert_eq!(preferences.discord_rpc_enabled, enabled);
@@ -724,7 +725,7 @@ mod tests {
         save_cache_at(&legacy, 512).unwrap();
         migrate_at(&legacy, &destination).unwrap();
         let preferences = load_preferences_at(&destination).unwrap().unwrap();
-        assert!(preferences.discord_rpc_enabled && preferences.logging_enabled);
+        assert!(!preferences.discord_rpc_enabled && preferences.logging_enabled);
         assert_eq!(preferences.volume, 0.625);
         assert_eq!(preferences.cache_limit_mb, 512);
         assert_eq!(preferences.language, "ru");
@@ -757,7 +758,7 @@ mod tests {
             )
             .unwrap();
             let preferences = load_preferences_at(&path).unwrap().unwrap();
-            assert!(!preferences.discord_rpc_enabled);
+            assert!(preferences.discord_rpc_enabled);
             assert!(
                 preferences.logging_enabled
                     && preferences.normalize_volume
@@ -765,9 +766,9 @@ mod tests {
             );
             assert_eq!(preferences.volume, 0.375);
             assert_eq!(preferences.language, "en");
-            save_discord_rpc_at(&path, true).unwrap();
+            save_discord_rpc_at(&path, false).unwrap();
             let preferences = load_preferences_at(&path).unwrap().unwrap();
-            assert!(preferences.discord_rpc_enabled && preferences.logging_enabled);
+            assert!(!preferences.discord_rpc_enabled && preferences.logging_enabled);
             assert_eq!(preferences.extra["future_setting"], "kept");
         }
         for enabled in [false, true] {
@@ -799,6 +800,7 @@ mod tests {
             assert!(preferences.compact_seek_bar && preferences.double_click_to_play);
             assert!(!preferences.system_titlebar);
             assert!(!preferences.normalize_volume && !preferences.minimize_to_tray);
+            assert!(preferences.discord_rpc_enabled);
             assert_eq!(preferences.volume, DEFAULT_VOLUME);
         }
         assert!(
@@ -1444,7 +1446,7 @@ mod tests {
         });
         let discord_path = path.clone();
         let discord = std::thread::spawn(move || {
-            for enabled in [true, false, true] {
+            for enabled in [false, true, false] {
                 save_discord_rpc_at(&discord_path, enabled).unwrap();
             }
         });
@@ -1465,7 +1467,7 @@ mod tests {
         assert!(preferences.system_titlebar);
         assert!(preferences.double_click_to_play);
         assert!(preferences.normalize_volume && preferences.minimize_to_tray);
-        assert!(preferences.discord_rpc_enabled);
+        assert!(!preferences.discord_rpc_enabled);
     }
 
     #[cfg(unix)]

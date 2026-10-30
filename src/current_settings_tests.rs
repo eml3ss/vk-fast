@@ -31,13 +31,14 @@ fn content_text(output: &egui::FullOutput, caption: &str) -> egui::Rect {
 }
 
 #[test]
-fn discord_presence_is_opt_in_searchable_and_does_not_change_playback_or_start_user_ipc_in_tests() {
+fn discord_presence_switch_is_searchable_and_does_not_change_playback_or_start_user_ipc_in_tests() {
     for language in [Language::Russian, Language::English] {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, language);
         app.settings_open = true;
         app.settings_section = SettingsSection::Interface;
         app.settings_query = "discord rpc".into();
+        app.discord_rpc_enabled = true;
         app.search.input = "keep music query".into();
         let size = egui::vec2(1120.0, 850.0);
         let mut tick = 0;
@@ -48,15 +49,25 @@ fn discord_presence_is_opt_in_searchable_and_does_not_change_playback_or_start_u
             account_ui_text_rect(&output, language.text("Включить логи", "Enable logging"))
                 .is_none()
         );
-        assert!(!app.discord_rpc_enabled);
+        assert!(app.discord_rpc_enabled);
+        assert!(
+            account_ui_text_rect(
+                &output,
+                language.text(
+                    "Показывать текущий трек в Discord.",
+                    "Show the current track in Discord."
+                )
+            )
+            .is_some()
+        );
         let volume = app.player.snapshot().volume;
         account_ui_click(&ctx, &mut app, size, &mut tick, point);
-        assert!(app.discord_rpc_enabled && !app.discord_rpc_save_failed);
+        assert!(!app.discord_rpc_enabled && !app.discord_rpc_save_failed);
         assert_eq!(app.search.input, "keep music query");
         assert_eq!(app.player.snapshot().volume, volume);
         assert!(app.workers.is_empty() && app.cache_pending.is_none());
         account_ui_click(&ctx, &mut app, size, &mut tick, point);
-        assert!(!app.discord_rpc_enabled && !app.discord_rpc_save_failed);
+        assert!(app.discord_rpc_enabled && !app.discord_rpc_save_failed);
     }
 }
 

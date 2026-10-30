@@ -179,6 +179,13 @@ pub struct Player {
 }
 impl Player {
     #[cfg(test)]
+    pub(crate) fn test_playing(duration: u32, position: f64) -> (Self, impl Send) {
+        let (player, control) = Self::test_paused(duration, position);
+        player.state.lock().unwrap().state = PlaybackState::Playing;
+        (player, control)
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_paused(duration: u32, position: f64) -> (Self, impl Send) {
         let (commands, receiver) = mpsc::channel();
         let control = Arc::new(Control::default());

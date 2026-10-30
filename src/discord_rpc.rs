@@ -25,6 +25,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Playing,
+    /// Pausing clears the activity rather than publishing a paused card.
     Paused,
 }
 
@@ -34,6 +35,8 @@ pub struct Snapshot {
     pub artist: String,
     pub album: Option<String>,
     pub cover_url: Option<String>,
+    pub track_url: Option<String>,
+    pub album_url: Option<String>,
     pub duration: f64,
     pub position: f64,
     pub state: State,
@@ -45,6 +48,8 @@ struct Prepared {
     artist: String,
     album: Option<String>,
     cover_url: Option<String>,
+    track_url: Option<String>,
+    album_url: Option<String>,
     duration_ms: u64,
     start_ms: Option<u64>,
 }
@@ -69,7 +74,7 @@ fn text(value: &str) -> String {
     output
 }
 
-fn public_cover(value: &str) -> Option<String> {
+pub(crate) fn public_cover(value: &str) -> Option<String> {
     if value.len() > 2048 {
         return None;
     }
@@ -81,7 +86,10 @@ fn public_cover(value: &str) -> Option<String> {
         || url.password().is_some()
         || url.fragment().is_some()
         || url.port().is_some_and(|port| port != 443)
-        || !(host == "userapi.com" || host.ends_with(".userapi.com"))
+        || !(host == "userapi.com"
+            || host.ends_with(".userapi.com")
+            || host == "vkuserphoto.ru"
+            || host.ends_with(".vkuserphoto.ru"))
     {
         return None;
     }
@@ -89,30 +97,93 @@ fn public_cover(value: &str) -> Option<String> {
     if ![".jpg", ".jpeg", ".png", ".webp", ".avif"]
         .iter()
         .any(|suffix| path.ends_with(suffix))
-        || !url.query_pairs().all(|(key, _)| {
-            matches!(
-                key.as_ref(),
-                "sign"
-                    | "c_uniq_tag"
-                    | "quality"
-                    | "as"
-                    | "size"
-                    | "cs"
-                    | "crop"
-                    | "ava"
-                    | "type"
-                    | "keep_aspect_ratio"
-                    | "impf"
-            )
-        })
+        || url.query_pairs().any(|(key, _)| credential_query_key(&key))
     {
         return None;
     }
     Some(url.into())
 }
 
+fn credential_query_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    let sensitive = |word: &str| {
+        matches!(
+            word,
+            "token"
+                | "secret"
+                | "auth"
+                | "authorization"
+                | "password"
+                | "passwd"
+                | "cookie"
+                | "cookies"
+                | "session"
+                | "sessionid"
+                | "sessionkey"
+                | "remixsid"
+                | "remixsid6"
+                | "code"
+                | "verifier"
+                | "credential"
+                | "credentials"
+                | "accesstoken"
+                | "refreshtoken"
+                | "idtoken"
+                | "authtoken"
+                | "oauthtoken"
+                | "clientsecret"
+                | "codeverifier"
+                | "pkceverifier"
+        )
+    };
+    sensitive(&key)
+        || key
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(sensitive)
+}
+
+fn public_page(value: &str) -> Option<String> {
+    if value.len() > 2048
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    let url = reqwest::Url::parse(value).ok()?;
+    if url.scheme() != "https"
+        || !matches!(url.host_str(), Some("vk.ru" | "vk.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.port_or_known_default() != Some(443)
+    {
+        return None;
+    }
+    let path = url.path();
+    let valid_pair = |value: &str| {
+        let Some((owner, id)) = value.split_once('_') else {
+            return false;
+        };
+        let digits = |value: &str| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && value.parse::<u64>().is_ok_and(|number| number > 0)
+        };
+        digits(owner.strip_prefix('-').unwrap_or(owner)) && digits(id)
+    };
+    let valid = url.query().is_none()
+        && ["/audio", "/music/album/"]
+            .iter()
+            .any(|prefix| path.strip_prefix(prefix).is_some_and(valid_pair));
+    valid.then(|| url.into())
+}
+
 impl Prepared {
     fn new(snapshot: Snapshot, now: SystemTime) -> Option<Self> {
+        if snapshot.state == State::Paused {
+            return None;
+        }
         let title = text(&snapshot.title);
         if title.is_empty() {
             return None;
@@ -149,6 +220,8 @@ impl Prepared {
                 .map(text)
                 .filter(|s| !s.is_empty()),
             cover_url: snapshot.cover_url.as_deref().and_then(public_cover),
+            track_url: snapshot.track_url.as_deref().and_then(public_page),
+            album_url: snapshot.album_url.as_deref().and_then(public_page),
             duration_ms: (duration * 1000.0).round() as u64,
             start_ms: (snapshot.state == State::Playing)
                 .then(|| now_ms.saturating_sub((position * 1000.0).round() as u64)),
@@ -160,6 +233,8 @@ impl Prepared {
             && self.artist == other.artist
             && self.album == other.album
             && self.cover_url == other.cover_url
+            && self.track_url == other.track_url
+            && self.album_url == other.album_url
             && self.duration_ms == other.duration_ms
             && match (self.start_ms, other.start_ms) {
                 (Some(a), Some(b)) => a.abs_diff(b) <= 1000,
@@ -172,7 +247,7 @@ impl Prepared {
         let mut activity = json!({
             "type": 2,
             "details": self.title,
-            "state": if self.start_ms.is_none() { text(&format!("⏸ {}",self.artist)) } else {self.artist.clone()},
+            "state": self.artist,
             "buttons": [{"label":"GitHub", "url":GITHUB_URL}],
         });
         if let Some(start_ms) = self.start_ms {
@@ -187,6 +262,12 @@ impl Prepared {
             "large_image":self.cover_url.as_deref().unwrap_or(APP_ICON_URL),
             "large_text":self.album.as_deref().unwrap_or(&self.title),
         });
+        if let Some(track) = &self.track_url {
+            activity["details_url"] = json!(track);
+        }
+        if let Some(album) = &self.album_url {
+            activity["assets"]["large_url"] = json!(album);
+        }
         activity
     }
 }
@@ -672,7 +753,6 @@ fn worker_loop(
                     active.activity(None, &shared, false)?;
                     activity_times.push_back(Instant::now());
                     last_sent = None;
-                    next_update = Instant::now() + update;
                 } else if let Some(desired) = desired
                     && last_sent.as_ref().is_none_or(|last| !last.same_activity(&desired))
                     && Instant::now() >= next_update
@@ -757,6 +837,11 @@ mod platform {
 }
 
 #[cfg(test)]
+pub(crate) fn test_activity(snapshot: Snapshot) -> Option<Value> {
+    Prepared::new(snapshot, SystemTime::now()).map(|prepared| prepared.activity())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -768,9 +853,11 @@ mod tests {
             artist: "Synthetic Artist".into(),
             album: Some("Test Album".into()),
             cover_url: Some(
-                "https://sun1-1.userapi.com/example/cover.jpg?sign=public-image-sign&size=96"
+                "https://sun9-85.vkuserphoto.ru/impg/synthetic/cover.jpg?quality=95&sign=public-image-sign&size=96&type=album&from=bu&blur=1"
                     .into(),
             ),
+            track_url: Some("https://vk.ru/audio-7_42".into()),
+            album_url: Some("https://vk.ru/music/album/-7_9".into()),
             duration: 180.0,
             position,
             state,
@@ -785,6 +872,12 @@ mod tests {
         assert_eq!(value["type"], 2);
         assert_eq!(value["details"], "Track");
         assert_eq!(value["state"], "Synthetic Artist");
+        assert_eq!(value["details_url"], "https://vk.ru/audio-7_42");
+        assert!(value.get("state_url").is_none());
+        assert_eq!(
+            value["assets"]["large_url"],
+            "https://vk.ru/music/album/-7_9"
+        );
         assert_eq!(
             value["timestamps"],
             json!({"start":1_699_999_970_u64,"end":1_700_000_150_u64})
@@ -815,15 +908,7 @@ mod tests {
             .unwrap()
             .same_activity(&prepared)
         );
-        let paused = Prepared::new(snapshot("Track", 90.0, State::Paused), now).unwrap();
-        assert!(paused.activity().get("timestamps").is_none());
-        assert!(
-            paused.activity()["state"]
-                .as_str()
-                .unwrap()
-                .starts_with("⏸ ")
-        );
-        assert!(!paused.same_activity(&prepared));
+        assert!(Prepared::new(snapshot("Track", 90.0, State::Paused), now).is_none());
         for url in [
             "https://vk.com/audio1_2",
             "https://audio.vkuseraudio.net/track.mp3",
@@ -835,6 +920,9 @@ mod tests {
             "https://127.0.0.1/a.jpg",
             "https://localhost/a.jpg",
             "https://sun1.userapi.com.evil.test/a.jpg",
+            "https://sun9-85.vkuserphoto.ru.evil.test/a.jpg",
+            "https://evilvkuserphoto.ru/a.jpg",
+            "https://sun9-85.vkuserphoto.ru/audio.mp3?sign=public",
         ] {
             assert!(public_cover(url).is_none(), "rejected cover fixture");
         }
@@ -845,13 +933,121 @@ mod tests {
         let normalized = Prepared::new(invalid, now).unwrap();
         assert!(normalized.title.len() <= 128);
         assert_eq!(normalized.duration_ms, 0);
-        let mut single = snapshot("X", 0.0, State::Paused);
+        let mut single = snapshot("X", 0.0, State::Playing);
         single.artist.clear();
         single.cover_url = None;
         let single = Prepared::new(single, now).unwrap().activity();
         assert!(single["details"].as_str().unwrap().chars().count() >= 2);
-        assert_eq!(single["state"], "⏸ VK Fast");
+        assert_eq!(single["state"], "VK Fast");
         assert_eq!(single["assets"]["large_image"], APP_ICON_URL);
+    }
+
+    #[test]
+    fn track_and_album_links_allow_only_public_vk_resources_and_affect_dedup() {
+        for url in [
+            "https://vk.ru/audio-7_42",
+            "https://vk.com/audio7_42",
+            "https://vk.ru/music/album/-7_9",
+        ] {
+            assert_eq!(public_page(url).as_deref(), Some(url));
+        }
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let original = snapshot("Track", 0.0, State::Playing);
+        let prepared = Prepared::new(original.clone(), now).unwrap();
+        for field in 0..2 {
+            let mut changed = original.clone();
+            if field == 0 {
+                changed.track_url = Some("https://vk.ru/audio-7_43".into());
+            } else {
+                changed.album_url = None;
+            }
+            assert!(!prepared.same_activity(&Prepared::new(changed, now).unwrap()));
+        }
+        for url in [
+            "http://vk.ru/audio-7_42",
+            "file:///private/track",
+            "https://evil.test/audio-7_42",
+            "https://vk.ru.evil.test/audio-7_42",
+            "https://m.vk.ru/audio-7_42",
+            "https://user:secret@vk.ru/audio-7_42",
+            "https://vk.ru:8443/audio-7_42",
+            "https://vk.ru/audio-7_42#private",
+            "https://vk.ru/audio-7_42?access_key=private",
+            "https://vk.ru/music/album/-7_9_private-key",
+            "https://vk.ru/music/playlist/-7_9_private-key",
+            "https://vk.ru/music/album/0_9",
+            "https://vk.ru/audio-7_0",
+            "https://vk.ru/artist/synthetic-artist",
+            "https://vk.ru/music/playlist/-7_9",
+            "https://vk.ru/audio?performer=1&q=Artist",
+            "https://vk.ru/artist/0",
+            "https://vk.ru/artist/..",
+            "https://vk.ru/login?code=private",
+            "https://vk.ru/away.php?to=https://evil.test",
+            "https://vk.ru/method/audio.get?access_token=private",
+            "https://audio.vkuseraudio.net/track.mp3",
+            "https://vk.ru/mp3/audio_api_unavailable.mp3",
+            "https://vk.ru/search?c[q]=Artist&c[section]=audio",
+            "https://vk.ru/audio?q=Artist",
+            "https://vk.ru/audio?performer=0&q=Artist",
+            "https://vk.ru/audio?performer=1&q=Artist&token=private",
+            "https://vk.ru/audio?performer=1&q=A&q=B",
+            "https://vk.ru/audio?performer=1&q=%0AA",
+        ] {
+            assert!(
+                public_page(url).is_none(),
+                "non-public or unsupported link must not be published"
+            );
+        }
+        let mut invalid = original;
+        invalid.track_url = Some("https://vk.ru/mp3/private.mp3".into());
+        invalid.album_url = Some("https://vk.ru/music/album/-7_9?access_key=private".into());
+        let value = test_activity(invalid).unwrap();
+        assert!(
+            value.get("details_url").is_none()
+                && value.get("state_url").is_none()
+                && value["assets"].get("large_url").is_none()
+        );
+        assert_eq!(value["buttons"][0]["url"], GITHUB_URL);
+    }
+
+    #[test]
+    fn vk_photo_signed_covers_keep_image_parameters_and_reject_credential_names() {
+        let cover = "https://sun9-85.vkuserphoto.ru/impg/synthetic/cover.jpg?quality=95&sign=public%2Fimage&size=240x240&type=album&c_uniq_tag=public&signature=synthetic&from=bu&blur=2";
+        assert_eq!(public_cover(cover).as_deref(), Some(cover));
+        let mut source = snapshot("Track", 0.0, State::Playing);
+        source.cover_url = Some(cover.into());
+        let prepared =
+            Prepared::new(source, UNIX_EPOCH + Duration::from_secs(1_700_000_000)).unwrap();
+        assert_eq!(prepared.activity()["assets"]["large_image"], cover);
+        assert_ne!(prepared.activity()["assets"]["large_image"], APP_ICON_URL);
+        assert!(
+            public_cover(
+                "https://sun1.userapi.com/image.jpg?signature=synthetic&unknown_image_option=1"
+            )
+            .is_some()
+        );
+        for key in [
+            "access_token",
+            "AccessToken",
+            "refresh-token",
+            "client.secret",
+            "Authorization",
+            "password",
+            "COOKIE",
+            "session_id",
+            "remixsid6",
+            "code",
+            "code_verifier",
+        ] {
+            assert!(
+                public_cover(&format!(
+                    "https://sun9-85.vkuserphoto.ru/impg/synthetic/cover.jpg?{key}=private"
+                ))
+                .is_none(),
+                "credential key must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1004,8 +1200,29 @@ mod tests {
                     stream.write_all(chunk).unwrap();
                 }
                 assert_eq!(packet(&mut stream), (4, b"\0opaque\xff".to_vec()));
-                assert_eq!(activity(&mut stream)["details"], "Newest");
+                let newest = activity(&mut stream);
+                assert_eq!(newest["details"], "Newest");
+                assert_eq!(newest["details_url"], "https://vk.ru/audio-7_42");
+                assert!(newest.get("state_url").is_none());
+                assert_eq!(newest["state"], "Synthetic Artist");
+                assert_eq!(
+                    newest["assets"]["large_url"],
+                    "https://vk.ru/music/album/-7_9"
+                );
+                assert_eq!(newest["buttons"][0]["url"], GITHUB_URL);
+                assert_eq!(
+                    newest["assets"]["large_image"],
+                    snapshot("Newest", 10.0, State::Playing).cover_url.unwrap()
+                );
                 event_tx.send("activity").unwrap();
+                let changed = activity(&mut stream);
+                assert_eq!(changed["details"], "Newest");
+                assert_eq!(
+                    changed["assets"]["large_url"],
+                    "https://vk.ru/music/album/-7_10"
+                );
+                assert_eq!(changed["buttons"][0]["url"], GITHUB_URL);
+                event_tx.send("link_updated").unwrap();
                 assert!(activity(&mut stream).is_null());
                 event_tx.send("clear").unwrap();
                 assert!(activity(&mut stream).is_null());
@@ -1020,6 +1237,10 @@ mod tests {
             rpc.publish(snapshot("Newest", 10.0, State::Playing));
             ready_tx.send(()).unwrap();
             assert_eq!(receive(&event_rx), "activity");
+            let mut links = snapshot("Newest", 10.0, State::Playing);
+            links.album_url = Some("https://vk.ru/music/album/-7_10".into());
+            rpc.publish(links);
+            assert_eq!(receive(&event_rx), "link_updated");
             rpc.clear();
             assert_eq!(receive(&event_rx), "clear");
             let start = Instant::now();
@@ -1051,13 +1272,14 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
-                let mut last = Instant::now() - Duration::from_secs(1);
-                for _ in 0..3 {
-                    let value = activity(&mut stream);
-                    assert!(last.elapsed() >= Duration::from_millis(45));
-                    last = Instant::now();
-                    tx.send(value).unwrap();
-                }
+                tx.send(activity(&mut stream)).unwrap();
+                let last_playing = Instant::now();
+                let paused = activity(&mut stream);
+                assert!(paused.is_null());
+                tx.send(paused).unwrap();
+                let resumed = activity(&mut stream);
+                assert!(last_playing.elapsed() >= Duration::from_millis(45));
+                tx.send(resumed).unwrap();
                 assert!(activity(&mut stream).is_null());
             });
             let rpc = client(path);
@@ -1077,9 +1299,49 @@ mod tests {
                     > 2
             );
             rpc.publish(snapshot("Track", 90.0, State::Paused));
-            assert!(receive(&rx).get("timestamps").is_none());
+            assert!(receive(&rx).is_null());
             rpc.publish(snapshot("Track", 90.0, State::Playing));
             assert!(receive(&rx).get("timestamps").is_some());
+            drop(rpc);
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn pause_clears_immediately_and_resume_keeps_an_already_expired_send_deadline() {
+            let directory = Directory::new();
+            let (listener, path) = listener(&directory);
+            let (tx, rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut stream = accept(&listener);
+                handshake(&mut stream);
+                send(&mut stream, 1, &json!({"evt":"READY"}));
+                assert_eq!(activity(&mut stream)["details"], "Track");
+                tx.send(()).unwrap();
+                assert!(activity(&mut stream).is_null());
+                tx.send(()).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .unwrap();
+                assert!(activity(&mut stream).get("timestamps").is_some());
+                tx.send(()).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                assert!(activity(&mut stream).is_null());
+            });
+            let rpc = DiscordRpc::start(
+                APP_ID.into(),
+                vec![path],
+                Duration::from_millis(500),
+                Duration::from_millis(30),
+            );
+            rpc.publish(snapshot("Track", 10.0, State::Playing));
+            receive(&rx);
+            thread::sleep(Duration::from_millis(600));
+            rpc.publish(snapshot("Track", 10.0, State::Paused));
+            receive(&rx);
+            rpc.publish(snapshot("Track", 10.0, State::Playing));
+            receive(&rx);
             drop(rpc);
             server.join().unwrap();
         }
@@ -1119,7 +1381,7 @@ mod tests {
             let rpc = client(path);
             rpc.publish(snapshot("Track", 10.0, State::Playing));
             receive(&rx);
-            rpc.clear();
+            rpc.publish(snapshot("Track", 10.0, State::Paused));
             go_tx.send(()).unwrap();
             server.join().unwrap();
             drop(rpc);

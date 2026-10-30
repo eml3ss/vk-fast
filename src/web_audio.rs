@@ -1342,6 +1342,115 @@ impl WebAudioClient {
         Ok(tracks)
     }
 
+    /// Confirm the exact public link identity without resolving an audio URL.
+    /// Only a successful empty response establishes absence; errors stay unknown.
+    pub fn verify_track_page(
+        &self,
+        expected_owner: i64,
+        key: (i64, i64),
+        canceled: &AtomicBool,
+    ) -> Result<bool, WebAudioError> {
+        self.verify_track_page_request(
+            expected_owner,
+            key,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn verify_track_page_request(
+        &self,
+        expected_owner: i64,
+        key: (i64, i64),
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<bool, WebAudioError> {
+        if key.0 == 0 || key.1 <= 0 {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let value = request(
+            generation,
+            "audio.getById",
+            vec![("audios", format!("{}_{}", key.0, key.1))],
+        )?;
+        // This validates account/generation/cancellation without adding streams.
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
+        let rows = value.as_array().ok_or(WebAudioError::Format)?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        if rows.len() != 1 || parse_track(&rows[0])?.key() != key {
+            return Err(WebAudioError::Format);
+        }
+        Ok(true)
+    }
+
+    /// Read only the album's metadata, without private access keys, track pages
+    /// or creator lookups. A matching response confirms this link's identity.
+    pub fn verify_album_page(
+        &self,
+        expected_owner: i64,
+        album_owner: i64,
+        album_id: i64,
+        canceled: &AtomicBool,
+    ) -> Result<bool, WebAudioError> {
+        self.verify_album_page_request(
+            expected_owner,
+            album_owner,
+            album_id,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn verify_album_page_request(
+        &self,
+        expected_owner: i64,
+        album_owner: i64,
+        album_id: i64,
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<bool, WebAudioError> {
+        if album_owner == 0 || album_id <= 0 {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let value = request(
+            generation,
+            "audio.getPlaylistById",
+            vec![
+                ("owner_id", album_owner.to_string()),
+                ("playlist_id", album_id.to_string()),
+            ],
+        )?;
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
+        let source = value.get("playlist").unwrap_or(&value);
+        if source.is_null()
+            || source.as_object().is_some_and(|value| value.is_empty())
+            || source.as_array().is_some_and(|value| value.is_empty())
+        {
+            return Ok(false);
+        }
+        let album = AlbumRef::from_value(source).ok_or(WebAudioError::Format)?;
+        if (album.owner_id, album.id) != (album_owner, album_id) {
+            return Err(WebAudioError::Format);
+        }
+        Ok(true)
+    }
+
     /// Add a source audio to My Music. VK may allocate a different ID for the
     /// owned copy; callers must retain this exact source-to-owned association.
     pub fn add_to_library(
@@ -7809,6 +7918,207 @@ mod detail_tests {
         let state = client.state.lock().unwrap();
         assert!(state.cursor.is_none());
         assert!(state.streams.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod page_verification_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn client() -> WebAudioClient {
+        let client = WebAudioClient::new(vec![SessionCookie {
+            domain: "vk.ru".into(),
+            path: "/".into(),
+            name: "remixsid".into(),
+            value: "synthetic-page-verification".into(),
+            secure: true,
+            expires_unix: None,
+        }])
+        .unwrap();
+        client.accept_profile(42).unwrap();
+        client
+    }
+
+    fn row() -> Value {
+        json!({"owner_id":-200,"id":7,"artist":"Synthetic Artist","title":"Track","duration":180,"dmca_blocked":true})
+    }
+
+    #[test]
+    fn exact_track_metadata_proves_existence_without_a_stream_and_only_empty_success_proves_absence()
+     {
+        let client = client();
+        let canceled = AtomicBool::new(false);
+        for (value, expected) in [(json!([row()]), Ok(true)), (json!([]), Ok(false))] {
+            let result =
+                client.verify_track_page_request(42, (-200, 7), &canceled, |_, method, params| {
+                    assert_eq!(method, "audio.getById");
+                    assert_eq!(params, vec![("audios", "-200_7".into())]);
+                    Ok(value)
+                });
+            assert_eq!(result, expected);
+        }
+        for value in [
+            Value::Null,
+            json!({}),
+            json!([{"owner_id":42,"id":7,"artist":"Other","title":"Track","duration":180}]),
+            json!([{"owner_id":-200,"id":7}]),
+            json!([row(), row()]),
+            json!([null]),
+        ] {
+            assert_eq!(
+                client.verify_track_page_request(42, (-200, 7), &canceled, |_, _, _| Ok(value)),
+                Err(WebAudioError::Format)
+            );
+        }
+        assert!(client.state.lock().unwrap().streams.is_empty());
+        assert!(client.state.lock().unwrap().cursor.is_none());
+    }
+
+    #[test]
+    fn album_verification_only_reads_keyless_metadata_and_preserves_unknown_malformed_responses() {
+        let client = client();
+        let canceled = AtomicBool::new(false);
+        let album = json!({"owner_id":-200,"id":9,"title":"Album","access_key":"synthetic-private-response-key"});
+        for value in [album.clone(), json!({"playlist":album})] {
+            assert_eq!(
+                client.verify_album_page_request(42, -200, 9, &canceled, |_, method, params| {
+                    assert_eq!(method, "audio.getPlaylistById");
+                    // Exact parameters prohibit access_key, extra_fields,
+                    // creator lookups and any count/offset or audio.get walk.
+                    assert_eq!(
+                        params,
+                        vec![("owner_id", "-200".into()), ("playlist_id", "9".into())]
+                    );
+                    Ok(value)
+                }),
+                Ok(true)
+            );
+        }
+        for value in [
+            Value::Null,
+            json!({}),
+            json!([]),
+            json!({"playlist":null}),
+            json!({"playlist":{}}),
+            json!({"playlist":[]}),
+        ] {
+            assert_eq!(
+                client.verify_album_page_request(42, -200, 9, &canceled, |_, _, _| Ok(value)),
+                Ok(false)
+            );
+        }
+        for value in [
+            json!(false),
+            json!(""),
+            json!({"items":[]}),
+            json!({"playlist":{"owner_id":42,"id":9,"title":"Wrong owner"}}),
+            json!({"owner_id":-200,"id":8,"title":"Wrong album"}),
+            json!({"owner_id":-200,"title":"Missing identity"}),
+            json!({"playlist":"unexpected"}),
+        ] {
+            assert_eq!(
+                client.verify_album_page_request(42, -200, 9, &canceled, |_, _, _| Ok(value)),
+                Err(WebAudioError::Format)
+            );
+        }
+        assert!(client.state.lock().unwrap().streams.is_empty());
+        assert!(client.state.lock().unwrap().cursor.is_none());
+    }
+
+    #[test]
+    fn verification_errors_remain_unknown_and_preflight_rejects_invalid_scope_without_requests() {
+        let client = client();
+        let canceled = AtomicBool::new(false);
+        for error in [
+            WebAudioError::Network,
+            WebAudioError::Timeout,
+            WebAudioError::NoStream,
+            WebAudioError::Rejected,
+            WebAudioError::Http(404),
+            WebAudioError::Format,
+        ] {
+            assert_eq!(
+                client.verify_track_page_request(42, (-200, 7), &canceled, |_, _, _| Err(
+                    error.clone()
+                )),
+                Err(error.clone())
+            );
+            assert_eq!(
+                client.verify_album_page_request(42, -200, 9, &canceled, |_, _, _| Err(
+                    error.clone()
+                )),
+                Err(error)
+            );
+        }
+        for key in [(0, 7), (-200, 0), (-200, -1)] {
+            assert_eq!(
+                client.verify_track_page_request(42, key, &canceled, |_, _, _| panic!(
+                    "invalid track requested metadata"
+                )),
+                Err(WebAudioError::Format)
+            );
+        }
+        for key in [(0, 9), (-200, 0), (-200, -1)] {
+            assert_eq!(
+                client.verify_album_page_request(42, key.0, key.1, &canceled, |_, _, _| panic!(
+                    "invalid album requested metadata"
+                )),
+                Err(WebAudioError::Format)
+            );
+        }
+        canceled.store(true, Ordering::Release);
+        assert_eq!(
+            client.verify_track_page(42, (-200, 7), &canceled),
+            Err(WebAudioError::Canceled)
+        );
+        assert_eq!(
+            client.verify_album_page(42, -200, 9, &canceled),
+            Err(WebAudioError::Canceled)
+        );
+        canceled.store(false, Ordering::Release);
+        assert_eq!(
+            client.verify_track_page(99, (-200, 7), &canceled),
+            Err(WebAudioError::WrongAccount)
+        );
+        assert_eq!(
+            client.verify_album_page(99, -200, 9, &canceled),
+            Err(WebAudioError::WrongAccount)
+        );
+        assert!(client.state.lock().unwrap().streams.is_empty());
+    }
+
+    #[test]
+    fn late_cancellation_and_account_generation_changes_cannot_confirm_or_remove_links() {
+        for album in [false, true] {
+            for change in 0..3 {
+                let client = client();
+                let canceled = AtomicBool::new(false);
+                let request = |_, _, _| {
+                    match change {
+                        0 => canceled.store(true, Ordering::Release),
+                        1 => client.accept_profile(99).unwrap(),
+                        _ => client.state.lock().unwrap().generation += 1,
+                    }
+                    // Even successful absence must not overwrite a new scope.
+                    Ok(if album { Value::Null } else { json!([]) })
+                };
+                let result = if album {
+                    client.verify_album_page_request(42, -200, 9, &canceled, request)
+                } else {
+                    client.verify_track_page_request(42, (-200, 7), &canceled, request)
+                };
+                assert_eq!(
+                    result,
+                    Err(if change == 0 {
+                        WebAudioError::Canceled
+                    } else {
+                        WebAudioError::Unverified
+                    })
+                );
+                assert!(client.state.lock().unwrap().streams.is_empty());
+            }
+        }
     }
 }
 

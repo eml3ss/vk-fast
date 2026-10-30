@@ -7383,8 +7383,8 @@ impl MusicApp {
                     }
                     ui.label(
                         RichText::new(t(
-                            "Показывать текущий трек в Discord с кнопкой GitHub проекта VK Fast.",
-                            "Show the current track in Discord with a button to VK Fast on GitHub.",
+                            "Показывать текущий трек в Discord.",
+                            "Show the current track in Discord.",
                         ))
                         .small()
                         .color(MUTED),
