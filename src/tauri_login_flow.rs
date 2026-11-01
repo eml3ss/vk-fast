@@ -1,4 +1,4 @@
-//! Visibility coordination only; cookies and profile verification stay native.
+//! One native window lifetime, with an in-page cover during verification.
 use reqwest::Url;
 
 fn native_https(url: &Url) -> bool {
@@ -32,18 +32,10 @@ fn main_return_route(url: &Url) -> Option<ReturnRoute> {
     Some(ReturnRoute { host, path })
 }
 
-/// Feed navigation is a possible login return. A root navigation needs prior
-/// provider history, because an anonymous root is also the initial login form.
+/// Main website documents can be either a login form or the feed. Cover them
+/// until the worker checks cookies; this never hides the native window.
 pub(crate) fn post_login_route(url: &Url) -> bool {
-    main_return_route(url).is_some_and(|route| route.path != "/")
-}
-
-fn provider_route(url: &Url) -> bool {
-    native_https(url)
-        && matches!(
-            url.host_str(),
-            Some("id.vk.ru" | "id.vk.com" | "login.vk.ru" | "login.vk.com")
-        )
+    main_return_route(url).is_some()
 }
 
 fn interactive_vk_route(url: &Url) -> bool {
@@ -59,42 +51,36 @@ fn interactive_vk_route(url: &Url) -> bool {
 }
 
 /// Shared under a short mutex by navigation hooks and the verification worker.
-/// Native show/hide calls must be serialized under that same mutex (or checked
-/// again on the UI thread), so a delayed worker Show cannot undo a newer Hide.
+/// Apply the presentation on the UI thread under this mutex. Redirects and
+/// cookie checks affect page content, while native visibility changes once.
 #[derive(Default)]
 pub(crate) struct LoginWindowFlow {
     revision: u64,
-    hidden_for_login: bool,
+    covered: bool,
     shown: bool,
     canceled: bool,
-    provider_visited: bool,
     current_return: Option<ReturnRoute>,
+    main_page: bool,
 }
 
 impl LoginWindowFlow {
-    /// Returns true when a new sign-in return should be hidden. Finished
-    /// events can wake the worker, but must never re-hide a failed verification.
+    /// Returns true when a new document needs the in-page cover. Finished
+    /// events can wake the worker but do not change the presentation.
     pub(crate) fn page_event(&mut self, url: &Url, started: bool) -> bool {
-        if self.canceled || !started {
+        if self.canceled || !started || !interactive_vk_route(url) {
             return false;
         }
         let route = main_return_route(url);
-        if post_login_route(url)
-            || (self.provider_visited && route.is_some_and(|route| route.path == "/"))
-        {
+        self.main_page = route.is_some();
+        if post_login_route(url) {
             self.revision = self.revision.wrapping_add(1);
-            self.hidden_for_login = true;
-            self.shown = false;
+            self.covered = true;
             self.current_return = route;
-            self.provider_visited = false;
             true
         } else {
-            if provider_route(url) {
-                self.provider_visited = true;
-            }
             if interactive_vk_route(url) {
                 self.revision = self.revision.wrapping_add(1);
-                self.hidden_for_login = false;
+                self.covered = false;
                 self.current_return = None;
             }
             false
@@ -119,18 +105,26 @@ impl LoginWindowFlow {
     }
 
     /// A cookie candidate may arrive during SPA navigation without a feed
-    /// event. Hide while native verification runs and reject queued old Shows.
+    /// event. Cover the main website while native verification runs.
     pub(crate) fn verification_started(&mut self, ticket: u64) -> bool {
         if !self.is_current(ticket) {
             return false;
         }
-        self.hidden_for_login = true;
-        self.shown = false;
+        // Cookie presence alone is not proof of completed authentication.
+        // Keep provider challenges visible; cover only the main website.
+        self.covered = self.main_page;
         true
     }
 
+    pub(crate) fn cover_page(&self) -> bool {
+        self.covered
+    }
+
     pub(crate) fn show_if_allowed(&mut self) -> bool {
-        if self.canceled || self.hidden_for_login || self.shown {
+        // Native visibility is independent of redirects and verification.
+        // An in-document cover keeps the feed out of view without unmapping
+        // and remapping the native window (and stealing focus) repeatedly.
+        if self.canceled || self.shown {
             return false;
         }
         self.shown = true;
@@ -142,14 +136,14 @@ impl LoginWindowFlow {
         self.shown = false;
     }
 
-    /// Failed/absent cookies are not login success. Restore the interactive
-    /// window only when this result still belongs to the latest navigation.
+    /// Failed/absent cookies are not login success. Reveal the interactive
+    /// page only when this result still belongs to the latest navigation.
     pub(crate) fn verification_failed(&mut self, ticket: u64) -> bool {
         if !self.is_current(ticket) {
             return false;
         }
-        self.hidden_for_login = false;
-        self.show_if_allowed()
+        self.covered = false;
+        true
     }
 
     pub(crate) fn cancel(&mut self) {
@@ -161,169 +155,140 @@ impl LoginWindowFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn url(value: &str) -> Url {
         value.parse().unwrap()
     }
 
     #[test]
-    fn only_exact_main_vk_feed_returns_are_hidden_early() {
-        for value in [
-            "https://vk.ru/feed",
-            "https://vk.com/feed/",
-            "https://vk.ru:443/feed?section=all#latest",
-        ] {
-            assert!(post_login_route(&url(value)), "Not recognized: {value}");
-        }
+    fn only_main_site_documents_are_covered_before_session_detection() {
         for value in [
             "https://vk.ru/",
-            "https://vk.ru/login?redirect=feed",
-            "https://vk.ru/auth",
-            "https://vk.ru/join",
-            "https://vk.ru/restore",
-            "https://vk.ru/captcha",
-            "https://id.vk.ru/feed",
-            "https://login.vk.com/feed",
-            "https://vk.ru/feed-elsewhere",
+            "https://vk.com/feed/",
+            "https://vk.ru:443/feed?section=all",
+        ] {
+            assert!(post_login_route(&url(value)));
+        }
+        for value in [
+            "https://vk.ru/login",
+            "https://id.vk.ru/auth",
+            "https://vk.ru/validate",
             "https://vk.ru/feed/challenge",
             "https://vk.ru.example.test/feed",
             "https://user@vk.ru/feed",
-            "https://vk.ru:444/feed",
             "http://vk.ru/feed",
-            "file:///feed",
+            "https://vk.ru:444/feed",
         ] {
-            assert!(!post_login_route(&url(value)), "Unexpected hide: {value}");
+            assert!(!post_login_route(&url(value)), "{value}");
         }
     }
 
     #[test]
-    fn an_old_cookie_failure_cannot_reshow_a_window_hidden_by_a_new_navigation() {
+    fn redirects_and_repeated_cookie_failures_show_the_native_window_only_once() {
         let mut flow = LoginWindowFlow::default();
-        assert!(flow.show_if_allowed());
-        assert!(!flow.show_if_allowed());
-        let stale_cookie_check = flow.ticket();
-        assert!(flow.verification_started(stale_cookie_check));
-        assert!(!flow.show_if_allowed());
-        assert!(flow.page_event(&url("https://vk.ru/feed"), true));
-        assert!(!flow.verification_started(stale_cookie_check));
-        assert!(!flow.verification_failed(stale_cookie_check));
-        assert!(!flow.show_if_allowed());
-        assert!(!flow.is_current(stale_cookie_check));
-        let current = flow.ticket();
-        assert!(flow.is_current(current));
-        assert!(flow.verification_failed(current));
-        assert!(!flow.show_if_allowed());
-        assert!(!flow.page_event(&url("https://id.vk.ru/auth?step=challenge"), true));
-        assert!(!flow.is_current(current));
+        let mut native_shows = usize::from(flow.show_if_allowed());
+        for _ in 0..3 {
+            for page in [
+                "https://vk.ru/",
+                "https://id.vk.ru/auth",
+                "https://login.vk.ru/",
+                "https://vk.ru/",
+                "https://vk.ru/feed",
+            ] {
+                flow.page_event(&url(page), true);
+                native_shows += usize::from(flow.show_if_allowed());
+                let ticket = flow.ticket();
+                assert!(flow.verification_started(ticket));
+                native_shows += usize::from(flow.show_if_allowed());
+                assert!(flow.verification_failed(ticket));
+                native_shows += usize::from(flow.show_if_allowed());
+                flow.page_event(&url(page), false);
+                native_shows += usize::from(flow.show_if_allowed());
+            }
+        }
+        assert_eq!(
+            native_shows, 1,
+            "Redirects and retries must not remap or refocus the window"
+        );
     }
 
     #[test]
-    fn finished_signals_never_rehide_a_failed_check_and_new_navigation_invalidates_it() {
+    fn pending_return_is_covered_but_phone_challenges_stay_interactive() {
         let mut flow = LoginWindowFlow::default();
-        let feed = url("https://vk.ru/feed");
-        assert!(flow.page_event(&feed, true));
-        let started = flow.ticket();
-        assert!(!flow.page_event(&feed, false));
-        assert!(flow.is_current(started));
-        assert!(flow.verification_failed(started));
-        assert!(!flow.page_event(&feed, false));
-        assert!(!flow.show_if_allowed(), "Finished must not undo recovery");
-        assert!(flow.page_event(&feed, true));
-        assert!(!flow.is_current(started));
-        assert!(!flow.verification_failed(started));
-        assert!(!flow.show_if_allowed());
+        flow.page_event(&url("https://vk.ru/"), true);
+        assert!(flow.cover_page());
+        assert!(flow.show_if_allowed());
         assert!(flow.verification_failed(flow.ticket()));
-        flow.show_failed();
         assert!(
-            flow.show_if_allowed(),
-            "A failed native Show can be retried"
+            !flow.cover_page(),
+            "Anonymous initial form is revealed after cookie detection"
         );
-    }
-
-    #[test]
-    fn cancellation_blocks_late_success_failures_and_visibility_changes() {
-        let mut flow = LoginWindowFlow::default();
-        assert!(flow.page_event(&url("https://vk.ru/feed"), true));
-        let pending = flow.ticket();
-        flow.cancel();
-        assert!(!flow.is_current(pending));
-        assert!(!flow.verification_failed(pending));
-        assert!(!flow.show_if_allowed());
-        assert!(!flow.page_event(&url("https://vk.ru/feed"), true));
-    }
-
-    #[test]
-    fn returning_to_a_real_auth_page_restores_visibility_and_invalidates_old_checks() {
-        for auth in [
-            "https://vk.ru/",
-            "https://vk.ru/login",
-            "https://vk.com/login.php",
-            "https://vk.ru/captcha",
-            "https://vk.ru/authcheck/verify",
-            "https://id.vk.ru/auth?step=challenge",
+        for page in [
+            "https://id.vk.ru/auth?step=otp",
             "https://vk.ru/validate",
-            "https://m.vk.ru/security/new-checkpoint",
+            "https://m.vk.ru/security/check",
         ] {
-            let mut flow = LoginWindowFlow::default();
-            assert!(flow.page_event(&url("https://vk.ru/feed"), true));
-            let old = flow.ticket();
-            assert!(!flow.page_event(&url(auth), true));
+            flow.page_event(&url(page), true);
+            assert!(flow.verification_started(flow.ticket()));
             assert!(
-                flow.show_if_allowed(),
-                "Authentication must remain usable: {auth}"
+                !flow.cover_page(),
+                "Partial cookies must not conceal a challenge"
             );
-            assert!(!flow.is_current(old));
-            assert!(!flow.verification_failed(old));
+            assert!(!flow.show_if_allowed());
         }
+        flow.page_event(&url("https://vk.ru/feed"), true);
+        assert!(flow.cover_page());
+        assert!(!flow.show_if_allowed());
     }
 
     #[test]
-    fn root_is_hidden_only_after_a_real_provider_visit_and_finished_matches_the_current_return() {
-        let root = url("https://vk.ru/");
-        let feed = url("https://vk.ru/feed");
+    fn stale_cookie_checks_and_finished_events_cannot_reveal_a_new_return() {
         let mut flow = LoginWindowFlow::default();
-        assert!(!flow.page_event(&root, true));
-        assert!(
-            flow.show_if_allowed(),
-            "The anonymous initial form must be visible"
-        );
-        assert!(!flow.finished_login_return(&root));
-        assert!(!flow.page_event(&url("https://id.vk.ru/auth?step=login"), true));
-        assert!(
-            flow.page_event(&root, true),
-            "Hide the official provider return before paint"
-        );
-        assert!(!flow.show_if_allowed());
-        let returned = flow.ticket();
-        assert!(!flow.page_event(&root, false));
-        assert!(flow.finished_login_return(&root));
-        assert!(
-            flow.verification_failed(returned),
-            "No valid session must restore the form"
-        );
-        assert!(!flow.page_event(&root, false));
-        assert!(
-            !flow.show_if_allowed(),
-            "Finished must not hide or re-show the recovered form"
-        );
-
-        assert!(flow.page_event(&feed, true));
-        assert!(
-            !flow.finished_login_return(&root),
-            "An old root Finished cannot complete the feed"
-        );
+        flow.page_event(&url("https://vk.ru/"), true);
+        let old = flow.ticket();
+        flow.page_event(&url("https://vk.ru/feed"), true);
+        assert!(!flow.is_current(old));
+        assert!(!flow.verification_failed(old));
+        assert!(!flow.verification_started(old));
+        assert!(flow.cover_page());
+        assert!(!flow.finished_login_return(&url("https://vk.ru/")));
         assert!(!flow.finished_login_return(&url("https://vk.com/feed")));
-        assert!(!flow.finished_login_return(&url("https://vk.ru/feed/")));
-        assert!(flow.finished_login_return(&feed));
-        assert!(
-            !flow.page_event(&root, true),
-            "Provider history is consumed, not permanent"
-        );
-        assert!(flow.show_if_allowed());
+        assert!(flow.finished_login_return(&url("https://vk.ru/feed")));
+        flow.page_event(&url("https://vk.ru/feed"), false);
+        assert!(flow.cover_page());
+        assert!(flow.verification_failed(flow.ticket()));
+        flow.page_event(&url("https://vk.ru/feed"), false);
+        assert!(!flow.cover_page());
+    }
 
+    #[test]
+    fn canceled_or_untrusted_navigation_cannot_change_the_native_window() {
         let mut flow = LoginWindowFlow::default();
-        assert!(!flow.page_event(&url("https://id.vk.ru.example.test/auth"), true));
-        assert!(!flow.page_event(&root, true));
+        flow.page_event(&url("https://vk.ru/feed"), true);
         assert!(flow.show_if_allowed());
+        let current = flow.ticket();
+        for foreign in [
+            "https://vk.ru.example.test/",
+            "http://vk.ru/login",
+            "https://user@vk.ru/auth",
+        ] {
+            flow.page_event(&url(foreign), true);
+            assert!(flow.is_current(current));
+            assert!(flow.cover_page());
+        }
+        flow.cancel();
+        assert!(!flow.is_current(current));
+        assert!(!flow.verification_failed(current));
+        assert!(!flow.verification_started(current));
+        assert!(!flow.show_if_allowed());
+    }
+
+    #[test]
+    fn a_failed_native_show_can_be_retried_without_resetting_on_navigation() {
+        let mut flow = LoginWindowFlow::default();
+        assert!(flow.show_if_allowed());
+        flow.show_failed();
+        assert!(flow.show_if_allowed());
+        flow.page_event(&url("https://vk.ru/"), true);
+        assert!(!flow.show_if_allowed());
     }
 }

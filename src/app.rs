@@ -6885,215 +6885,43 @@ impl MusicApp {
         if !self.qr_open {
             return None;
         }
-        let language = self.language;
-        let t = |ru, en| language.text(ru, en);
-        let mut open = self.qr_open;
-        let mut cancel = false;
-        let mut refresh = false;
-        let mut confirmation = None;
-        let mut actions = [egui::Rect::NOTHING; 2];
-        let bounds = ctx.content_rect();
         let code_entry = self.qr_accepts_code();
-        let compact = code_entry || self.qr_error.is_some();
-        let available_height = (bounds.height() - 24.0).max(260.0);
-        let qr_size = (bounds.height()
-            - if code_entry {
-                380.0
-            } else if compact {
-                360.0
-            } else {
-                280.0
-            })
-        .clamp(96.0, if compact && !code_entry { 144.0 } else { 196.0 });
-        let width = (bounds.width() - 40.0).clamp(300.0, if code_entry { 460.0 } else { 420.0 });
-        let response = egui::Window::new(t("Вход через QR", "Sign in via QR"))
-            .id(egui::Id::new("vk-fast-qr-login"))
-            .open(&mut open)
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .scroll(false)
-            .min_height(0.0)
-            .default_height(if code_entry { 560.0 } else { 440.0 })
-            .max_height(available_height)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .default_width(width)
-            .min_width(width)
-            .max_width(width)
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let (header, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
-                ui.painter().text(
-                    header.center(),
-                    egui::Align2::CENTER_CENTER,
-                    t("Вход через QR", "Sign in via QR"),
-                    egui::TextStyle::Heading.resolve(ui.style()),
-                    ui.visuals().text_color(),
-                );
-                let close_rect = egui::Rect::from_center_size(
-                    egui::pos2(header.right() - 14.0, header.center().y),
-                    egui::vec2(28.0, 28.0),
-                );
-                icons::paint(
-                    ui.painter(),
-                    close_rect.shrink(6.0),
-                    Icon::Close,
-                    ui.visuals().text_color(),
-                );
-                if ui
-                    .put(close_rect, egui::Button::new("").frame(false))
-                    .on_hover_text(t("Закрыть", "Close"))
-                    .clicked()
-                {
-                    cancel = true;
+        let error = self
+            .qr_error
+            .as_ref()
+            .map(|error| error.message(self.language));
+        let output = crate::qr_login_ui::show(
+            ctx,
+            crate::qr_login_ui::View {
+                language: self.language,
+                texture: self.qr_texture.as_ref(),
+                stage: self.qr_stage,
+                pending: self.qr_pending.is_some(),
+                remaining: self
+                    .qr_expires
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs()),
+                code_entry,
+                code: &mut self.qr_code_input,
+                error: error.as_deref(),
+            },
+        );
+        match output.action {
+            Some(crate::qr_login_ui::Action::Cancel) => {
+                self.cancel_qr();
+                if self.session.is_none() && !self.demo && self.pending.is_none() {
+                    self.restore_session(ctx);
                 }
-                ui.separator();
-                ui.vertical_centered(|ui| {
-                    let control_width = 128.0;
-                    if let Some(texture) = &self.qr_texture {
-                        ui.add(
-                            egui::Image::from_texture(texture)
-                                .fit_to_exact_size(egui::Vec2::splat(qr_size)),
-                        );
-                    } else if self.qr_pending.is_some() {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(qr_size, qr_size),
-                            Layout::centered_and_justified(egui::Direction::TopDown),
-                            |ui| {
-                                ui.spinner();
-                            },
-                        );
-                    }
-                    if self.qr_pending.is_some() {
-                        let status = match self.qr_stage {
-                            qr_auth::Stage::Creating => t("Получаем QR-код…", "Getting a QR code…"),
-                            qr_auth::Stage::Waiting => t(
-                                "Отсканируйте QR камерой телефона и подтвердите вход в VK.",
-                                "Scan the QR with your phone camera and approve sign-in in VK.",
-                            ),
-                            qr_auth::Stage::Scanned => t(
-                                "QR отсканирован. Подтвердите вход в VK.",
-                                "QR scanned. Confirm sign-in in VK.",
-                            ),
-                            qr_auth::Stage::Confirming => t(
-                                "VK запросил код с телефона.",
-                                "VK requires the code from your phone.",
-                            ),
-                            qr_auth::Stage::Finishing => {
-                                t("Подключаем музыку…", "Connecting your music…")
-                            }
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(status).color(ACCENT))
-                                .halign(Align::Center)
-                                .wrap(),
-                        );
-                    }
-                    if let Some(deadline) = self.qr_expires {
-                        let remaining =
-                            deadline.saturating_duration_since(Instant::now()).as_secs();
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{} {}",
-                                    t("QR действует ещё", "QR expires in"),
-                                    time_label(remaining as f64)
-                                ))
-                                .small()
-                                .color(MUTED),
-                            )
-                            .halign(Align::Center)
-                            .wrap(),
-                        );
-                    }
-                    if code_entry {
-                        ui.add_sized(
-                            [ui.available_width(), 20.0],
-                            egui::Label::new(t("Введите код", "Enter your code"))
-                                .halign(Align::Center),
-                        );
-                        let field = ui.add_sized(
-                            [control_width, 36.0],
-                            egui::TextEdit::singleline(&mut self.qr_code_input)
-                                .id_salt("qr-verification-code")
-                                .password(false)
-                                .horizontal_align(Align::Center)
-                                .vertical_align(Align::Center)
-                                .font(egui::TextStyle::Monospace)
-                                .hint_text(t("6 цифр", "6 digits"))
-                                .char_limit(16),
-                        );
-                        if field.changed() {
-                            self.qr_code_input.retain(|ch| !ch.is_whitespace());
-                        }
-                        if let Some(mut state) = egui::TextEdit::load_state(ctx, field.id) {
-                            state.clear_undoer();
-                            egui::TextEdit::store_state(ctx, field.id, state);
-                        }
-                        let valid = self.qr_code_input.len() == 6
-                            && self.qr_code_input.bytes().all(|byte| byte.is_ascii_digit());
-                        let button = ui
-                            .add_enabled_ui(valid, |ui| {
-                                ui.add_sized(
-                                    [control_width, 36.0],
-                                    egui::Button::new(t("Подтвердить", "Confirm")).fill(PRIMARY),
-                                )
-                            })
-                            .inner;
-                        let submit = button.clicked()
-                            || (valid
-                                && field.lost_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                        let rects = [field.rect, button.rect];
-                        confirmation = Some(rects);
-                        if submit && let Some(control) = &self.qr_control {
-                            self.qr_error = None;
-                            control.submit_code(std::mem::take(&mut self.qr_code_input));
-                        }
-                    }
-                    if let Some(error) = &self.qr_error {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(error.message(language))
-                                    .color(Color32::from_rgb(255, 158, 153)),
-                            )
-                            .halign(Align::Center)
-                            .wrap(),
-                        );
-                    }
-                    let refresh_button = ui.add_sized(
-                        [control_width, 36.0],
-                        egui::Button::new(t("Обновить QR", "Refresh QR")),
-                    );
-                    let cancel_button = ui.add_sized(
-                        [control_width, 36.0],
-                        egui::Button::new(t("Отмена", "Cancel")),
-                    );
-                    actions = [refresh_button.rect, cancel_button.rect];
-                    if refresh_button.clicked() {
-                        refresh = true;
-                    }
-                    if cancel_button.clicked() {
-                        cancel = true;
-                    }
-                })
-                .response
-                .rect
-            });
-        if !open || cancel {
-            self.cancel_qr();
-            if self.session.is_none() && !self.demo && self.pending.is_none() {
-                self.restore_session(ctx);
             }
-        } else if refresh {
-            self.connect_qr(ctx);
+            Some(crate::qr_login_ui::Action::Refresh) => self.connect_qr(ctx),
+            Some(crate::qr_login_ui::Action::Submit) => {
+                if let Some(control) = &self.qr_control {
+                    self.qr_error = None;
+                    control.submit_code(std::mem::take(&mut self.qr_code_input));
+                }
+            }
+            None => {}
         }
-        response.and_then(|response| {
-            response
-                .inner
-                .map(|content| (response.response.rect, content, confirmation, actions))
-        })
+        Some(output.layout)
     }
 
     fn start_cache_job(&mut self, ctx: &egui::Context, action: CacheAction) {
@@ -13789,10 +13617,14 @@ mod tests {
                     qr_auth::Stage::Waiting,
                     qr_auth::Stage::Scanned,
                     qr_auth::Stage::Confirming,
+                    qr_auth::Stage::Finishing,
+                    qr_auth::Stage::Creating,
                     qr_auth::Stage::Waiting,
                 ] {
                     for show_error in [false, true] {
                         app.qr_stage = stage;
+                        app.qr_texture = (stage != qr_auth::Stage::Creating)
+                            .then(|| qr_image(&ctx, "https://vk.ru/?synthetic=1").unwrap());
                         app.qr_error =
                             show_error.then_some(UiError::QrCode(qr_auth::Error::Network));
                         let mut rects = None;
@@ -13846,10 +13678,15 @@ mod tests {
                             window.expand(1.0).contains_rect(content),
                             "Clipped QR contents {size:?}: {content:?} in {window:?}"
                         );
+                        let control_center = if confirmation.is_some() {
+                            window.center().x
+                        } else {
+                            actions[0].center().x
+                        };
                         for controls in confirmation.into_iter().chain(std::iter::once(actions)) {
                             let actual = controls[0].union(controls[1]);
                             assert!(
-                                (actual.center().x - window.center().x).abs() <= 1.0,
+                                (actual.center().x - control_center).abs() <= 1.0,
                                 "QR controls are off-center: {actual:?} in {window:?}"
                             );
                             assert!(
@@ -13859,22 +13696,22 @@ mod tests {
                             assert!(content.expand(1.0).contains_rect(actual));
                             for control in controls {
                                 assert!(
-                                    (control.center().x - window.center().x).abs() <= 1.0,
+                                    (control.center().x - control_center).abs() <= 1.0,
                                     "QR control is not individually centered: {control:?}"
                                 );
                             }
                         }
                         assert!(
-                            actions[1].top() >= actions[0].bottom() + 4.0,
+                            (stage == qr_auth::Stage::Finishing && !show_error)
+                                || actions[1].top() >= actions[0].bottom() + 4.0,
                             "Cancel is not stacked below Refresh: {actions:?}"
                         );
                         assert!(shapes.iter().all(|shape| centered_labels(&shape.shape)));
                         if let Some([field, button]) = confirmation {
                             let waiting = waiting_size.unwrap();
                             assert!(
-                                window.width() >= waiting.x + 32.0
-                                    && window.height() >= waiting.y + 24.0,
-                                "Confirmation window did not grow: {window:?}, waiting {waiting:?}"
+                                (window.size() - waiting).length() <= 1.0,
+                                "Dialog must not jump between steps: {window:?}, waiting {waiting:?}"
                             );
                             assert!(
                                 button.top() >= field.bottom(),

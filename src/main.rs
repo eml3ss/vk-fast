@@ -37,6 +37,7 @@ mod playlist_pins;
 mod playlist_ui;
 mod preferences;
 mod qr_auth;
+mod qr_login_ui;
 mod recent_cache;
 mod release_info;
 mod repaint_target;

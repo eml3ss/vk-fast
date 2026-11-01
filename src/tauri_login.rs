@@ -39,8 +39,36 @@ enum Visibility {
     Recover(u64),
 }
 
+fn present_login(
+    window: &tauri::WebviewWindow,
+    flow: &mut flow::LoginWindowFlow,
+    language: Language,
+) {
+    let covered = flow.cover_page();
+    let _ = window.eval(format!("window.__vkFastLoginCover?.({covered});"));
+    let _ = window.set_title(if covered {
+        language.text("Проверяем вход VK…", "Checking VK sign-in…")
+    } else {
+        language.text("Вход в VK", "Sign in to VK")
+    });
+    if flow.show_if_allowed() {
+        if window.show().is_err() {
+            flow.show_failed();
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+}
+
+fn login_cover_script(language: Language) -> String {
+    include_str!("tauri_login_cover.js").replace(
+        "__STATUS_TEXT__",
+        &serde_json::to_string(language.text("Подключаем VK…", "Connecting to VK…")).unwrap(),
+    )
+}
+
 /// Check navigation state on the UI thread as well as when work is queued.
-/// A delayed Show must not reveal the feed after a newer navigation hid it.
+/// A delayed recovery must not uncover the feed after a newer navigation.
 fn update_visibility(
     window: &tauri::WebviewWindow,
     flow: &WindowFlow,
@@ -56,25 +84,13 @@ fn update_visibility(
             return;
         }
         let Ok(mut flow) = flow.lock() else { return };
-        let show = match action {
-            Visibility::Checking(ticket) => {
-                if flow.verification_started(ticket) {
-                    let _ = view.hide();
-                    let _ =
-                        view.set_title(language.text("Проверяем вход VK…", "Checking VK sign-in…"));
-                }
-                return;
-            }
-            Visibility::Show => flow.show_if_allowed(),
+        let current = match action {
+            Visibility::Checking(ticket) => flow.verification_started(ticket),
+            Visibility::Show => true,
             Visibility::Recover(ticket) => flow.verification_failed(ticket),
         };
-        if show {
-            let _ = view.set_title(language.text("Вход в VK", "Sign in to VK"));
-            if view.show().is_err() {
-                flow.show_failed();
-            } else {
-                let _ = view.set_focus();
-            }
+        if current {
+            present_login(&view, &mut flow, language);
         }
     });
 }
@@ -547,6 +563,7 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 .devtools(false)
                 .general_autofill_enabled(false)
                 .user_agent(crate::web_audio::USER_AGENT)
+                .initialization_script(login_cover_script(language))
                 .on_navigation(navigation_allowed)
                 .on_page_load(move |window, page| {
                     if page_done.load(Ordering::Acquire) || !navigation_allowed(page.url()) {
@@ -554,18 +571,10 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                     }
                     let started = page.event() == tauri::webview::PageLoadEvent::Started;
                     if let Ok(mut flow) = page_visibility.lock() {
-                        // This hook runs before the destination is painted.
-                        // Native cookie APIs and HTTP stay on the worker.
-                        if flow.page_event(page.url(), started) {
-                            let _ = window.hide();
-                        } else if started && flow.show_if_allowed() {
-                            let _ = window.set_title(language.text("Вход в VK", "Sign in to VK"));
-                            if window.show().is_err() {
-                                flow.show_failed();
-                            } else {
-                                let _ = window.set_focus();
-                            }
-                        }
+                        // Redirects change the in-page cover, never native visibility.
+                        // Cookies and HTTP stay on the worker thread.
+                        flow.page_event(page.url(), started);
+                        present_login(&window, &mut flow, language);
                         if !started && flow.finished_login_return(page.url()) {
                             page_finished.store(flow.ticket(), Ordering::Release);
                         }
@@ -619,11 +628,14 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                                 language,
                                 Visibility::Checking(ticket),
                             );
-                            let verified = (|| {
-                                let client = WebAudioClient::new(cookies.clone()).ok()?;
-                                let profile = client.session_profile().ok()?;
-                                Some(profile)
-                            })();
+                            let verified = WebAudioClient::new(cookies.clone())
+                                .and_then(|client| client.session_profile());
+                            let retry_in_place = matches!(
+                                &verified,
+                                Err(crate::web_audio::WebAudioError::Network
+                                    | crate::web_audio::WebAudioError::Timeout
+                                    | crate::web_audio::WebAudioError::Http(500..=599))
+                            );
                             // A same-document sign-in can rotate the SID without
                             // any navigation event. Discard a stale verification
                             // before it can publish an account or reveal the UI.
@@ -645,7 +657,7 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                                 }
                                 continue;
                             }
-                            if let Some(profile) = verified {
+                            if let Ok(profile) = verified {
                                 let cookies = latest;
                                 let view = window.clone();
                                 let flow = setup_visibility.clone();
@@ -666,7 +678,7 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                                         handle.exit(0);
                                     }
                                 });
-                            } else {
+                            } else if !retry_in_place {
                                 update_visibility(
                                     &window,
                                     &setup_visibility,
