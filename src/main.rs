@@ -56,6 +56,8 @@ mod titlebar;
 mod track_menu;
 mod vk;
 mod web_audio;
+mod web_login_state;
+mod web_login_ui;
 mod web_session;
 mod window_shell;
 mod window_state;

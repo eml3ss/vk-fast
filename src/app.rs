@@ -930,6 +930,7 @@ pub struct MusicApp {
     pending: Option<Receiver<Result<Reply, UiError>>>,
     browser_login: Option<Control>,
     web_login: Option<tauri_login::Control>,
+    native_login_ui: crate::web_login_ui::State,
     profile_cleanup: Option<Receiver<Result<(), ()>>>,
     workers: Vec<thread::JoinHandle<()>>,
     library: Library,
@@ -1233,6 +1234,7 @@ impl MusicApp {
             pending: None,
             browser_login: None,
             web_login: None,
+            native_login_ui: crate::web_login_ui::State::default(),
             profile_cleanup: None,
             workers: Vec::new(),
             library: Library::default(),
@@ -1418,6 +1420,9 @@ impl MusicApp {
             self.qr_texture = self.qr_url.as_deref().and_then(|url| qr_image(ctx, url));
             // Existing worker clones share this target and wake the new window.
             self.repaint_target.set_context(ctx);
+            if let Some(control) = &self.web_login {
+                control.bind(ctx);
+            }
             // The former renderer has retired. Its queued texture frees must
             // not survive until the old worker context is eventually dropped.
             self.ui_context.tex_manager().write().take_delta().clear();
@@ -1512,6 +1517,7 @@ impl MusicApp {
     }
 
     fn reset(&mut self) {
+        self.native_login_ui.clear();
         if let Some(control) = self.web_login.take() {
             control.cancel();
         }
@@ -2056,7 +2062,8 @@ impl MusicApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.qr_open
+        if self.web_login.is_some()
+            || self.qr_open
             || self.playlist_create_form.is_some()
             || self.playlist_controls.has_modal()
             || egui::Popup::is_any_open(ctx)
@@ -2417,6 +2424,8 @@ impl MusicApp {
         }
         self.reset();
         let control = tauri_login::Control::default();
+        control.bind(ctx);
+        self.native_login_ui.clear();
         self.web_login = Some(control.clone());
         let language = self.language;
         self.start_job(ctx, move || {
@@ -2727,6 +2736,7 @@ impl MusicApp {
                 self.pending = None;
                 self.browser_login = None;
                 self.web_login = None;
+                self.native_login_ui.clear();
                 self.avatar_refresh_ready = true;
                 let message = UiError::Interrupted;
                 if self.session.is_some() {
@@ -2740,6 +2750,7 @@ impl MusicApp {
         self.pending = None;
         self.browser_login = None;
         self.web_login = None;
+        self.native_login_ui.clear();
         match result {
             Ok(Reply::NoSavedSession) => {}
             Ok(Reply::WebConnected(signed_in)) => {
@@ -2911,10 +2922,7 @@ impl MusicApp {
         }
         if self.web_login.is_some() || self.browser_login.is_some() {
             let status = if self.web_login.is_some() {
-                t(
-                    "Завершите вход в окне VK…",
-                    "Complete sign-in in the VK window…",
-                )
+                t("Вход в VK…", "Signing in to VK…")
             } else {
                 self.browser_login
                     .as_ref()
@@ -7575,11 +7583,24 @@ impl MusicApp {
                     self.content(ui);
                 }
             });
+        if let Some(control) = self.web_login.clone() {
+            if crate::web_login_ui::show(
+                ui.ctx(),
+                &mut self.native_login_ui,
+                &control,
+                self.language,
+            ) {
+                self.reset();
+            }
+        } else {
+            self.native_login_ui.clear();
+        }
         let _ = self.qr_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
         if !self.system_titlebar
             && !self.qr_open
+            && self.web_login.is_none()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -7654,6 +7675,7 @@ impl MusicApp {
         if ui.ctx().current_pass_index() == 0
             && !self.settings_open
             && !self.qr_open
+            && self.web_login.is_none()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -7768,7 +7790,7 @@ impl MusicApp {
         self.poll_cache(ctx);
         self.publish_system_media();
         self.publish_discord_rpc();
-        if self.qr_open {
+        if self.qr_open || self.web_login.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         if let Some(deadline) = self.volume_save_at {
@@ -8169,6 +8191,7 @@ mod tests {
             pending: None,
             browser_login: None,
             web_login: None,
+            native_login_ui: crate::web_login_ui::State::default(),
             profile_cleanup: None,
             workers: Vec::new(),
             library: Library::default(),
@@ -9947,8 +9970,8 @@ mod tests {
                     account_ui_text_rect(
                         &output,
                         language.text(
-                            "Завершите вход в окне VK…",
-                            "Complete sign-in in the VK window…"
+                            "Вход в VK…",
+                            "Signing in to VK…"
                         ),
                     )
                     .is_none()

@@ -3,6 +3,7 @@
 /.build/
 /dist/
 /gen/
+/vk-auth/
 
 # Portable runtime data and credentials.
 /config/
