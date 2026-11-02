@@ -19,6 +19,8 @@ mod current_settings_tests;
 mod discord_rpc_app;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
+#[path = "queue_app.rs"]
+mod queue_app;
 #[path = "system_media_app.rs"]
 mod system_media_app;
 #[path = "track_view_cache.rs"]
@@ -964,6 +966,8 @@ pub struct MusicApp {
     recent_latest: HashMap<i64, Arc<Vec<Track>>>,
     play_queue: Option<Vec<Track>>,
     play_order: PlaybackOrder,
+    queued_tracks: HashMap<(i64, i64), Track>,
+    queue_ui: queue_app::PanelState,
     queue_origin: Option<String>,
     home_collections: Vec<home_ui::Collection>,
     home_sources: Vec<crate::web_audio::HomeCollection>,
@@ -1268,6 +1272,8 @@ impl MusicApp {
             recent_latest: HashMap::new(),
             play_queue: None,
             play_order: PlaybackOrder::default(),
+            queued_tracks: HashMap::new(),
+            queue_ui: queue_app::PanelState::default(),
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),
@@ -1752,6 +1758,9 @@ impl MusicApp {
         self.player.stop();
         self.playing = None;
         self.play_queue = None;
+        self.play_order.clear_queued();
+        self.queued_tracks.clear();
+        self.queue_ui = queue_app::PanelState::default();
         self.play_order.reset_source(&[], None);
         self.queue_origin = None;
         self.playback_error = None;
@@ -1863,6 +1872,7 @@ impl MusicApp {
             .flat_map(|tracks| tracks.iter())
             .chain(self.library.tracks.iter())
             .chain(self.recent.iter())
+            .chain(self.queued_tracks.get(&key))
             .chain(self.playing.iter())
             .chain(
                 self.home_collections
@@ -2042,6 +2052,7 @@ impl MusicApp {
         }
         self.replace_play_queue_from(Some(tracks), origin);
         if let Some(first) = self.first_playback_key() {
+            self.play_order.select_source(first);
             self.play_track(ctx, first);
         }
     }
@@ -2173,6 +2184,13 @@ impl MusicApp {
         if self.playback_pending.is_some() {
             return;
         }
+        if self.playing.is_none() && !self.play_order.queued().is_empty() {
+            self.synchronize_order();
+            if let Some(key) = self.play_order.start_queued(None) {
+                self.play_track(ctx, key);
+            }
+            return;
+        }
         if let Some(track) = &self.playing
             && track.unavailable == Some(true)
             && !matches!(
@@ -2219,6 +2237,9 @@ impl MusicApp {
     }
 
     fn adjacent_track(&self, next: bool) -> Option<(i64, i64)> {
+        if next && self.playing.is_none() && self.selected.is_none() {
+            return self.play_order.queued().front().map(|entry| entry.key);
+        }
         let key = self.playing.as_ref().map(Track::key).or(self.selected)?;
         let ordered = if next {
             self.play_order.next(key, self.allow_queue_wrap())
@@ -2260,6 +2281,13 @@ impl MusicApp {
         self.cancel_mix_start();
         self.mix_advance = false;
         self.home_autoplay = None;
+        if self.playing.is_none() && !self.play_order.queued().is_empty() {
+            self.synchronize_order();
+            if let Some(key) = self.play_order.start_queued(None) {
+                self.play_track(ctx, key);
+            }
+            return;
+        }
         if self.playing.is_none() && self.selected.is_none() {
             self.prepare_view_queue();
             if let Some(key) = self.first_playback_key() {
@@ -3320,6 +3348,7 @@ impl MusicApp {
         self.unavailable_playback.clear();
         self.leave_mix();
         self.prepare_view_queue();
+        self.play_order.select_source(key);
         self.play_track(ctx, key);
     }
 
@@ -4717,6 +4746,7 @@ impl MusicApp {
             .iter_mut()
             .chain(self.recent.iter_mut())
             .chain(self.play_queue.iter_mut().flatten())
+            .chain(self.queued_tracks.values_mut())
             .chain(self.playing.iter_mut())
             .chain(
                 self.home_collections
@@ -5019,6 +5049,7 @@ impl MusicApp {
             .recent
             .iter_mut()
             .chain(self.play_queue.iter_mut().flatten())
+            .chain(self.queued_tracks.values_mut())
             .chain(self.playing.iter_mut())
         {
             enrich(track);
@@ -6129,6 +6160,7 @@ impl MusicApp {
         self.track_menu_notice = None;
         self.like_error = None;
         match action {
+            track_menu::Action::AddToQueue => self.add_to_queue(ctx, track.clone()),
             track_menu::Action::ToggleLike => self.toggle_like(ctx, track.clone()),
             track_menu::Action::AddToPlaylist(playlist) => {
                 self.add_track_to_playlist(ctx, track.clone(), playlist)
@@ -6465,7 +6497,9 @@ impl MusicApp {
         );
         let ready = !self.demo
             && self.session.is_some()
-            && (self.playing.is_some() || !self.view_tracks().is_empty());
+            && (self.playing.is_some()
+                || !self.view_tracks().is_empty()
+                || !self.play_order.queued().is_empty());
         let track = self.playing.as_ref().or_else(|| {
             self.library
                 .tracks
@@ -6752,9 +6786,9 @@ impl MusicApp {
             },
         );
         let volume_left = if self.compact_seek_bar {
-            (side_row.right() - 160.0).max(seek_row.right() + PLAYER_COLUMN_GAP)
+            (side_row.right() - 204.0).max(seek_row.right() + PLAYER_COLUMN_GAP)
         } else {
-            side_row.right() - 160.0
+            side_row.right() - 204.0
         };
         let volume_rect = egui::Rect::from_min_max(
             egui::pos2(volume_left.min(side_row.right()), side_row.top()),
@@ -6768,7 +6802,7 @@ impl MusicApp {
             |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(volume_rect));
                 let mut volume = snapshot.volume;
-                let volume_width = (volume_rect.width() - 28.0).clamp(17.0, 120.0);
+                let volume_width = (volume_rect.width() - 72.0).clamp(17.0, 120.0);
                 let response =
                     seek_bar::volume(ui, &mut volume, volume_width, t("Громкость", "Volume"));
                 if response.changed() {
@@ -6786,6 +6820,20 @@ impl MusicApp {
                     format!("{}: {:.0}%", t("Громкость", "Volume"), volume * 100.0)
                 });
                 icons::show(ui, Icon::Volume, MUTED, 18.0);
+                let queue = icons::toggle_button(
+                    ui,
+                    Icon::Queue,
+                    t("Очередь", "Queue"),
+                    true,
+                    self.queue_ui.open,
+                );
+                release_pointer_focus(&queue);
+                if queue.clicked() {
+                    self.queue_ui.open = !self.queue_ui.open;
+                    if self.queue_ui.open {
+                        self.synchronize_order();
+                    }
+                }
             },
         );
         ui.scope_builder(
@@ -7585,6 +7633,7 @@ impl MusicApp {
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| self.toolbar(ui));
+        self.queue_panel(ui);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BACKGROUND).inner_margin(egui::Margin {
                 left: 8,
@@ -7597,6 +7646,7 @@ impl MusicApp {
                 bottom: if self.settings_open { 24 } else { 0 },
             }))
             .show(ui, |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 if self.settings_open {
                     self.settings_content(ui);
                 } else if self.page == MusicPage::Home {
@@ -8234,6 +8284,8 @@ mod tests {
             recent_latest: HashMap::new(),
             play_queue: None,
             play_order: PlaybackOrder::default(),
+            queued_tracks: HashMap::new(),
+            queue_ui: queue_app::PanelState::default(),
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),

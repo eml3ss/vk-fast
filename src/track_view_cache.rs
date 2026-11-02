@@ -76,6 +76,10 @@ pub(super) struct TrackViewCache {
 }
 
 impl TrackViewCache {
+    pub(super) fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
     /// Data events invalidate even in-place, same-length metadata changes.
     pub(super) fn invalidate(&self) {
         self.revision.set(self.revision.get().wrapping_add(1));

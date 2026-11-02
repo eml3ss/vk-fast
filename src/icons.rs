@@ -29,6 +29,7 @@ pub enum Icon {
     Heart,
     HeartFilled,
     QueueAdd,
+    Queue,
     PlaylistAdd,
     Radio,
     Album,
@@ -564,6 +565,12 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ];
             line(&shoulders);
         }
+        Icon::Queue => {
+            line(&[(3.0, 5.0), (21.0, 5.0)]);
+            line(&[(3.0, 11.0), (21.0, 11.0)]);
+            line(&[(3.0, 17.0), (11.0, 17.0)]);
+            polygon(&[(16.0, 15.0), (21.0, 18.0), (16.0, 21.0)], 1.3);
+        }
         Icon::QueueAdd => {
             line(&[(3.0, 6.0), (16.0, 6.0)]);
             line(&[(3.0, 11.0), (13.0, 11.0)]);
@@ -876,6 +883,7 @@ mod tests {
             Icon::Heart,
             Icon::HeartFilled,
             Icon::QueueAdd,
+            Icon::Queue,
             Icon::PlaylistAdd,
             Icon::Radio,
             Icon::Album,

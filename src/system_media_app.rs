@@ -301,14 +301,13 @@ impl MusicApp {
         }
         self.cancel_delayed_advance();
         self.synchronize_order();
-        let Some(current) = self.playing.as_ref().map(Track::key).or(self.selected) else {
-            return;
-        };
+        let current = self.playing.as_ref().map(Track::key).or(self.selected);
         let wrap = self.allow_queue_wrap();
-        let target = if next {
-            self.play_order.advance_next(current, wrap, false)
-        } else {
-            self.play_order.advance_previous(current, wrap)
+        let target = match (current, next) {
+            (Some(current), true) => self.play_order.advance_next(current, wrap, false),
+            (Some(current), false) => self.play_order.advance_previous(current, wrap),
+            (None, true) => self.play_order.start_queued(None),
+            (None, false) => None,
         };
         let Some(track) = target.and_then(|key| {
             self.play_queue
@@ -316,6 +315,8 @@ impl MusicApp {
                 .flatten()
                 .chain(&self.library.tracks)
                 .chain(&self.recent)
+                .chain(self.queued_tracks.get(&key))
+                .chain(self.playing.iter())
                 .find(|track| track.key() == key)
                 .cloned()
         }) else {

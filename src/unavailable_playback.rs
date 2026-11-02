@@ -57,6 +57,7 @@ fn next_candidate(
     allow_wrap: bool,
     rejected: &HashSet<Key>,
 ) -> Option<Key> {
+    order.exclude_queued(rejected);
     // The failed anchor must stay until Next has consumed its position. Every
     // other known restriction is removed from the order, not from the queue.
     let keys: Vec<_> = tracks
@@ -67,7 +68,7 @@ fn next_candidate(
         })
         .map(Track::key)
         .collect();
-    if keys.contains(&anchor) {
+    let next = if keys.contains(&anchor) || order.is_queued_current(anchor) {
         order.sync(&keys, Some(anchor));
         order
             .advance_next(anchor, allow_wrap, false)
@@ -75,7 +76,9 @@ fn next_candidate(
     } else {
         order.sync(&keys, None);
         order.first().filter(|next| !rejected.contains(next))
-    }
+    };
+    order.exclude_queued(rejected);
+    next
 }
 
 impl MusicApp {
@@ -97,6 +100,7 @@ impl MusicApp {
             .flatten()
             .chain(&self.library.tracks)
             .chain(&self.recent)
+            .chain(self.queued_tracks.get(&key))
             .chain(self.playing.iter())
             .find(|track| track.key() == key)
             .cloned();
@@ -186,13 +190,14 @@ impl MusicApp {
         };
         let allow_wrap = self.allow_queue_wrap();
         let tracks = self.play_queue.as_deref().unwrap_or(&self.library.tracks);
-        let next = next_candidate(
-            &mut self.play_order,
-            tracks,
-            key,
-            allow_wrap,
-            &self.unavailable_playback.rejected,
+        let mut rejected = self.unavailable_playback.rejected.clone();
+        rejected.extend(
+            self.queued_tracks
+                .values()
+                .filter(|track| track.unavailable == Some(true))
+                .map(Track::key),
         );
+        let next = next_candidate(&mut self.play_order, tracks, key, allow_wrap, &rejected);
         let more_mix = self.mix_active
             && self.mix_has_more
             && self

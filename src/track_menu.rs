@@ -29,6 +29,7 @@ pub struct View<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    AddToQueue,
     ToggleLike,
     AddToPlaylist(AlbumRef),
     TrackMix,
@@ -45,17 +46,18 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.style_mut().interaction.selectable_labels = false;
 
-    row(
+    if row(
         ui,
         Icon::QueueAdd,
         language.text("Добавить в очередь", "Add to queue"),
-        false,
+        view.connected && view.track.unavailable != Some(true),
         false,
         false,
     )
-    .on_disabled_hover_text(
-        language.text("Очередь появится позже", "Queue support is coming later"),
-    );
+    .clicked()
+    {
+        action = Some(Action::AddToQueue);
+    }
     let label = if view.liked {
         language.text("Убрать из моей музыки", "Remove from My music")
     } else {
@@ -476,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_has_every_generic_item_two_separators_and_an_inert_queue_placeholder() {
+    fn main_menu_has_every_generic_item_two_separators_and_adds_to_queue() {
         for language in [Language::Russian, Language::English] {
             let mut h = Harness::new(language);
             let output = h.warm();
@@ -499,7 +501,7 @@ mod tests {
                     .unwrap()
                     .center(),
             );
-            assert!(h.action.is_none());
+            assert_eq!(h.action, Some(Action::AddToQueue));
         }
     }
 
