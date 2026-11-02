@@ -1,10 +1,11 @@
-//! Private, account-bound copy of explicitly imported VK website cookies.
+//! Private, account-bound profile and cookies of the application's VK session.
 //! This file is independent of the saved VK ID OAuth session.
 
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -18,6 +19,9 @@ use crate::{
 
 const MAX_BYTES: u64 = 128 * 1024;
 const MAX_COOKIES: usize = 256;
+// Serialize metadata updates with login/logout so a delayed refresh cannot
+// recreate a deleted session or write over a different account's credentials.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 // No Debug implementation: cookie values grant access to the website session.
 #[derive(Deserialize, Serialize)]
@@ -332,7 +336,30 @@ pub fn load(owner_id: i64) -> io::Result<Option<Vec<SessionCookie>>> {
 
 /// Save a verified website profile alongside its cookies, without an OAuth token.
 pub fn save_profile(profile: &Profile, cookies: &[SessionCookie]) -> io::Result<()> {
+    let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
     save_profile_at(&session_path()?, profile, cookies)
+}
+
+fn update_profile_at(path: &Path, fresh: &Profile) -> io::Result<()> {
+    validate_profile(fresh.id, fresh)?;
+    let Some(session) = load_record_at(path)? else {
+        return Ok(());
+    };
+    if session.owner_id != fresh.id {
+        return Ok(());
+    }
+    let missing_profile = session.profile.is_none();
+    let mut profile = session.profile.unwrap_or_else(|| fresh.clone());
+    if profile.merge_metadata(fresh) || missing_profile {
+        save_profile_at(path, &profile, &session.cookies)?;
+    }
+    Ok(())
+}
+
+/// Update only a still-existing account. Called off the UI thread.
+pub fn update_profile(fresh: &Profile) -> io::Result<()> {
+    let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
+    update_profile_at(&session_path()?, fresh)
 }
 
 /// Legacy cookie-only records still load through `load(owner_id)`, but cannot
@@ -342,6 +369,7 @@ pub fn restore_profile() -> io::Result<Option<(Profile, Vec<SessionCookie>)>> {
 }
 
 pub fn clear() -> io::Result<()> {
+    let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
     clear_at(&session_path()?)
 }
 
@@ -443,6 +471,59 @@ mod tests {
         assert_eq!(cookies[0].value, "synthetic-cookie-value");
         assert_eq!(load_at(&path, profile.id).unwrap().unwrap().len(), 1);
         assert!(load_at(&path, profile.id + 1).is_err());
+    }
+
+    #[test]
+    fn metadata_refresh_repairs_legacy_names_without_replacing_cookies_or_reviving_logout() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("music-session.json");
+        let old = Profile {
+            id: 42,
+            first_name: "VK".into(),
+            last_name: "42".into(),
+            avatar_url: Some("https://images.example.test/cached.jpg".into()),
+        };
+        let fresh = Profile {
+            id: 42,
+            first_name: "Анна".into(),
+            last_name: "Test".into(),
+            avatar_url: None,
+        };
+        save_profile_at(&path, &old, &fixture()).unwrap();
+        update_profile_at(&path, &fresh).unwrap();
+        let (saved, cookies) = restore_profile_at(&path).unwrap().unwrap();
+        assert_eq!(saved.display_name(), "Анна Test");
+        assert_eq!(saved.avatar_url, old.avatar_url);
+        assert_eq!(cookies[0].value, "synthetic-cookie-value");
+        let before = fs::read(&path).unwrap();
+        for incoming in [
+            old.clone(),
+            Profile {
+                first_name: String::new(),
+                last_name: String::new(),
+                ..old.clone()
+            },
+            Profile {
+                id: 43,
+                ..fresh.clone()
+            },
+        ] {
+            update_profile_at(&path, &incoming).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        clear_at(&path).unwrap();
+        update_profile_at(&path, &fresh).unwrap();
+        assert!(
+            !path.exists(),
+            "A late metadata reply must not recreate a signed-out session"
+        );
+        let other = Profile {
+            id: 43,
+            ..fresh.clone()
+        };
+        save_profile_at(&path, &other, &fixture()).unwrap();
+        update_profile_at(&path, &fresh).unwrap();
+        assert_eq!(restore_profile_at(&path).unwrap().unwrap().0.id, 43);
     }
 
     #[test]

@@ -64,6 +64,18 @@ const PLAYER_COLUMN_GAP: f32 = 16.0;
 const PLAYER_SIDE_MIN_WIDTH: f32 = 224.0;
 const PLAYER_TRANSPORT_WIDTH: f32 = 38.0 * 5.0 + 10.0 * 4.0;
 
+fn write_profile_metadata(profile: &Profile) -> bool {
+    #[cfg(not(test))]
+    {
+        music_session_store::update_profile(profile).is_ok()
+    }
+    #[cfg(test)]
+    {
+        let _ = (profile, music_session_store::update_profile);
+        true
+    }
+}
+
 fn player_seek_rect(body: egui::Rect, compact: bool, time_width: f32) -> egui::Rect {
     let width = if compact {
         let minimum = PLAYER_TRANSPORT_WIDTH.max(time_width * 2.0 + PLAYER_TIME_GAP * 2.0 + 80.0);
@@ -284,6 +296,11 @@ struct Session {
     music: Option<WebAudioClient>,
 }
 
+struct RefreshedProfile {
+    profile: Profile,
+    cache_warning: bool,
+}
+
 enum Reply {
     Connected(
         Session,
@@ -295,7 +312,7 @@ enum Reply {
     ),
     NoSavedSession,
     WebConnected(QrConnected),
-    Audio(AudioPage, bool, Option<String>),
+    Audio(AudioPage, bool, Option<RefreshedProfile>),
 }
 
 enum CacheAction {
@@ -2429,15 +2446,16 @@ impl MusicApp {
         self.web_login = Some(control.clone());
         let language = self.language;
         self.start_job(ctx, move || {
-            let signed_in =
+            let mut signed_in =
                 tauri_login::login(control.clone(), language).map_err(UiError::WebLogin)?;
             if control.is_canceled() {
                 return Err(UiError::WebLogin(tauri_login::Error::Canceled));
             }
             let music = WebAudioClient::new(signed_in.cookies.clone()).map_err(UiError::Music)?;
-            music
-                .verify_owner(signed_in.profile.id)
+            let verified_profile = music
+                .refresh_profile(signed_in.profile.id)
                 .map_err(UiError::Music)?;
+            signed_in.profile.merge_metadata(&verified_profile);
             if control.is_canceled() {
                 return Err(UiError::WebLogin(tauri_login::Error::Canceled));
             }
@@ -2704,14 +2722,18 @@ impl MusicApp {
         let offset = if refresh { 0 } else { self.library.offset };
         self.audio_error = None;
         self.start_job(ctx, move || {
-            let mut avatar = None;
+            let mut refreshed = None;
             let page = if let Some(music) = music {
                 if refresh {
                     let profile = music.refresh_profile(owner_id).map_err(UiError::Music)?;
                     if profile.id != owner_id {
                         return Err(UiError::Music(WebAudioError::WrongAccount));
                     }
-                    avatar = profile.avatar_url;
+                    let cache_warning = !write_profile_metadata(&profile);
+                    refreshed = Some(RefreshedProfile {
+                        profile,
+                        cache_warning,
+                    });
                 }
                 music
                     .page_batch(owner_id, offset, 100)
@@ -2721,7 +2743,7 @@ impl MusicApp {
             } else {
                 Err(UiError::NoStream)
             };
-            page.map(|page| Reply::Audio(page, refresh, avatar))
+            page.map(|page| Reply::Audio(page, refresh, refreshed))
         });
     }
 
@@ -2800,23 +2822,27 @@ impl MusicApp {
                     self.load_page(ctx, true);
                 }
             }
-            Ok(Reply::Audio(page, refresh, avatar)) => {
+            Ok(Reply::Audio(page, refresh, refreshed)) => {
+                if let Some(refreshed) = &refreshed
+                    && self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.profile.id != refreshed.profile.id)
+                {
+                    self.audio_error = Some(UiError::Music(WebAudioError::WrongAccount));
+                    return;
+                }
                 if refresh && !self.avatar_refresh_ready {
                     self.avatar_refresh_ready = true;
-                    self.avatar_refresh_url = avatar.clone();
+                    self.avatar_refresh_url = refreshed
+                        .as_ref()
+                        .and_then(|update| update.profile.avatar_url.clone());
                 }
-                if let Some(avatar) = avatar
+                if let Some(refreshed) = refreshed
                     && let Some(session) = &mut self.session
-                    && session.profile.avatar_url.as_ref() != Some(&avatar)
                 {
-                    session.profile.avatar_url = Some(avatar);
-                    // Commit only an accepted reply, so a late request cannot
-                    // restore credentials after the user has signed out.
-                    if let Ok(Some(cookies)) = music_session_store::load(session.profile.id)
-                        && music_session_store::save_profile(&session.profile, &cookies).is_err()
-                    {
-                        session.cache_warning = true;
-                    }
+                    session.profile.merge_metadata(&refreshed.profile);
+                    session.cache_warning |= refreshed.cache_warning;
                 }
                 if refresh {
                     self.library.refresh(page);
@@ -9780,6 +9806,63 @@ mod tests {
     }
 
     #[test]
+    fn profile_refresh_replaces_numeric_fallback_and_keeps_known_metadata_on_partial_responses() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        let placeholder = Profile {
+            id: 42,
+            first_name: "VK".into(),
+            last_name: "42".into(),
+            avatar_url: Some("https://images.example.test/cached.jpg".into()),
+        };
+        app.session = Some(Session {
+            profile: placeholder.clone(),
+            client: None,
+            music: None,
+            cache_warning: false,
+        });
+        let fresh = Profile {
+            id: 42,
+            first_name: "Анна".into(),
+            last_name: "Test".into(),
+            avatar_url: None,
+        };
+        for profile in [
+            fresh.clone(),
+            Profile {
+                avatar_url: None,
+                ..placeholder.clone()
+            },
+            Profile { id: 99, ..fresh },
+        ] {
+            let foreign = profile.id != 42;
+            let (sender, receiver) = mpsc::sync_channel(1);
+            app.pending = Some(receiver);
+            sender
+                .send(Ok(Reply::Audio(
+                    page(0, &[]),
+                    true,
+                    Some(RefreshedProfile {
+                        profile,
+                        cache_warning: false,
+                    }),
+                )))
+                .ok()
+                .unwrap();
+            app.poll(&ctx);
+            let session = app.session.as_ref().unwrap();
+            assert_eq!(session.profile.display_name(), "Анна Test");
+            assert_eq!(session.profile.avatar_url, placeholder.avatar_url);
+            if foreign {
+                assert!(matches!(
+                    app.audio_error,
+                    Some(UiError::Music(WebAudioError::WrongAccount))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn avatar_refresh_uses_only_the_first_viewer_check_of_the_run() {
         for first in [
             None,
@@ -9795,7 +9878,19 @@ mod tests {
                 app.pending = Some(receiver);
                 assert!(
                     sender
-                        .send(Ok(Reply::Audio(page(0, &[]), true, avatar)))
+                        .send(Ok(Reply::Audio(
+                            page(0, &[]),
+                            true,
+                            Some(RefreshedProfile {
+                                profile: Profile {
+                                    id: 42,
+                                    first_name: "Test".into(),
+                                    last_name: "User".into(),
+                                    avatar_url: avatar,
+                                },
+                                cache_warning: false,
+                            })
+                        )))
                         .is_ok()
                 );
                 app.poll(&ctx);

@@ -74,6 +74,39 @@ fn avatar_from_values<'a>(
 }
 
 impl Profile {
+    pub fn has_name(&self) -> bool {
+        (!self.first_name.trim().is_empty() || !self.last_name.trim().is_empty())
+            && !(self.first_name == "VK" && self.last_name == self.id.to_string())
+            && [&self.first_name, &self.last_name]
+                .into_iter()
+                .all(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+    }
+
+    /// Missing website metadata must not replace a previously known name/photo.
+    pub fn merge_metadata(&mut self, fresh: &Self) -> bool {
+        if self.id <= 0 || self.id != fresh.id {
+            return false;
+        }
+        let mut changed = false;
+        if fresh.has_name()
+            && (self.first_name != fresh.first_name || self.last_name != fresh.last_name)
+        {
+            self.first_name.clone_from(&fresh.first_name);
+            self.last_name.clone_from(&fresh.last_name);
+            changed = true;
+        }
+        if let Some(avatar) = fresh
+            .avatar_url
+            .as_ref()
+            .filter(|url| valid_cover_url(url).is_some())
+            && self.avatar_url.as_ref() != Some(avatar)
+        {
+            self.avatar_url = Some(avatar.clone());
+            changed = true;
+        }
+        changed
+    }
+
     pub fn display_name(&self) -> String {
         format!("{} {}", self.first_name, self.last_name)
             .trim()

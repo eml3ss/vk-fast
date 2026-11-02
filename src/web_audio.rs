@@ -500,7 +500,55 @@ impl WebAudioClient {
     /// Recheck the viewer during a library refresh without discarding the
     /// current radio, prefetched audio, or another view's stream credentials.
     pub fn refresh_profile(&self, expected_owner: i64) -> Result<Profile, WebAudioError> {
-        self.refresh_profile_request(expected_owner, || self.fetch_viewer())
+        let profile = self.refresh_profile_request(expected_owner, || self.fetch_viewer())?;
+        if profile.has_name() {
+            return Ok(profile);
+        }
+        let canceled = AtomicBool::new(false);
+        let generation = self.home_owner(expected_owner, &canceled)?;
+        self.profile_metadata_request(profile, generation, &canceled, |method, params| {
+            self.detail_request(expected_owner, generation, method, params, &canceled)
+        })
+    }
+
+    fn profile_metadata_request(
+        &self,
+        mut profile: Profile,
+        generation: u64,
+        canceled: &AtomicBool,
+        request: impl FnOnce(&'static str, Vec<(&'static str, String)>) -> Result<Value, WebAudioError>,
+    ) -> Result<Profile, WebAudioError> {
+        self.commit_home_streams(profile.id, generation, HashMap::new(), canceled)?;
+        let result = request(
+            "users.get",
+            vec![
+                ("user_ids", profile.id.to_string()),
+                ("fields", "photo_200".into()),
+            ],
+        );
+        self.commit_home_streams(profile.id, generation, HashMap::new(), canceled)?;
+        match result {
+            Ok(value) => {
+                if let Some(fresh) = value
+                    .as_array()
+                    .or_else(|| value.get("response").and_then(Value::as_array))
+                    .into_iter()
+                    .flatten()
+                    .find_map(|user| profile_from_user(user, profile.id))
+                {
+                    profile.merge_metadata(&fresh);
+                }
+            }
+            Err(
+                error @ (WebAudioError::WrongAccount
+                | WebAudioError::Unverified
+                | WebAudioError::Canceled),
+            ) => return Err(error),
+            // The website session is already verified; optional name lookup
+            // failure must not prevent access to the user's music.
+            Err(_) => {}
+        }
+        Ok(profile)
     }
 
     fn refresh_profile_request(
@@ -4300,10 +4348,19 @@ fn profile_from_html(html: &str) -> Result<Profile, WebAudioError> {
     if id <= 0 {
         return Err(WebAudioError::Expired);
     }
+    let prefetched = prefetch_profile(html, id);
     let (first_name, last_name) = viewer.object.and_then(viewer_names).unwrap_or_default();
+    let first_name = first_name.filter(|name| !name.is_empty()).or_else(|| {
+        prefetched
+            .as_ref()
+            .map(|profile| profile.first_name.clone())
+    });
+    let last_name = last_name
+        .filter(|name| !name.is_empty())
+        .or_else(|| prefetched.as_ref().map(|profile| profile.last_name.clone()));
     let has_name = first_name.as_ref().is_some_and(|name| !name.is_empty())
         || last_name.as_ref().is_some_and(|name| !name.is_empty());
-    Ok(Profile {
+    let mut profile = Profile {
         id,
         first_name: if has_name {
             first_name.unwrap_or_default()
@@ -4318,9 +4375,20 @@ fn profile_from_html(html: &str) -> Result<Profile, WebAudioError> {
         avatar_url: viewer
             .object
             .and_then(viewer_avatar)
-            .or_else(|| prefetch_avatar(html, id))
-            .or_else(|| header_avatar(html, id)),
-    })
+            .or_else(|| prefetched.and_then(|profile| profile.avatar_url)),
+    };
+    if (!profile.has_name() || profile.avatar_url.is_none())
+        && let Some(header) = header_profile(html, id)
+    {
+        if !profile.has_name() && header.has_name() {
+            profile.first_name = header.first_name;
+            profile.last_name = header.last_name;
+        }
+        if profile.avatar_url.is_none() {
+            profile.avatar_url = header.avatar_url;
+        }
+    }
+    Ok(profile)
 }
 
 struct ViewerRecord<'a> {
@@ -4529,9 +4597,35 @@ fn viewer_string(value: &str) -> Option<String> {
     Some(name.trim().to_owned())
 }
 
-/// VK's header prefetch stores API responses under window.cur.apiPrefetchCache.
-/// Only an explicit users.get record with the verified viewer's ID is used.
-fn prefetch_avatar(html: &str, viewer_id: i64) -> Option<String> {
+/// Names and photos are metadata, never a replacement for session verification.
+fn profile_from_user(user: &Value, viewer_id: i64) -> Option<Profile> {
+    if viewer_id <= 0 || user.get("id").and_then(number) != Some(viewer_id) {
+        return None;
+    }
+    let name = |key| {
+        user.get(key)
+            .and_then(Value::as_str)
+            .filter(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    Some(Profile {
+        id: viewer_id,
+        first_name: name("first_name"),
+        last_name: name("last_name"),
+        avatar_url: profile_avatar_from_object(user),
+    })
+}
+
+/// Read users.get entries under window.cur.apiPrefetchCache for this viewer.
+fn prefetch_profile(html: &str, viewer_id: i64) -> Option<Profile> {
+    let mut profile = Profile {
+        id: viewer_id,
+        first_name: String::new(),
+        last_name: String::new(),
+        avatar_url: None,
+    };
     for value in script_values(
         html,
         &[
@@ -4567,21 +4661,29 @@ fn prefetch_avatar(html: &str, viewer_id: i64) -> Option<String> {
                 .as_array()
                 .or_else(|| response.get("response").and_then(Value::as_array));
             for user in users.into_iter().flatten() {
-                if user.get("id").and_then(number) == Some(viewer_id)
-                    && let Some(url) = profile_avatar_from_object(user)
-                {
-                    return Some(url);
+                let Some(fresh) = profile_from_user(user, viewer_id) else {
+                    continue;
+                };
+                if !profile.has_name() {
+                    profile.first_name = fresh.first_name;
+                    profile.last_name = fresh.last_name;
+                }
+                if profile.avatar_url.is_none() {
+                    profile.avatar_url = fresh.avatar_url;
+                }
+                if profile.has_name() && profile.avatar_url.is_some() {
+                    return Some(profile);
                 }
             }
         }
     }
-    None
+    (profile.has_name() || profile.avatar_url.is_some()).then_some(profile)
 }
 
 /// The actual self-profile header has this marker in VK's public frontend.
 /// Without matching users.get metadata, only an explicit /id<viewer> link can
 /// establish ownership; short vanity links and arbitrary feed images are ignored.
-fn header_avatar(html: &str, viewer_id: i64) -> Option<String> {
+fn header_profile(html: &str, viewer_id: i64) -> Option<Profile> {
     let mut rest = html;
     let mut found = None;
     let mut headers = 0;
@@ -4654,9 +4756,21 @@ fn header_avatar(html: &str, viewer_id: i64) -> Option<String> {
             }
             if name.eq_ignore_ascii_case("img") {
                 images += 1;
-                found = html_attributes(attributes)
-                    .get("src")
-                    .and_then(|url| valid_cover_url(url));
+                let attributes = html_attributes(attributes);
+                // The frontend uses the viewer's first name as the header
+                // image's alt text. Do not guess a surname from a full label.
+                let first_name = attributes
+                    .get("alt")
+                    .filter(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+                    .map(|name| name.trim().to_owned())
+                    .unwrap_or_default();
+                let profile = Profile {
+                    id: viewer_id,
+                    first_name,
+                    last_name: String::new(),
+                    avatar_url: attributes.get("src").and_then(|url| valid_cover_url(url)),
+                };
+                found = (profile.has_name() || profile.avatar_url.is_some()).then_some(profile);
             }
         }
         if images != 1 {
@@ -5931,7 +6045,7 @@ mod tests {
     }
 
     #[test]
-    fn session_profile_names_come_only_from_the_verified_global_viewer() {
+    fn global_profile_names_ignore_unrelated_cards_and_nested_metadata() {
         let html = r#"<div>Other Person</div><script>
             var card = {id:99, first_name:"Other", last_name:"Person"};
             window.vk = {id:42, first_name:"\u0410\u043d\u043d\u0430", last_name:"Test", nested:{first_name:"Ignored"}};
@@ -5969,6 +6083,106 @@ mod tests {
         );
         assert_eq!(profile_from_html(&html).unwrap().display_name(), "VK 42");
         assert!(viewer_name(r#""bad\nname""#).is_none());
+    }
+
+    #[test]
+    fn optional_profile_lookup_checks_identity_and_preserves_verified_session_on_failure() {
+        let client =
+            WebAudioClient::new(vec![cookie("vk.ru", "/", "remixsid", "synthetic")]).unwrap();
+        client.accept_profile(42).unwrap();
+        let generation = client.state.lock().unwrap().generation;
+        let canceled = AtomicBool::new(false);
+        let fallback = Profile {
+            id: 42,
+            first_name: "VK".into(),
+            last_name: "42".into(),
+            avatar_url: None,
+        };
+        let fresh = client.profile_metadata_request(fallback.clone(), generation, &canceled, |method, params| {
+            assert_eq!(method,"users.get");
+            assert_eq!(params,vec![("user_ids","42".into()),("fields","photo_200".into())]);
+            Ok(json!([{"id":99,"first_name":"Other"},{"id":42,"first_name":"Анна","last_name":"Test"}]))
+        }).unwrap();
+        assert_eq!(fresh.display_name(), "Анна Test");
+        for result in [
+            Err(WebAudioError::Network),
+            Ok(json!([{"id":99,"first_name":"Other"}])),
+        ] {
+            let retained = client
+                .profile_metadata_request(fallback.clone(), generation, &canceled, |_, _| result)
+                .unwrap();
+            assert_eq!(retained.display_name(), "VK 42");
+            assert_eq!(client.state.lock().unwrap().verified_owner, Some(42));
+            assert_eq!(client.state.lock().unwrap().generation, generation);
+        }
+        assert!(matches!(
+            client.profile_metadata_request(fallback, generation, &canceled, |_, _| {
+                client.accept_profile(99).unwrap();
+                Ok(json!([{"id":42,"first_name":"Stale"}]))
+            }),
+            Err(WebAudioError::Unverified)
+        ));
+    }
+
+    #[test]
+    fn session_profile_recovers_names_from_matching_prefetched_users() {
+        let entries = json!([
+            {"method":"users.get","response":[{"id":99,"first_name":"Wrong","last_name":"Account"}]},
+            {"method":"wall.get","response":[{"id":42,"first_name":"Wrong method"}]},
+            {"method":"users.get","response":{"response":[{"id":"42","first_name":" Анна ","last_name":"Test"}]}}
+        ]);
+        for assignment in [
+            format!("window.cur.apiPrefetchCache={entries};"),
+            format!("cur={{\"apiPrefetchCache\":{entries}}};"),
+        ] {
+            let html = format!("<script>vk.id=42; {assignment}</script>");
+            let profile = profile_from_html(&html).unwrap();
+            assert_eq!(profile.id, 42);
+            assert_eq!(profile.display_name(), "Анна Test");
+            assert!(
+                profile.avatar_url.is_none(),
+                "A name must not require an avatar"
+            );
+        }
+        for entries in [
+            json!([{"method":"users.get","error":true,"response":[{"id":42,"first_name":"Rejected"}]}]),
+            json!([{"method":"users.get","response":[{"id":99,"first_name":"Other"}]}]),
+            json!([{"method":"users.get","response":[{"id":42,"first_name":"x".repeat(1025),"last_name":"bad\nname"}]}]),
+        ] {
+            let html = format!("<script>vk.id=42;cur.apiPrefetchCache={entries};</script>");
+            assert_eq!(profile_from_html(&html).unwrap().display_name(), "VK 42");
+        }
+        let quoted = format!(
+            "<script>vk.id=42; var text={};</script>",
+            serde_json::to_string(&format!("cur.apiPrefetchCache={entries};")).unwrap()
+        );
+        assert_eq!(profile_from_html(&quoted).unwrap().display_name(), "VK 42");
+    }
+
+    #[test]
+    fn session_profile_header_name_must_belong_to_the_unique_self_link() {
+        let marker = "<a data-testid=\"header-profile-menu-button\" href=\"/id42\"><img alt=\"Анна &amp; Test\" src=\"https://images.example.test/self.jpg\"></a>";
+        let html = format!("<script>vk.id=42;</script>{marker}");
+        let profile = profile_from_html(&html).unwrap();
+        assert_eq!(profile.display_name(), "Анна & Test");
+        assert!(
+            profile.last_name.is_empty(),
+            "Do not split a label into guessed names"
+        );
+        for html in [
+            html.replace("/id42", "/id99"),
+            format!("{html}{marker}"),
+            format!("<script>vk.id=42;</script><!-- {marker} -->"),
+        ] {
+            assert_eq!(profile_from_html(&html).unwrap().display_name(), "VK 42");
+        }
+        let html = format!(
+            "<script>vk={{id:42,first_name:'Verified',last_name:'Name'}};</script>{marker}"
+        );
+        assert_eq!(
+            profile_from_html(&html).unwrap().display_name(),
+            "Verified Name"
+        );
     }
 
     #[test]
