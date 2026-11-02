@@ -1,5 +1,5 @@
 //! One worker with a coalesced latest-track slot; rapid skips do not fan out HTTP.
-use super::{Error, Lyrics, Mode, Provider, Query, Status, store};
+use super::{Error, Lyrics, Mode, Provider, Query, Source, Status, store};
 use crate::repaint_target::RepaintTarget;
 use std::{
     collections::VecDeque,
@@ -16,6 +16,8 @@ use zeroize::{Zeroize, Zeroizing};
 pub enum ConfigAction {
     Reload,
     Mode(Mode),
+    Source(Source),
+    Fallback(bool),
     ApiKey(Zeroizing<String>),
     Generate,
 }
@@ -31,14 +33,22 @@ pub enum Event {
         result: Result<Arc<Lyrics>, Error>,
     },
 }
+pub struct VkSession {
+    pub owner: i64,
+    pub client: crate::web_audio::WebAudioClient,
+}
+
 struct Fetch {
     id: u64,
     query: Query,
+    vk: Option<VkSession>,
+    cancel: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct Jobs {
     config: Option<ConfigAction>,
     fetch: Option<Fetch>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 pub struct Service {
@@ -52,6 +62,7 @@ pub struct Service {
 impl Drop for Service {
     fn drop(&mut self) {
         self.canceled.store(true, Ordering::Release);
+        self.cancel_fetch();
         let _ = self.wake.try_send(());
     }
 }
@@ -81,7 +92,8 @@ impl Service {
                     completed: false,
                 });
                 worker_repaint.request_repaint();
-                let mut cache: VecDeque<(Query, Instant, Arc<Lyrics>)> = VecDeque::new();
+                let mut cache: VecDeque<(Query, Instant, Arc<Lyrics>, Option<i64>)> =
+                    VecDeque::new();
                 let mut font_attempted = false;
                 while wakes.recv().is_ok() && !worker_cancel.load(Ordering::Acquire) {
                     let action = worker_jobs
@@ -135,12 +147,14 @@ impl Service {
                     let stop = || {
                         worker_cancel.load(Ordering::Acquire)
                             || worker_latest.load(Ordering::Acquire) != request.id
+                            || request.cancel.load(Ordering::Acquire)
                     };
                     if stop() {
                         continue;
                     }
-                    let cached = cache.iter().position(|(query, at, _)| {
-                        query == &request.query && at.elapsed().as_secs() < 900
+                    let owner = request.vk.as_ref().map(|vk| vk.owner);
+                    let cached = cache.iter().position(|(query, at, _, account)| {
+                        query == &request.query && *account == owner && at.elapsed().as_secs() < 900
                     });
                     let result = if let Some(index) = cached {
                         let entry = cache.remove(index).unwrap();
@@ -150,52 +164,26 @@ impl Service {
                     } else {
                         match (&provider, &mut config) {
                             (Ok(provider), Ok(config)) => {
-                                // A shared anonymous grant survives a rapid track skip.
-                                let prepared = prepare(provider, config, &|| {
-                                    worker_cancel.load(Ordering::Acquire)
-                                });
+                                let result = resolve_sources(
+                                    config.source,
+                                    config.fallback_to_genius,
+                                    &stop,
+                                    |source| {
+                                        fetch_source(
+                                            provider,
+                                            config,
+                                            source,
+                                            &request,
+                                            &stop,
+                                            &|| worker_cancel.load(Ordering::Acquire),
+                                        )
+                                    },
+                                );
                                 let _ = reply.send(Event::Settings {
                                     result: Ok(config.status()),
                                     completed: false,
                                 });
                                 worker_repaint.request_repaint();
-                                let result = prepared
-                                    .and_then(|()| provider.fetch(config, &request.query, &stop));
-                                if let Err(error) = result {
-                                    match error {
-                                        Error::Auth if config.mode == Mode::Anonymous => {
-                                            config.token_rejected = true
-                                        }
-                                        Error::RateLimited(seconds) => match config.mode {
-                                            Mode::Anonymous => {
-                                                config.anonymous_retry_after =
-                                                    store::now() + seconds
-                                            }
-                                            Mode::ApiKey => {
-                                                config.api_retry_after = store::now() + seconds
-                                            }
-                                        },
-                                        Error::Captcha => match config.mode {
-                                            Mode::Anonymous => {
-                                                config.anonymous_retry_after = store::now() + 300
-                                            }
-                                            Mode::ApiKey => {
-                                                config.api_retry_after = store::now() + 300
-                                            }
-                                        },
-                                        _ => {}
-                                    }
-                                    if matches!(
-                                        error,
-                                        Error::Auth | Error::RateLimited(_) | Error::Captcha
-                                    ) {
-                                        let _ = store::save(config);
-                                        let _ = reply.send(Event::Settings {
-                                            result: Ok(config.status()),
-                                            completed: false,
-                                        });
-                                    }
-                                }
                                 result
                             }
                             (Err(error), _) => Err(*error),
@@ -218,8 +206,15 @@ impl Service {
                                 let _ = reply.send(Event::Font(font));
                             }
                         }
-                        cache.retain(|(query, _, _)| query != &request.query);
-                        cache.push_back((request.query.clone(), Instant::now(), lyrics.clone()));
+                        cache.retain(|(query, _, _, account)| {
+                            query != &request.query || *account != owner
+                        });
+                        cache.push_back((
+                            request.query.clone(),
+                            Instant::now(),
+                            lyrics.clone(),
+                            owner,
+                        ));
                         while cache.len() > 32 {
                             cache.pop_front();
                         }
@@ -253,15 +248,28 @@ impl Service {
     pub fn configure(&self, action: ConfigAction) {
         self.latest.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(cancel) = jobs.cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
             jobs.config = Some(action);
             jobs.fetch = None;
         }
         let _ = self.wake.try_send(());
     }
-    pub fn fetch(&self, query: Query) -> u64 {
+    pub fn fetch(&self, query: Query, vk: Option<VkSession>) -> u64 {
         let id = self.latest.fetch_add(1, Ordering::AcqRel) + 1;
         if let Ok(mut jobs) = self.jobs.lock() {
-            jobs.fetch = Some(Fetch { id, query });
+            if let Some(cancel) = jobs.cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            jobs.cancel = Some(cancel.clone());
+            jobs.fetch = Some(Fetch {
+                id,
+                query,
+                vk,
+                cancel,
+            });
         }
         let _ = self.wake.try_send(());
         id
@@ -269,12 +277,105 @@ impl Service {
     pub fn cancel_fetch(&self) {
         self.latest.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(cancel) = jobs.cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
             jobs.fetch = None;
         }
     }
     pub fn poll(&self) -> Option<Event> {
         self.replies.try_recv().ok()
     }
+}
+
+fn resolve_sources(
+    source: Source,
+    fallback: bool,
+    canceled: &impl Fn() -> bool,
+    mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
+) -> Result<Arc<Lyrics>, Error> {
+    if canceled() {
+        return Err(Error::Canceled);
+    }
+    match fetch(source) {
+        Err(Error::Canceled) => Err(Error::Canceled),
+        Err(error) if fallback && source != Source::Genius => {
+            if canceled() {
+                return Err(Error::Canceled);
+            }
+            match fetch(Source::Genius) {
+                Ok(lyrics) => Ok(lyrics),
+                Err(Error::Canceled) => Err(Error::Canceled),
+                Err(_) => Err(error),
+            }
+        }
+        result => result,
+    }
+}
+
+fn fetch_source(
+    provider: &Provider,
+    config: &mut store::Config,
+    source: Source,
+    request: &Fetch,
+    canceled: &impl Fn() -> bool,
+    shutdown: &impl Fn() -> bool,
+) -> Result<Arc<Lyrics>, Error> {
+    if canceled() {
+        return Err(Error::Canceled);
+    }
+    let now = store::now();
+    let retry = match source {
+        Source::Genius => config.genius_retry_after,
+        Source::Vk => config.vk_retry_after,
+        Source::Musixmatch => match config.mode {
+            Mode::Anonymous => config.anonymous_retry_after,
+            Mode::ApiKey => config.api_retry_after,
+        },
+    };
+    if retry > now {
+        return Err(Error::RateLimited(retry - now));
+    }
+    let result = match source {
+        Source::Musixmatch => prepare(provider, config, shutdown)
+            .and_then(|()| provider.fetch(config, &request.query, canceled)),
+        Source::Genius => provider.genius(&request.query, canceled),
+        Source::Vk => request.vk.as_ref().ok_or(Error::NoSession).and_then(|vk| {
+            if cfg!(test) {
+                return Err(Error::NotFound);
+            }
+            vk.client
+                .track_lyrics(vk.owner, request.query.key, &request.cancel)
+                .map_err(super::vk::error)
+                .and_then(|value| super::vk::parse(&value))
+                .map(Arc::new)
+        }),
+    };
+    if let Err(error) = result {
+        let wait = match error {
+            Error::RateLimited(seconds) => seconds.clamp(30, 86400),
+            Error::Captcha => 300,
+            _ => 0,
+        };
+        if source == Source::Musixmatch && config.mode == Mode::Anonymous && error == Error::Auth {
+            config.token_rejected = true;
+        }
+        if wait > 0 {
+            let slot = match source {
+                Source::Genius => &mut config.genius_retry_after,
+                Source::Vk => &mut config.vk_retry_after,
+                Source::Musixmatch => match config.mode {
+                    Mode::Anonymous => &mut config.anonymous_retry_after,
+                    Mode::ApiKey => &mut config.api_retry_after,
+                },
+            };
+            *slot = now + wait;
+        }
+        if wait > 0 || error == Error::Auth {
+            let _ = store::save(config);
+        }
+    }
+    result
 }
 
 fn cjk_font() -> Option<Vec<u8>> {
@@ -347,9 +448,12 @@ fn prepare(
     canceled: &impl Fn() -> bool,
 ) -> Result<(), Error> {
     let now = store::now();
-    let status = config.status();
-    if status.request_retry_after > now {
-        return Err(Error::RateLimited(status.request_retry_after - now));
+    let retry = match config.mode {
+        Mode::Anonymous => config.anonymous_retry_after,
+        Mode::ApiKey => config.api_retry_after,
+    };
+    if retry > now {
+        return Err(Error::RateLimited(retry - now));
     }
     match config.mode {
         Mode::ApiKey if config.api_key.is_empty() => Err(Error::MissingKey),
@@ -367,6 +471,18 @@ fn configure(
 ) -> Result<Status, Error> {
     match action {
         ConfigAction::Reload => {}
+        ConfigAction::Source(source) => {
+            let mut candidate = config.clone();
+            candidate.source = source;
+            store::save(&candidate)?;
+            *config = candidate;
+        }
+        ConfigAction::Fallback(enabled) => {
+            let mut candidate = config.clone();
+            candidate.fallback_to_genius = enabled;
+            store::save(&candidate)?;
+            *config = candidate;
+        }
         ConfigAction::Mode(mode) => {
             let mut candidate = config.clone();
             candidate.mode = mode;
@@ -399,6 +515,70 @@ fn configure(
 mod tests {
     use super::*;
     #[test]
+    fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
+        let mut calls = Vec::new();
+        let result = resolve_sources(Source::Vk, true, &|| false, |source| {
+            calls.push(source);
+            match source {
+                Source::Vk => Err(Error::NotFound),
+                _ => Ok(Arc::new(super::super::test_data(2, false))),
+            }
+        })
+        .unwrap();
+        assert!(!result.synced);
+        assert_eq!(calls, [Source::Vk, Source::Genius]);
+        for (source, fallback, error, expected) in [
+            (Source::Vk, false, Error::NotFound, vec![Source::Vk]),
+            (Source::Genius, true, Error::NotFound, vec![Source::Genius]),
+            (Source::Vk, true, Error::Canceled, vec![Source::Vk]),
+        ] {
+            calls.clear();
+            assert_eq!(
+                resolve_sources(source, fallback, &|| false, |source| {
+                    calls.push(source);
+                    Err(error)
+                })
+                .unwrap_err(),
+                error
+            );
+            assert_eq!(calls, expected);
+        }
+        assert_eq!(
+            resolve_sources(Source::Vk, true, &|| true, |_| panic!(
+                "canceled work must not fetch"
+            ))
+            .unwrap_err(),
+            Error::Canceled
+        );
+    }
+
+    #[test]
+    fn selecting_sources_preserves_credentials_and_independent_backoff() {
+        let provider = Provider::new().unwrap();
+        let mut config = store::Config::default();
+        config.user_token = "synthetic-existing-token".into();
+        config.anonymous_retry_after = store::now() + 300;
+        configure(
+            &provider,
+            &mut config,
+            ConfigAction::Source(Source::Vk),
+            &|| false,
+        )
+        .unwrap();
+        configure(
+            &provider,
+            &mut config,
+            ConfigAction::Fallback(true),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(config.source, Source::Vk);
+        assert!(config.fallback_to_genius);
+        assert_eq!(config.status().request_retry_after, 0);
+        assert_eq!(config.user_token, "synthetic-existing-token");
+        assert!(config.anonymous_retry_after > store::now());
+    }
+    #[test]
     fn rapid_track_changes_keep_only_the_latest_fetch_and_configuration_cancels_old_work() {
         let jobs = Arc::new(Mutex::new(Jobs::default()));
         let (wake, _receive) = mpsc::sync_channel(1);
@@ -419,14 +599,15 @@ mod tests {
             duration: 180,
             speed_variant: false,
         };
-        let first = service.fetch(query.clone());
+        let first = service.fetch(query.clone(), None);
         query.key.1 = 2;
-        let last = service.fetch(query.clone());
+        let last = service.fetch(query.clone(), None);
         assert!(last > first);
         let pending = jobs.lock().unwrap().fetch.take().unwrap();
         assert_eq!(pending.id, last);
         assert_eq!(pending.query, query);
-        service.fetch(query);
+        service.fetch(query, None);
+        assert!(pending.cancel.load(Ordering::Acquire));
         service.configure(ConfigAction::Mode(Mode::ApiKey));
         assert!(jobs.lock().unwrap().fetch.is_none());
         assert!(matches!(

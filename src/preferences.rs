@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::Language;
+use crate::play_order::RepeatMode;
 
 const MAX_BYTES: u64 = 4096;
 pub const MAX_CACHE_MB: u32 = 5120;
@@ -28,6 +29,10 @@ static WRITES: Mutex<()> = Mutex::new(());
 #[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct Preferences {
+    #[serde(deserialize_with = "deserialize_shuffle")]
+    shuffle: bool,
+    #[serde(deserialize_with = "deserialize_repeat")]
+    repeat: RepeatMode,
     #[serde(deserialize_with = "deserialize_volume")]
     volume: f32,
     #[serde(deserialize_with = "deserialize_cache_limit")]
@@ -55,6 +60,8 @@ struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            shuffle: false,
+            repeat: RepeatMode::Off,
             volume: DEFAULT_VOLUME,
             cache_limit_mb: DEFAULT_CACHE_MB,
             language: "ru".into(),
@@ -68,6 +75,21 @@ impl Default for Preferences {
             extra: serde_json::Map::new(),
         }
     }
+}
+
+fn deserialize_shuffle<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
+}
+
+fn deserialize_repeat<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RepeatMode, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 fn deserialize_volume<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
@@ -383,7 +405,9 @@ fn load_at(path: &Path) -> io::Result<Option<f32>> {
             || json.get("normalize_volume").is_some()
             || json.get("minimize_to_tray").is_some()
             || json.get("logging_enabled").is_some()
-            || json.get("discord_rpc_enabled").is_some() =>
+            || json.get("discord_rpc_enabled").is_some()
+            || json.get("shuffle").is_some()
+            || json.get("repeat").is_some() =>
         {
             Ok(Some(DEFAULT_VOLUME))
         }
@@ -492,6 +516,28 @@ fn remove_legacy_if_unchanged(legacy: &Path, original: &[u8]) -> io::Result<()> 
 
 pub fn load_volume() -> Option<f32> {
     load_at(&preferences_path().ok()?).ok().flatten()
+}
+
+pub fn load_playback_modes() -> (bool, RepeatMode) {
+    if cfg!(test) {
+        return (false, RepeatMode::Off);
+    }
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map(|prefs| (prefs.shuffle, prefs.repeat))
+        .unwrap_or_default()
+}
+
+pub fn save_playback_modes(shuffle: bool, repeat: RepeatMode) -> io::Result<()> {
+    save_playback_modes_at(&preferences_path()?, shuffle, repeat)
+}
+
+fn save_playback_modes_at(path: &Path, shuffle: bool, repeat: RepeatMode) -> io::Result<()> {
+    update_at(path, |prefs| {
+        prefs.shuffle = shuffle;
+        prefs.repeat = repeat;
+    })
 }
 
 pub fn save_volume(volume: f32) -> io::Result<()> {
@@ -645,6 +691,34 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn playback_modes_roundtrip_without_overwriting_other_preferences() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.375).unwrap();
+        for (shuffle, repeat) in [
+            (true, RepeatMode::All),
+            (false, RepeatMode::One),
+            (true, RepeatMode::Off),
+        ] {
+            save_playback_modes_at(&path, shuffle, repeat).unwrap();
+            let restored = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!((restored.shuffle, restored.repeat), (shuffle, repeat));
+            assert_eq!(restored.volume, 0.375);
+            let order =
+                crate::play_order::PlaybackOrder::with_modes(restored.shuffle, restored.repeat);
+            assert_eq!(order.shuffle(), shuffle);
+            assert_eq!(order.repeat(), repeat);
+        }
+        let legacy: Preferences = serde_json::from_str(r#"{"volume":0.25}"#).unwrap();
+        assert_eq!((legacy.shuffle, legacy.repeat), (false, RepeatMode::Off));
+        let invalid: Preferences =
+            serde_json::from_str(r#"{"volume":0.25,"shuffle":"invalid","repeat":"invalid"}"#)
+                .unwrap();
+        assert_eq!((invalid.shuffle, invalid.repeat), (false, RepeatMode::Off));
+        assert_eq!(invalid.volume, 0.25);
     }
 
     #[test]

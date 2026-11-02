@@ -479,6 +479,7 @@ impl MusicApp {
         self.leave_mix();
         let keys: Vec<_> = tracks.iter().map(Track::key).collect();
         self.play_order.set_shuffle(shuffle, &keys, None);
+        self.save_playback_modes();
         self.start_queue_from(
             ctx,
             tracks,

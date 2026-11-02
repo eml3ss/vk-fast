@@ -5,12 +5,16 @@ use serde_json::Value;
 use std::{io::Read, sync::Arc, time::Duration};
 use zeroize::Zeroizing;
 
+#[path = "lyrics_genius.rs"]
+mod genius;
 #[path = "lyrics_service.rs"]
 mod service;
 #[path = "lyrics_store.rs"]
 mod store;
-pub use service::{ConfigAction, Event, Service};
-pub use store::{Mode, Status};
+#[path = "lyrics_vk.rs"]
+mod vk;
+pub use service::{ConfigAction, Event, Service, VkSession};
+pub use store::{Mode, Source, Status};
 
 const API: &str = "https://api.musixmatch.com/ws/1.1/";
 const ANONYMOUS_API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
@@ -63,7 +67,7 @@ pub struct Lyrics {
     pub lines: Vec<Line>,
     pub synced: bool,
     pub instrumental: bool,
-    pub copyright: String,
+    _copyright: String,
     pub source_url: Option<String>,
     tracking_url: Option<String>,
 }
@@ -90,6 +94,7 @@ impl Lyrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     MissingKey,
+    NoSession,
     Auth,
     Restricted,
     Captcha,
@@ -106,44 +111,45 @@ impl Error {
         let t = |ru, en| language.text(ru, en);
         match self {
             Self::MissingKey => t(
-                "Добавьте API-ключ Musixmatch или выберите анонимный режим.",
-                "Add a Musixmatch API key or choose anonymous mode.",
+                "Добавьте API-ключ или выберите анонимный режим в настройках текстов.",
+                "Add an API key or choose anonymous mode in lyrics settings.",
+            ),
+            Self::NoSession => t(
+                "Войдите в VK для загрузки текста.",
+                "Sign in to VK to load lyrics.",
             ),
             Self::Auth => t(
-                "Musixmatch отклонил ключ или токен. Проверьте подключение в настройках.",
-                "Musixmatch rejected the key or token. Check the connection in Settings.",
+                "Источник отклонил авторизацию. Проверьте подключение в настройках.",
+                "Authorization was rejected. Check the connection in Settings.",
             ),
             Self::Restricted => t(
-                "Musixmatch ограничил доступ к тексту этого трека.",
-                "Musixmatch has restricted these lyrics.",
+                "Источник ограничил доступ к тексту этого трека.",
+                "Access to these lyrics is restricted.",
             ),
             Self::Captcha => t(
-                "Musixmatch запросил проверку. Попробуйте позже или используйте свой API-ключ.",
-                "Musixmatch requires verification. Try later or use your API key.",
+                "Источник запросил проверку. Попробуйте позже или выберите другой источник.",
+                "Verification is required. Try later or choose another source.",
             ),
             Self::RateLimited(_) => t(
-                "Достигнут лимит Musixmatch. Повторите запрос позже.",
-                "Musixmatch's request limit was reached. Try again later.",
+                "Достигнут лимит запросов. Повторите запрос позже.",
+                "The request limit was reached. Try again later.",
             ),
             Self::NotFound => t(
                 "Текст этого трека не найден.",
                 "Lyrics for this track were not found.",
             ),
             Self::WrongLyrics => t(
-                "Musixmatch вернул неподходящий текст. Попробуйте позже.",
-                "Musixmatch returned incorrect lyrics. Try again later.",
+                "Источник вернул неподходящий текст. Попробуйте позже.",
+                "The source returned incorrect lyrics. Try again later.",
             ),
-            Self::Network => t(
-                "Не удалось связаться с Musixmatch.",
-                "Could not connect to Musixmatch.",
-            ),
+            Self::Network => t("Не удалось загрузить текст.", "Could not load lyrics."),
             Self::Format => t(
-                "Не удалось прочитать ответ Musixmatch.",
-                "Could not read the Musixmatch response.",
+                "Не удалось прочитать ответ источника текстов.",
+                "Could not read the lyrics response.",
             ),
             Self::Storage => t(
-                "Не удалось сохранить подключение Musixmatch.",
-                "Could not save the Musixmatch connection.",
+                "Не удалось сохранить настройки текстов.",
+                "Could not save lyrics settings.",
             ),
             Self::Canceled => t("Запрос отменён.", "Request canceled."),
         }
@@ -319,7 +325,7 @@ impl Provider {
                         lines: Vec::new(),
                         synced: false,
                         instrumental: true,
-                        copyright: String::new(),
+                        _copyright: String::new(),
                         source_url: None,
                         tracking_url: None,
                     };
@@ -444,7 +450,7 @@ fn metadata(value: &Value) -> Result<Lyrics, Error> {
         lines: Vec::new(),
         synced: false,
         instrumental: flag(value.get("instrumental")),
-        copyright: copyright.into(),
+        _copyright: copyright.into(),
         source_url: None,
         tracking_url: value
             .get("pixel_tracking_url")
@@ -799,7 +805,7 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
             lines: Vec::new(),
             synced: false,
             instrumental: true,
-            copyright: String::new(),
+            _copyright: String::new(),
             source_url: None,
             tracking_url: None,
         };
@@ -820,7 +826,7 @@ pub(crate) fn test_data(count: usize, synced: bool) -> Lyrics {
             .collect(),
         synced,
         instrumental: false,
-        copyright: "© Synthetic test".into(),
+        _copyright: "© Synthetic test".into(),
         source_url: None,
         tracking_url: None,
     }
@@ -866,7 +872,7 @@ mod tests {
             lyrics.lines[1].text,
             "Second synthetic line\nSame timestamp"
         );
-        assert_eq!(lyrics.copyright, "© Synthetic test");
+        assert_eq!(lyrics._copyright, "© Synthetic test");
         assert!(lyrics.source_url.is_some());
     }
     #[test]

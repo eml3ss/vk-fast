@@ -28,7 +28,8 @@ enum Visit {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
     #[default]
     Off,
@@ -54,6 +55,13 @@ pub struct PlaybackOrder {
 }
 
 impl PlaybackOrder {
+    pub fn with_modes(shuffle: bool, repeat: RepeatMode) -> Self {
+        Self {
+            shuffle,
+            repeat,
+            ..Self::default()
+        }
+    }
     pub fn shuffle(&self) -> bool {
         self.shuffle
     }

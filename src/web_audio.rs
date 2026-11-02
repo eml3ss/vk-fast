@@ -1340,6 +1340,26 @@ impl WebAudioClient {
             .ok_or(WebAudioError::Format)
     }
 
+    /// Lyrics use the exact audio identity and the existing verified web session.
+    pub fn track_lyrics(
+        &self,
+        expected_owner: i64,
+        key: (i64, i64),
+        canceled: &AtomicBool,
+    ) -> Result<Value, WebAudioError> {
+        if key.0 == 0 || key.0.checked_abs().is_none() || key.1 <= 0 {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        self.detail_request(
+            expected_owner,
+            generation,
+            "audio.getLyrics",
+            vec![("audio_id", format!("{}_{}", key.0, key.1))],
+            canceled,
+        )
+    }
+
     /// Bounded metadata hydration for older cache rows. It preserves requested
     /// identities/order and never advances the library's delivery cursor.
     pub fn tracks_metadata(

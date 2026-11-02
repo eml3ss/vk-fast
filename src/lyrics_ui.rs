@@ -218,51 +218,6 @@ pub fn show(
         content.min.y += 62.0;
     }
     if let Some(lyrics) = view.lyrics {
-        let copyright_height = if lyrics.copyright.is_empty() {
-            24.0
-        } else {
-            55.0
-        };
-        let footer = Rect::from_min_max(
-            egui::pos2(
-                content.left(),
-                (content.bottom() - copyright_height).max(content.top()),
-            ),
-            content.right_bottom(),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
-            ui.set_clip_rect(ui.clip_rect().intersect(footer));
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.horizontal_wrapped(|ui| {
-                ui.hyperlink_to(
-                    RichText::new("Musixmatch").size(11.0).color(theme::MUTED),
-                    lyrics
-                        .source_url
-                        .as_deref()
-                        .unwrap_or("https://www.musixmatch.com/"),
-                );
-                if !lyrics.synced && !lyrics.instrumental {
-                    ui.label(
-                        RichText::new(t("Без синхронизации", "Not synchronized"))
-                            .size(11.0)
-                            .color(theme::MUTED),
-                    );
-                }
-            });
-            if !lyrics.copyright.is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(&lyrics.copyright)
-                            .size(10.0)
-                            .color(theme::MUTED),
-                    )
-                    .wrap()
-                    .selectable(false),
-                )
-                .on_hover_text(&lyrics.copyright);
-            }
-        });
-        content.max.y = footer.top() - 8.0;
         if lyrics.instrumental && lyrics.lines.is_empty() {
             centered(
                 ui,
@@ -358,7 +313,7 @@ pub fn show(
                     center + egui::vec2(0.0, 64.0),
                     egui::vec2(content.width().min(220.0), 34.0),
                 ),
-                egui::Button::new(t("Настройки Musixmatch", "Musixmatch settings")).frame(false),
+                egui::Button::new(t("Настройки текстов", "Lyrics settings")).frame(false),
             )
             .clicked()
         {

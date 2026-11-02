@@ -31,6 +31,7 @@ mod model;
 mod music_session_store;
 mod play_order;
 mod playback;
+mod playback_modes;
 mod playback_resume;
 mod playlist_cover;
 mod playlist_create_ui;

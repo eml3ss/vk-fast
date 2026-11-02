@@ -14,7 +14,7 @@ pub enum Setting {
     CompactSeek,
     DoubleClickPlay,
     NormalizeVolume,
-    Musixmatch,
+    Lyrics,
     MinimizeToTray,
     Logging,
     DiscordRpc,
@@ -61,8 +61,8 @@ impl Query {
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"
             }
-            Setting::Musixmatch => {
-                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный доступ токен ключ playback lyrics musixmatch anonymous token api key synced"
+            Setting::Lyrics => {
+                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный доступ токен ключ playback lyrics musixmatch vk genius source fallback anonymous token api key synced источник резервный"
             }
             Setting::MinimizeToTray => {
                 "общие системный трей сворачивать свернуть при закрытии закрытие фон значок general minimize minimise to system tray when close closing background icon"

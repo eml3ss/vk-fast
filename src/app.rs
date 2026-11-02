@@ -968,6 +968,7 @@ pub struct MusicApp {
     recent_latest: HashMap<i64, Arc<Vec<Track>>>,
     play_queue: Option<Vec<Track>>,
     play_order: PlaybackOrder,
+    playback_modes_writer: crate::playback_modes::Writer,
     queued_tracks: HashMap<(i64, i64), Track>,
     queue_ui: queue_app::PanelState,
     lyrics: lyrics_app::State,
@@ -1253,6 +1254,7 @@ impl MusicApp {
             player.set_volume(volume);
         }
         player.set_normalize_volume(preferences::load_normalize_volume());
+        let (shuffle, repeat) = preferences::load_playback_modes();
         let mut app = Self {
             session: None,
             pending: None,
@@ -1274,7 +1276,8 @@ impl MusicApp {
             recent_save_queue: HashMap::new(),
             recent_latest: HashMap::new(),
             play_queue: None,
-            play_order: PlaybackOrder::default(),
+            play_order: PlaybackOrder::with_modes(shuffle, repeat),
+            playback_modes_writer: crate::playback_modes::Writer::default(),
             queued_tracks: HashMap::new(),
             queue_ui: queue_app::PanelState::default(),
             lyrics: lyrics_app::State::default(),
@@ -1551,7 +1554,8 @@ impl MusicApp {
         }
         self.cancel_qr();
         self.stop_playback();
-        self.play_order = PlaybackOrder::default();
+        self.play_order =
+            PlaybackOrder::with_modes(self.play_order.shuffle(), self.play_order.repeat());
         if let Some(control) = self.browser_login.take() {
             control.cancel();
         }
@@ -2087,6 +2091,12 @@ impl MusicApp {
             &keys,
             self.playing.as_ref().map(Track::key).or(self.selected),
         );
+        self.save_playback_modes();
+    }
+
+    fn save_playback_modes(&mut self) {
+        self.playback_modes_writer
+            .save(self.play_order.shuffle(), self.play_order.repeat());
     }
 
     fn cancel_delayed_advance(&mut self) {
@@ -5539,6 +5549,7 @@ impl MusicApp {
                 if matches!(action, Some(detail_ui::Action::Shuffle)) {
                     let keys: Vec<_> = tracks.iter().map(Track::key).collect();
                     self.play_order.set_shuffle(true, &keys, None);
+                    self.save_playback_modes();
                 }
                 self.start_queue(&ctx, tracks.to_vec());
             }
@@ -6800,6 +6811,7 @@ impl MusicApp {
                 release_pointer_focus(&repeat_button);
                 if repeat_button.clicked() {
                     self.play_order.cycle_repeat();
+                    self.save_playback_modes();
                 }
             },
         );
@@ -7232,7 +7244,7 @@ impl MusicApp {
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
             ],
-            SettingsSection::Playback => &[Setting::NormalizeVolume, Setting::Musixmatch],
+            SettingsSection::Playback => &[Setting::NormalizeVolume, Setting::Lyrics],
             SettingsSection::Cache => &[
                 Setting::CacheLimit,
                 Setting::CacheClear,
@@ -7510,7 +7522,7 @@ impl MusicApp {
                         );
                     }
                 }
-                if query.matches(Setting::Musixmatch) {
+                if query.matches(Setting::Lyrics) {
                     if query.matches(Setting::NormalizeVolume) {
                         ui.add_space(18.0);
                     }
@@ -8344,6 +8356,7 @@ mod tests {
             recent_latest: HashMap::new(),
             play_queue: None,
             play_order: PlaybackOrder::default(),
+            playback_modes_writer: crate::playback_modes::Writer::default(),
             queued_tracks: HashMap::new(),
             queue_ui: queue_app::PanelState::default(),
             lyrics: lyrics_app::State::default(),

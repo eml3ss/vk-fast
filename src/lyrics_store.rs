@@ -17,9 +17,35 @@ pub enum Mode {
     ApiKey,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    #[default]
+    Musixmatch,
+    Vk,
+    Genius,
+}
+impl Source {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Musixmatch => "Musixmatch",
+            Self::Vk => "VK",
+            Self::Genius => "Genius",
+        }
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Config {
+    #[serde(default)]
+    pub source: Source,
+    #[serde(default)]
+    pub fallback_to_genius: bool,
+    #[serde(default)]
+    pub genius_retry_after: u64,
+    #[serde(default)]
+    pub vk_retry_after: u64,
     #[serde(default)]
     pub mode: Mode,
     #[serde(default)]
@@ -48,6 +74,8 @@ impl Drop for Config {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Status {
+    pub source: Source,
+    pub fallback_to_genius: bool,
     pub mode: Mode,
     pub key_ready: bool,
     pub token_ready: bool,
@@ -58,12 +86,26 @@ pub struct Status {
 impl Config {
     pub fn status(&self) -> Status {
         Status {
+            source: self.source,
+            fallback_to_genius: self.fallback_to_genius,
             mode: self.mode,
             key_ready: !self.api_key.is_empty(),
             token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
-            request_retry_after: match self.mode {
+            request_retry_after: if self.fallback_to_genius && self.source != Source::Genius {
+                self.source_retry_after().min(self.genius_retry_after)
+            } else {
+                self.source_retry_after()
+            },
+        }
+    }
+
+    pub fn source_retry_after(&self) -> u64 {
+        match self.source {
+            Source::Vk => self.vk_retry_after,
+            Source::Genius => self.genius_retry_after,
+            Source::Musixmatch => match self.mode {
                 Mode::Anonymous => self.anonymous_retry_after,
                 Mode::ApiKey => self.api_retry_after,
             },
@@ -247,6 +289,8 @@ mod tests {
         ));
         let path = root.join("musixmatch.json");
         let config = Config {
+            source: Source::Vk,
+            fallback_to_genius: true,
             api_key: "synthetic-key".into(),
             user_token: "synthetic-token".into(),
             token_app_id: super::super::APP_ID.into(),
@@ -260,6 +304,8 @@ mod tests {
         assert_eq!(restored.user_token, "synthetic-token");
         assert!(restored.has_current_token());
         assert_eq!(restored.status().mode, Mode::ApiKey);
+        assert_eq!(restored.source, Source::Vk);
+        assert!(restored.fallback_to_genius);
         fs::write(&path, b"invalid synthetic record").unwrap();
         assert!(load_at(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"invalid synthetic record");
