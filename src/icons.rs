@@ -10,6 +10,8 @@ pub enum Icon {
     ArrowRight,
     Library,
     Search,
+    Eye,
+    EyeOff,
     Refresh,
     Plus,
     Headphones,
@@ -475,6 +477,33 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let handle_start = 10.0 + (6.5 + stroke.width / scale) / 2.0_f32.sqrt();
             line(&[(handle_start, handle_start), (21.0, 21.0)]);
         }
+        Icon::Eye | Icon::EyeOff => {
+            let mut contour = Vec::with_capacity(48);
+            for (start, first, second, end) in [
+                ((3.0, 12.0), (7.0, 4.0), (17.0, 4.0), (21.0, 12.0)),
+                ((21.0, 12.0), (17.0, 20.0), (7.0, 20.0), (3.0, 12.0)),
+            ] {
+                for sample in 0..24 {
+                    let t = sample as f32 / 24.0;
+                    let u = 1.0 - t;
+                    contour.push(
+                        (point(start.0, start.1).to_vec2() * u.powi(3)
+                            + point(first.0, first.1).to_vec2() * (3.0 * u * u * t)
+                            + point(second.0, second.1).to_vec2() * (3.0 * u * t * t)
+                            + point(end.0, end.1).to_vec2() * t.powi(3))
+                        .to_pos2(),
+                    );
+                }
+            }
+            painter.add(egui::Shape::closed_line(
+                rounded_path(&contour, scale, true),
+                stroke,
+            ));
+            painter.circle_stroke(point(12.0, 12.0), 2.6 * scale, stroke);
+            if matches!(icon, Icon::EyeOff) {
+                line(&[(4.0, 4.0), (20.0, 20.0)]);
+            }
+        }
         Icon::Refresh => {
             arc((12.0, 12.0), 8.5, 185.0, 340.0);
             arc((12.0, 12.0), 8.5, 5.0, 160.0);
@@ -828,6 +857,8 @@ mod tests {
             Icon::ArrowRight,
             Icon::Library,
             Icon::Search,
+            Icon::Eye,
+            Icon::EyeOff,
             Icon::Refresh,
             Icon::Plus,
             Icon::Headphones,

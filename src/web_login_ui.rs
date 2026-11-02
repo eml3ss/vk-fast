@@ -209,7 +209,16 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                                     Step::Identifier | Step::Password => t("Пароль", "Password"),
                                     _ => t("Код", "Code"),
                                 })
-                                .frame(credential_frame()),
+                                .frame(if credentials {
+                                    credential_frame().inner_margin(egui::Margin {
+                                        left: 10,
+                                        right: 42,
+                                        top: 10,
+                                        bottom: 10,
+                                    })
+                                } else {
+                                    credential_frame()
+                                }),
                         )
                     })
                     .inner;
@@ -229,18 +238,49 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 }
                 clear_undo(ctx, field.id);
                 if credentials {
-                    ui.put(
-                        rect(278.0, 190.0, 26.0),
-                        egui::Checkbox::new(
-                            &mut state.show_password,
-                            t("Показать пароль", "Show password"),
-                        ),
+                    let eye = Rect::from_center_size(
+                        egui::pos2(field.rect.right() - 22.0, field.rect.center().y),
+                        egui::vec2(32.0, 32.0),
                     );
+                    let label = if state.show_password {
+                        t("Скрыть пароль", "Hide password")
+                    } else {
+                        t("Показать пароль", "Show password")
+                    };
+                    let response = ui
+                        .add_enabled_ui(!view.busy, |ui| {
+                            let response = ui.put(eye, egui::Button::new("").frame(false));
+                            icons::paint(
+                                ui.painter(),
+                                eye.shrink(6.0),
+                                if state.show_password {
+                                    Icon::EyeOff
+                                } else {
+                                    Icon::Eye
+                                },
+                                if response.hovered() {
+                                    ui.visuals().text_color()
+                                } else {
+                                    theme::MUTED
+                                },
+                            );
+                            response
+                        })
+                        .inner
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(label);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, !view.busy, label)
+                    });
+                    if response.clicked() {
+                        state.show_password = !state.show_password;
+                        field.request_focus();
+                    }
                 }
                 if view.error {
                     text(
                         ui,
-                        if credentials { 304.0 } else { 276.0 },
+                        278.0,
                         26.0,
                         t(
                             "Проверьте данные и повторите вход.",
@@ -259,7 +299,7 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 let submit = ui
                     .add_enabled_ui(valid && !view.busy, |ui| {
                         ui.put(
-                            rect(if credentials { 332.0 } else { 310.0 }, controls, 40.0),
+                            rect(310.0, controls, 40.0),
                             egui::Button::new(if credentials {
                                 t("Войти", "Sign in")
                             } else {
@@ -324,17 +364,9 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                     rect(232.0, 24.0, 24.0),
                     egui::Spinner::new().size(24.0).color(theme::ACCENT),
                 );
-            } else if view.busy {
+            } else if view.busy && !view.error {
                 ui.put(
-                    rect(
-                        if matches!(view.step, Step::Identifier | Step::Password) {
-                            308.0
-                        } else {
-                            280.0
-                        },
-                        18.0,
-                        18.0,
-                    ),
+                    rect(280.0, 18.0, 18.0),
                     egui::Spinner::new().size(18.0).color(theme::ACCENT),
                 );
             }
@@ -401,8 +433,13 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 + 8.0 * methods.len().saturating_sub(1) as f32;
             let mut left = body.center().x - total * 0.5;
             for (action, label, w) in methods {
-                let r =
-                    Rect::from_min_size(egui::pos2(left, body.top() + 374.0), egui::vec2(w, 28.0));
+                let r = Rect::from_min_size(
+                    egui::pos2(
+                        left,
+                        body.top() + if view.accepts_input() { 398.0 } else { 374.0 },
+                    ),
+                    egui::vec2(w, 28.0),
+                );
                 left += w + 8.0;
                 if ui
                     .add_enabled_ui(!view.busy, |ui| {
@@ -420,9 +457,18 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             }
             cancel |= ui
                 .put(
-                    rect(404.0, controls, 28.0),
-                    egui::Button::new(RichText::new(t("Отмена", "Cancel")).color(theme::MUTED))
-                        .frame(false),
+                    rect(
+                        if view.accepts_input() { 358.0 } else { 404.0 },
+                        controls,
+                        28.0,
+                    ),
+                    egui::Button::new(
+                        RichText::new(t("Отмена", "Cancel"))
+                            .size(14.0)
+                            .color(theme::MUTED),
+                    )
+                    .frame(false)
+                    .corner_radius(10),
                 )
                 .clicked();
         });
@@ -623,6 +669,89 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(control.take_command().unwrap().value, "synthetic-secret");
+        }
+    }
+    #[test]
+    fn password_eye_toggles_without_submitting_and_cancel_follows_sign_in() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let control = Control::default();
+        let mut state = State::default();
+        control.publish(crate::web_login_state::Snapshot {
+            document: "synthetic".into(),
+            revision: 1,
+            step: Step::Identifier,
+            ..Default::default()
+        });
+        for i in 0..3 {
+            render(
+                &ctx,
+                &mut state,
+                &control,
+                Language::English,
+                i as f64 * 0.2,
+                Vec::new(),
+            );
+        }
+        let (empty, _) = render(
+            &ctx,
+            &mut state,
+            &control,
+            Language::English,
+            0.8,
+            Vec::new(),
+        );
+        let mut labels = std::collections::HashMap::new();
+        for shape in &empty.shapes {
+            texts(&shape.shape, &mut |text| {
+                labels.insert(text.galley.text().to_owned(), text.visual_bounding_rect());
+            });
+        }
+        let sign_in = labels["Sign in"].center();
+        let cancel = labels["Cancel"].center();
+        assert!((sign_in.x - cancel.x).abs() < 1.0);
+        assert!((cancel.y - sign_in.y - 42.0).abs() < 3.0);
+        assert!(!labels.contains_key("Show password"));
+        let eye = egui::pos2(538.0, labels["Password"].center().y);
+        state.identifier = "user@example.test".into();
+        state.input = "synthetic-secret".into();
+        for (i, shown) in [true, false].into_iter().enumerate() {
+            for (j, pressed) in [true, false].into_iter().enumerate() {
+                render(
+                    &ctx,
+                    &mut state,
+                    &control,
+                    Language::English,
+                    1.0 + i as f64 + j as f64 * 0.2,
+                    vec![
+                        egui::Event::PointerMoved(eye),
+                        egui::Event::PointerButton {
+                            pos: eye,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert_eq!(state.show_password, shown);
+            let (output, _) = render(
+                &ctx,
+                &mut state,
+                &control,
+                Language::English,
+                1.6 + i as f64,
+                Vec::new(),
+            );
+            let mut visible_password = false;
+            for shape in &output.shapes {
+                texts(&shape.shape, &mut |text| {
+                    visible_password |= text.galley.text().contains("synthetic-secret");
+                });
+            }
+            assert_eq!(visible_password, shown);
+            assert_eq!(state.input, "synthetic-secret");
+            assert!(control.take_command().is_none());
         }
     }
     #[test]

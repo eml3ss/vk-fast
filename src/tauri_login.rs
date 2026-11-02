@@ -663,7 +663,6 @@ pub fn run_helper(language: Language) -> Result<(), String> {
             let mut entry_attempt: Option<(String,u64,u8,Instant)>=None;
             let mut last_good: Option<(u64,LoginSnapshot)>=None;
             let mut unavailable_since: Option<Instant>=None;
-            let mut busy_since: Option<Instant>=None;
             while !setup_done.load(Ordering::Acquire) {
                 let epoch=setup_revision.load(Ordering::Acquire);
                 let inspected=inspect(&window).filter(|view|last_good.as_ref().is_none_or(|(at,old)|*at==epoch || old.document!=view.document));
@@ -679,9 +678,6 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 let raw_step=view.step;
                 if raw_step!=Step::Loading {loading_since=Instant::now();}
                 if raw_step==Step::Loading && loading_since.elapsed()>Duration::from_secs(10) {view.step=Step::Manual;}
-                if view.busy && view.accepts_input() {
-                    if busy_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(10) {view.step=Step::Manual;view.busy=false;}
-                } else {busy_since=None;}
                 let mut ack=false;let mut open=false;
                 match receiver.try_recv() {
                     Ok(command)=>{
@@ -940,7 +936,9 @@ mod tests {
                 assert_eq!(evaluate(&window,setup),Some(serde_json::Value::Bool(true)));
                 let view:LoginSnapshot=serde_json::from_value(evaluate(&window,"window.__vkFastAuth.snapshot()".into()).unwrap()).unwrap();
                 assert_eq!(view.step,Step::Identifier);
-                let command=InputCommand{document:view.document,revision:view.revision,action:Action::Submit,value:"+1234567890".into()};
+                let control=Control::default();control.publish(view);
+                assert!(control.send_credentials("+1234567890".into(),"synthetic-password".into()));
+                let command=control.take_command().unwrap();
                 assert!(!perform(&window,&command), "Production credentials cannot be dispatched to a local test origin");
                 let call=format!("window.__vkFastAuth.perform({})",serde_json::to_string(&command).unwrap());
                 assert_eq!(evaluate(&window,call),Some(serde_json::Value::Bool(true)));
@@ -952,6 +950,30 @@ mod tests {
                 }
                 assert!(submitted,"Hidden webview did not process the native form command");
                 assert!(!window.is_visible().unwrap());
+                let html="<form><input name='password' type='password' autocomplete='current-password'><button type='submit' disabled>Continue</button></form>";
+                let setup=format!("document.body.innerHTML={}; window.fixturePasswordSubmits=0; document.querySelector('input').oninput=()=>setTimeout(()=>document.querySelector('button').disabled=false,150); document.querySelector('form').onsubmit=e=>{{e.preventDefault();window.fixturePassword=document.querySelector('input').value;window.fixturePasswordSubmits++;}};true;",serde_json::to_string(html).unwrap());
+                assert_eq!(evaluate(&window,setup),Some(serde_json::Value::Bool(true)));
+                let mut dispatched=false;
+                for _ in 0..30 {
+                    let view:LoginSnapshot=serde_json::from_value(evaluate(&window,"window.__vkFastAuth.snapshot()".into()).unwrap()).unwrap();
+                    assert_eq!(view.step,Step::Password);control.publish(view);
+                    if let Some(command)=control.take_command() {
+                        assert_eq!(command.value,"synthetic-password");
+                        let call=format!("window.__vkFastAuth.perform({})",serde_json::to_string(&command).unwrap());
+                        assert_eq!(evaluate(&window,call),Some(serde_json::Value::Bool(true)));
+                        dispatched=true;break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                assert!(dispatched,"Disabled Continue blocked the saved password");
+                let mut password_submitted=false;
+                for _ in 0..30 {
+                    password_submitted=evaluate(&window,"window.fixturePassword === 'synthetic-password' && window.fixturePasswordSubmits === 1".into()).is_some_and(|v|v==true);
+                    if password_submitted {break;}
+                    thread::sleep(Duration::from_millis(100));
+                }
+                assert!(password_submitted,"Delayed validation did not submit the password exactly once");
+                assert!(!window.is_visible().unwrap(),"Password entry must remain hidden");
                 evaluate(&window,"document.body.innerHTML='<div data-test-id=\"captcha-widget\" style=\"background:white;border-radius:16px;padding:24px;font:18px sans-serif\">Local verification UI test — no CAPTCHA service</div>'; true".into());
                 let view:LoginSnapshot=serde_json::from_value(evaluate(&window,"window.__vkFastAuth.snapshot()".into()).unwrap()).unwrap();
                 assert_eq!(view.step,Step::Captcha);
@@ -961,7 +983,7 @@ mod tests {
                 let size=window.inner_size().unwrap();let scale=window.scale_factor().unwrap();
                 let width=size.width as f64/scale;let height=size.height as f64/scale;
                 assert!(width<=640.0 && height<=800.0,"Compositor expanded the challenge to {width}×{height}");
-                eprintln!("Local popup: {width}×{height}, decorations=false; hidden input submission passed");
+                eprintln!("Local popup: {width}×{height}, decorations=false; hidden identifier and delayed password submission passed");
                 challenge_window(&window,flow::Change::Hide,true);
                 thread::sleep(Duration::from_millis(200));assert!(!window.is_visible().unwrap());
             }));

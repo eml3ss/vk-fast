@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 const { installAuthBridge } = await import(new URL(`../src/tauri_login_bridge.mjs${new URL(import.meta.url).search}`, import.meta.url));
 let documentNumber=0;
 function fixture(host='vk.ru',path='/') {
-  const values=new WeakMap(), timers=[];let nodes=[];
+  const values=new WeakMap(), timers=[];let nodes=[], clock=1000;
   class Element {
     constructor(tag,attrs={},label='') {
       this.tag=tag;this.attrs=attrs;this.textContent=label;this.isConnected=true;this.disabled=false;this.readOnly=false;
@@ -38,8 +38,9 @@ function fixture(host='vk.ru',path='/') {
   for(const key of ['cookie','forms'])Object.defineProperty(document,key,{get(){throw Error('Sensitive DOM access');}});
   for(const key of ['localStorage','sessionStorage'])Object.defineProperty(window,key,{get(){throw Error('Browser storage access');}});
   const location={protocol:'https:',hostname:host,pathname:path,href:`https://${host}${path}?private=do-not-export`};
-  installAuthBridge({window,document,location,getComputedStyle:()=>({display:'block',visibility:'visible'}),HTMLInputElement:Input,Event:class{constructor(type){this.type=type}},setTimeout:fn=>timers.push(fn),globalThis:{crypto:{randomUUID:()=>`fixture-${++documentNumber}`}},URL});
-  return {api:window.__vkFastAuth,Input,Element,values,set:list=>{nodes=list;},flush(){while(timers.length)timers.shift()();}};
+  installAuthBridge({window,document,location,getComputedStyle:()=>({display:'block',visibility:'visible'}),HTMLInputElement:Input,Event:class{constructor(type){this.type=type}},setTimeout:(fn,delay=0)=>timers.push({fn,delay}),globalThis:{crypto:{randomUUID:()=>`fixture-${++documentNumber}`}},URL,now:()=>clock});
+  const tick=()=>{const timer=timers.shift();if(timer){clock+=timer.delay;timer.fn();}};
+  return {api:window.__vkFastAuth,Input,Element,values,set:list=>{nodes=list;},advance:ms=>{clock+=ms;},tick,flush(){while(timers.length)tick();}};
 }
 function command(f,action,value=''){const s=f.api.snapshot();return {document:s.document,revision:s.revision,action,value};}
 {
@@ -57,6 +58,48 @@ function command(f,action,value=''){const s=f.api.snapshot();return {document:s.
  const old=command(f,'submit',`synthetic ' " password`);f.set([new f.Input({type:'password'}),submit]);assert.equal(f.api.perform(old),false);
  assert.equal(f.api.perform(command(f,'submit',`synthetic ' " password`)),true);f.flush();assert.equal(submit.clicks,1);
  const signup=new f.Input({type:'password',autocomplete:'new-password'});f.set([signup,submit]);assert.equal(f.api.snapshot().step,'manual');assert.equal(f.api.perform(command(f,'submit','no-registration')),false);
+}
+{
+ const f=fixture('id.vk.ru','/auth'),field=new f.Input({type:'password',autocomplete:'current-password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+ submit.disabled=true;f.set([field,submit]);
+ assert.equal(f.api.snapshot().step,'password');
+ assert.equal(f.api.snapshot().busy,false,'An empty password disables Continue, not the native password field');
+ assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);
+ assert.equal(f.values.get(field),'synthetic-password');
+ f.tick();f.tick();assert.equal(submit.clicks,0,'Wait for website validation without bypassing disabled');
+ submit.disabled=false;f.flush();assert.equal(submit.clicks,1);
+}
+{
+ for(const change of ['replacement','captcha','locked','validation-failed']) {
+  const f=fixture('id.vk.ru','/auth'),field=new f.Input({type:'password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+  submit.disabled=true;f.set([field,submit]);
+  assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);f.tick();
+  if(change==='replacement')f.set([new f.Input({type:'password'}),submit]);
+  else if(change==='captcha')f.set([field,submit,new f.Element('iframe',{src:'https://id.vk.ru/not_robot_captcha'})]);
+  else if(change==='locked')field.readOnly=true;
+  else {f.flush();assert.equal(submit.clicks,0);}
+  submit.disabled=false;f.flush();assert.equal(submit.clicks,0,'No late submission after '+change);
+ }
+}
+{
+ for(const lock of ['disabled','readonly','request']) {
+  const f=fixture('id.vk.ru','/auth'),form=new f.Element('form'),field=new f.Input({type:'password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+  field.form=submit.form=form;f.set([form,field,submit]);
+  if(lock==='disabled')field.disabled=true;
+  if(lock==='readonly')field.readOnly=true;
+  if(lock==='request')form.attrs['aria-busy']='true';
+  assert.equal(f.api.snapshot().busy,true);assert.equal(f.api.perform(command(f,'submit','synthetic-password')),false);assert.equal(f.values.get(field),undefined);
+ }
+}
+{
+ for(const retry of [false,true]) {
+  const f=fixture('id.vk.ru','/auth'),field=new f.Input({type:'password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+  submit.disabled=true;f.set([field,submit]);
+  assert.equal(f.api.perform(command(f,'submit','old-synthetic-password')),true);f.tick();f.advance(8100);
+  if(retry)assert.equal(f.api.perform(command(f,'submit','new-synthetic-password')),true);
+  submit.disabled=false;f.flush();
+  assert.equal(submit.clicks,retry?1:0,'Throttled timers cannot submit an expired or superseded attempt');
+ }
 }
 {
  const f=fixture('id.vk.ru','/auth'),fields=Array.from({length:6},()=>new f.Input({type:'tel',maxlength:1}));f.set(fields);
