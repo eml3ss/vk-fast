@@ -7697,7 +7697,6 @@ impl MusicApp {
     fn render(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
         self.poll_lyrics(ui.ctx());
-        self.lyrics.install_font(ui.ctx());
         if self.lyrics.fullscreen
             && !egui::Popup::is_any_open(ui.ctx())
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))

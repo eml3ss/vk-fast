@@ -22,7 +22,6 @@ pub enum ConfigAction {
     Generate,
 }
 pub enum Event {
-    Font(Vec<u8>),
     Settings {
         result: Result<Status, Error>,
         completed: bool,
@@ -94,7 +93,6 @@ impl Service {
                 worker_repaint.request_repaint();
                 let mut cache: VecDeque<(Query, Instant, Arc<Lyrics>, Option<i64>)> =
                     VecDeque::new();
-                let mut font_attempted = false;
                 while wakes.recv().is_ok() && !worker_cancel.load(Ordering::Acquire) {
                     let action = worker_jobs
                         .lock()
@@ -194,18 +192,6 @@ impl Service {
                         continue;
                     }
                     if let Ok(lyrics) = &result {
-                        if !font_attempted
-                            && lyrics.lines.iter().any(|line| {
-                                line.text
-                                    .chars()
-                                    .any(|ch| matches!(ch as u32,0x3000..=0x9fff|0xac00..=0xd7af))
-                            })
-                        {
-                            font_attempted = true;
-                            if let Some(font) = cjk_font() {
-                                let _ = reply.send(Event::Font(font));
-                            }
-                        }
                         cache.retain(|(query, _, _, account)| {
                             query != &request.query || *account != owner
                         });
@@ -376,43 +362,6 @@ fn fetch_source(
         }
     }
     result
-}
-
-fn cjk_font() -> Option<Vec<u8>> {
-    if cfg!(test) {
-        return None;
-    }
-    #[cfg(windows)]
-    let paths = {
-        let root = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| "C:\\Windows".into());
-        ["meiryo.ttc", "msgothic.ttc", "msyh.ttc"]
-            .into_iter()
-            .map(|name| root.join("Fonts").join(name))
-            .collect::<Vec<_>>()
-    };
-    #[cfg(not(windows))]
-    let paths = [
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    ]
-    .into_iter()
-    .map(std::path::PathBuf::from)
-    .collect::<Vec<_>>();
-    for path in paths {
-        if std::fs::metadata(&path)
-            .ok()
-            .is_some_and(|meta| meta.len() <= 32 * 1024 * 1024)
-            && let Ok(bytes) = std::fs::read(path)
-            && !bytes.is_empty()
-        {
-            return Some(bytes);
-        }
-    }
-    None
 }
 
 fn generate(

@@ -26,9 +26,6 @@ pub(super) struct State {
     settings_error: Option<Error>,
     key_input: Zeroizing<String>,
     view: lyrics_ui::State,
-    font: Option<Arc<egui::FontData>>,
-    font_pending: bool,
-    font_frame: Option<u64>,
 }
 
 impl State {
@@ -52,35 +49,7 @@ impl State {
         if let Some(service) = &self.service {
             service.rebind(ctx);
         }
-        self.font_pending = self.font.is_some();
         self.view.reset();
-    }
-    pub(super) fn install_font(&mut self, ctx: &egui::Context) {
-        if self.font_pending
-            && let Some(font) = &self.font
-        {
-            let mut fonts = ctx.fonts(|fonts| fonts.definitions().clone());
-            let name = "VK Fast lyrics fallback".to_owned();
-            fonts.font_data.insert(name.clone(), font.clone());
-            for family in [egui::FontFamily::Proportional, theme::semibold()] {
-                let fallbacks = fonts.families.entry(family).or_default();
-                if !fallbacks.contains(&name) {
-                    fallbacks.push(name.clone());
-                }
-            }
-            ctx.set_fonts(fonts);
-            self.font_pending = false;
-            self.font_frame = Some(ctx.cumulative_frame_nr() + 1);
-            self.view.reset();
-            ctx.request_repaint();
-        }
-        if self
-            .font_frame
-            .is_some_and(|frame| ctx.cumulative_frame_nr() >= frame)
-        {
-            self.font_frame = None;
-            self.view.reset();
-        }
     }
 }
 
@@ -99,10 +68,6 @@ impl MusicApp {
 
     fn apply_lyrics_event(&mut self, event: Event) {
         match event {
-            Event::Font(font) => {
-                self.lyrics.font = Some(Arc::new(egui::FontData::from_owned(font)));
-                self.lyrics.font_pending = true;
-            }
             Event::Settings { result, completed } => {
                 if completed {
                     self.lyrics.settings_busy = false;
@@ -276,7 +241,6 @@ impl MusicApp {
         ui: &mut egui::Ui,
         fullscreen: bool,
     ) -> Option<lyrics_ui::Action> {
-        self.lyrics.install_font(ui.ctx());
         let position = self.playback_snapshot().position;
         let retry_allowed = self
             .lyrics

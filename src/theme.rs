@@ -178,6 +178,7 @@ pub fn install(ctx: &egui::Context) {
         .get_mut(&FontFamily::Proportional)
         .unwrap()
         .insert(0, "Inter".into());
+    crate::ui_fonts::append(&mut fonts);
     ctx.set_fonts(fonts);
     ctx.set_visuals(egui::Visuals::dark());
     ctx.global_style_mut(|style| {

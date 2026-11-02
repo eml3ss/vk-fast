@@ -59,6 +59,7 @@ mod tauri_login;
 mod theme;
 mod titlebar;
 mod track_menu;
+mod ui_fonts;
 mod vk;
 mod web_audio;
 mod web_login_state;
@@ -218,6 +219,10 @@ fn main() -> eframe::Result {
         println!("{}", include_str!("../assets/fonts/OFL.txt"));
         return Ok(());
     }
+    if args.iter().any(|arg| arg == "--check-fonts") {
+        ui_fonts::diagnostic();
+        return Ok(());
+    }
     #[cfg(feature = "screenshot")]
     let screenshot_path = args
         .windows(2)
@@ -261,6 +266,7 @@ fn main() -> eframe::Result {
     let sign_in = args.iter().any(|arg| arg == "--login");
     let qr_sign_in = args.iter().any(|arg| arg == "--qr-login");
     let system_titlebar = preferences::load_system_titlebar();
+    ui_fonts::preload();
     let options = move || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("VK Fast")
