@@ -434,12 +434,12 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Volume => {
             let body = rounded_path(
                 &[
-                    point(3.0, 9.0),
-                    point(7.0, 9.0),
-                    point(12.0, 5.0),
-                    point(12.0, 19.0),
-                    point(7.0, 15.0),
-                    point(3.0, 15.0),
+                    point(3.0, 8.5),
+                    point(6.5, 8.5),
+                    point(12.0, 3.0),
+                    point(12.0, 21.0),
+                    point(6.5, 15.5),
+                    point(3.0, 15.5),
                 ],
                 2.7 * scale,
                 true,
@@ -449,8 +449,15 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 color,
                 painter.ctx().pixels_per_point(),
             )));
-            arc((13.0, 12.0), 5.0, -55.0, 55.0);
-            arc((13.0, 12.0), 8.0, -55.0, 55.0);
+            for (radius_x, radius_y) in [(5.0, 6.5), (8.0, 10.5)] {
+                let points = (0..=20)
+                    .map(|index| {
+                        let angle = (-55.0 + 110.0 * index as f32 / 20.0).to_radians();
+                        point(13.0 + radius_x * angle.cos(), 12.0 + radius_y * angle.sin())
+                    })
+                    .collect();
+                rounded_stroke(painter, points, stroke, 0.0);
+            }
         }
         Icon::Library => {
             let pixels_per_point = painter.ctx().pixels_per_point();
@@ -570,21 +577,21 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Lyrics => {
             painter.rect_stroke(
-                Rect::from_min_max(point(8.0, 2.5), point(16.0, 14.5)),
+                Rect::from_min_max(point(8.0, 2.0), point(16.0, 14.0)),
                 4.0 * scale,
                 stroke,
                 egui::StrokeKind::Inside,
             );
             line(&[
-                (5.0, 10.5),
-                (5.0, 14.0),
-                (8.0, 18.0),
-                (16.0, 18.0),
-                (19.0, 14.0),
-                (19.0, 10.5),
+                (5.0, 10.0),
+                (5.0, 13.5),
+                (8.0, 17.5),
+                (16.0, 17.5),
+                (19.0, 13.5),
+                (19.0, 10.0),
             ]);
-            line(&[(12.0, 18.0), (12.0, 22.0)]);
-            line(&[(8.0, 22.0), (16.0, 22.0)]);
+            line(&[(12.0, 17.5), (12.0, 21.0)]);
+            line(&[(8.0, 21.0), (16.0, 21.0)]);
         }
         Icon::Expand => {
             line(&[(3.0, 9.0), (3.0, 3.0), (9.0, 3.0)]);
@@ -745,18 +752,34 @@ pub fn toggle_button(
     enabled: bool,
     selected: bool,
 ) -> Response {
+    toggle_button_sized(ui, icon, label, enabled, selected, 38.0)
+}
+
+pub fn toggle_button_sized(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    enabled: bool,
+    selected: bool,
+    size: f32,
+) -> Response {
     ui.add_enabled_ui(enabled, |ui| {
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
         let visuals = ui.style().interact(&response);
         if response.hovered() || response.has_focus() || response.is_pointer_button_down_on() {
-            ui.painter().rect_filled(rect, 19.0, visuals.bg_fill);
+            ui.painter().rect_filled(rect, size * 0.5, visuals.bg_fill);
         }
         let color = if selected {
             crate::theme::ACCENT
         } else {
             visuals.fg_stroke.color
         };
-        paint(ui.painter(), rect.shrink(9.0), icon, color);
+        paint(
+            ui.painter(),
+            Rect::from_center_size(rect.center(), Vec2::splat(20.0)),
+            icon,
+            color,
+        );
         if selected {
             ui.painter().circle_filled(
                 egui::pos2(rect.center().x, rect.bottom() - 4.0),
@@ -772,6 +795,27 @@ pub fn toggle_button(
             .on_hover_text(label)
     })
     .inner
+}
+
+pub fn panel_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, label: &str) -> Response {
+    let response = ui
+        .put(rect, egui::Button::new("").frame(false))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label);
+    paint(
+        ui.painter(),
+        rect.shrink(6.0),
+        icon,
+        if response.hovered() {
+            Color32::WHITE
+        } else {
+            crate::theme::MUTED
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    response
 }
 
 /// Compact library action: the caller owns the saved state and server request.

@@ -23,13 +23,13 @@ fn input_hint(language: Language) -> &'static str {
     )
 }
 
-pub fn preferred_input_width(ui: &egui::Ui, language: Language) -> f32 {
+pub fn preferred_input_width(ui: &egui::Ui) -> f32 {
     let hint = ui.painter().layout_no_wrap(
-        input_hint(language).into(),
+        input_hint(Language::Russian).into(),
         egui::FontSelection::Default.resolve(ui.style()),
         theme::MUTED,
     );
-    hint.size().x + f32::from(INPUT_PADDING_X) * 2.0 + INPUT_ICON_SIZE + INPUT_ICON_GAP
+    (hint.size().x + f32::from(INPUT_PADDING_X) * 2.0 + INPUT_ICON_SIZE + INPUT_ICON_GAP) * 1.5
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

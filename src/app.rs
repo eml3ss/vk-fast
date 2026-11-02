@@ -3738,8 +3738,7 @@ impl MusicApp {
                 available
             } else {
                 let drag_width = if self.system_titlebar { 0.0 } else { 32.0 };
-                search_ui::preferred_input_width(ui, language)
-                    .min((available - drag_width).max(80.0))
+                search_ui::preferred_input_width(ui).min((available - drag_width).max(80.0))
             };
             let input = ui
                 .allocate_ui_with_layout(
@@ -6624,9 +6623,13 @@ impl MusicApp {
         let artwork_size = if self.compact_seek_bar { 64.0 } else { 40.0 };
         let title_font = egui::FontId::new(14.0, theme::semibold());
         let artist_font = egui::TextStyle::Small.resolve(ui.style());
-        let metadata_height = ui.fonts_mut(|fonts| {
-            fonts.row_height(&title_font).max(22.0) + fonts.row_height(&artist_font).max(16.0)
-        }) + 2.0;
+        let (title_line_height, artist_line_height) = ui.fonts_mut(|fonts| {
+            (
+                fonts.row_height(&title_font).max(22.0),
+                fonts.row_height(&artist_font).max(16.0),
+            )
+        });
+        let metadata_height = title_line_height + artist_line_height + 2.0;
         let metadata_right = if self.compact_seek_bar {
             seek_row.left().min(transport.left()) - PLAYER_COLUMN_GAP
         } else {
@@ -6655,14 +6658,22 @@ impl MusicApp {
                 }
                 ui.allocate_ui_with_layout(
                     egui::vec2(
-                        (metadata.width() - artwork_size - ui.spacing().item_spacing.x).max(0.0),
+                        (metadata.width()
+                            - artwork_size
+                            - ui.spacing().item_spacing.x
+                            - if has_track {
+                                22.0 + ui.spacing().item_spacing.x
+                            } else {
+                                0.0
+                            })
+                        .max(0.0),
                         metadata_height,
                     ),
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), 22.0),
+                            egui::vec2(ui.available_width(), title_line_height),
                             Layout::left_to_right(Align::Center),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -6690,12 +6701,9 @@ impl MusicApp {
                                         .size()
                                         .x
                                 });
-                                let width = text_width.min(
-                                    (ui.available_width() - if has_track { 28.0 } else { 0.0 })
-                                        .max(0.0),
-                                );
+                                let width = text_width.min(ui.available_width().max(0.0));
                                 let title_response = ui.add_sized(
-                                    egui::vec2(width, 22.0),
+                                    egui::vec2(width, title_line_height),
                                     egui::Label::new(text).truncate().selectable(false).sense(
                                         if has_track {
                                             Sense::click()
@@ -6717,11 +6725,6 @@ impl MusicApp {
                                         || TrackAction::TrackAlbum(key, title.clone()),
                                         |album| TrackAction::Album(album.clone()),
                                     ));
-                                }
-                                if let Some(track) = &title_track
-                                    && self.like_button(ui, track).clicked()
-                                {
-                                    metadata_action = Some(TrackAction::ToggleLike(track.clone()));
                                 }
                             },
                         );
@@ -6747,6 +6750,30 @@ impl MusicApp {
                         }
                     },
                 );
+                if let Some(track) = &title_track {
+                    let (slot, _) =
+                        ui.allocate_exact_size(egui::vec2(22.0, metadata_height), Sense::hover());
+                    let middle = (title_line_height * 0.5
+                        + title_line_height
+                        + 2.0
+                        + artist_line_height * 0.5)
+                        * 0.5;
+                    let heart = egui::Rect::from_center_size(
+                        egui::pos2(slot.center().x, slot.top() + middle),
+                        egui::Vec2::splat(22.0),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("player-heart")
+                            .max_rect(heart)
+                            .layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
+                            if self.like_button(ui, track).clicked() {
+                                metadata_action = Some(TrackAction::ToggleLike(track.clone()));
+                            }
+                        },
+                    );
+                }
             },
         );
         if let Some(track) = &title_track
@@ -6859,6 +6886,7 @@ impl MusicApp {
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(volume_rect));
+                ui.spacing_mut().item_spacing.x = 4.0;
                 let mut volume = snapshot.volume;
                 let volume_width = (volume_rect.width() - 124.0).clamp(17.0, 120.0);
                 let response =
@@ -6877,24 +6905,33 @@ impl MusicApp {
                 } else {
                     format!("{}: {:.0}%", t("Громкость", "Volume"), volume * 100.0)
                 });
-                icons::show(ui, Icon::Volume, MUTED, 18.0);
-                let queue = icons::toggle_button(
+                let (volume_icon, _) =
+                    ui.allocate_exact_size(egui::Vec2::splat(32.0), Sense::hover());
+                icons::paint(
+                    ui.painter(),
+                    egui::Rect::from_center_size(volume_icon.center(), egui::Vec2::splat(20.0)),
+                    Icon::Volume,
+                    MUTED,
+                );
+                let queue = icons::toggle_button_sized(
                     ui,
                     Icon::Queue,
                     t("Очередь", "Queue"),
                     true,
                     self.queue_ui.open,
+                    32.0,
                 );
                 release_pointer_focus(&queue);
                 if queue.clicked() {
                     self.toggle_queue(&ctx);
                 }
-                let lyrics = icons::toggle_button(
+                let lyrics = icons::toggle_button_sized(
                     ui,
                     Icon::Lyrics,
                     t("Текст", "Lyrics"),
                     true,
                     self.lyrics.active && self.lyrics.open,
+                    32.0,
                 );
                 release_pointer_focus(&lyrics);
                 if lyrics.clicked() {
@@ -11856,7 +11893,7 @@ mod tests {
             })
             .expect("Global search frame");
         let hint = account_ui_text_rect(&output, "Tracks, artists, albums, playlists").unwrap();
-        assert!((8.0..=18.0).contains(&(search_rect.right() - hint.right())));
+        assert!(search_rect.right() - hint.right() > 18.0);
         let caption_gap = egui::pos2(search_rect.right() + 16.0, search_rect.center().y);
         let pressed = account_ui_frame(
             &ctx,

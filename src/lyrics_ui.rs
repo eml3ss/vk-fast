@@ -58,27 +58,6 @@ impl State {
     }
 }
 
-fn icon_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, label: &str) -> egui::Response {
-    let response = ui
-        .put(rect, egui::Button::new("").frame(false))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(label);
-    icons::paint(
-        ui.painter(),
-        rect.shrink(6.0),
-        icon,
-        if response.hovered() {
-            Color32::WHITE
-        } else {
-            theme::MUTED
-        },
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    response
-}
-
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -119,7 +98,7 @@ pub fn show(
         egui::vec2(28.0, 28.0),
     );
     if view.fullscreen {
-        if icon_button(
+        if icons::panel_button(
             ui,
             end,
             Icon::Collapse,
@@ -130,11 +109,11 @@ pub fn show(
             action = Some(Action::Fullscreen);
         }
     } else {
-        if icon_button(ui, end, Icon::Close, t("Закрыть текст", "Close lyrics")).clicked()
+        if icons::panel_button(ui, end, Icon::Close, t("Закрыть текст", "Close lyrics")).clicked()
         {
             action = Some(Action::Close);
         }
-        if icon_button(
+        if icons::panel_button(
             ui,
             end.translate(egui::vec2(-34.0, 0.0)),
             Icon::Expand,

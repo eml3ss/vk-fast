@@ -139,23 +139,21 @@ impl MusicApp {
             .show_collapsible(ui, &mut open, |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 ui.horizontal(|ui| {
+                    ui.set_min_height(32.0);
                     ui.label(
                         RichText::new(t("Очередь", "Queue"))
                             .size(20.0)
                             .family(theme::semibold()),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let response = ui
-                            .add_sized([28.0, 28.0], egui::Button::new("").frame(false))
-                            .on_hover_text(t("Закрыть очередь", "Close queue"));
-                        icons::paint(ui.painter(), response.rect.shrink(7.0), Icon::Close, MUTED);
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                t("Закрыть очередь", "Close queue"),
-                            )
-                        });
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(28.0), Sense::hover());
+                        let response = icons::panel_button(
+                            ui,
+                            rect,
+                            Icon::Close,
+                            t("Закрыть очередь", "Close queue"),
+                        );
                         release_pointer_focus(&response);
                         close = response.clicked();
                     });
