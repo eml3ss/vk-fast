@@ -27,6 +27,8 @@ pub(super) struct Config {
     #[serde(default)]
     pub user_token: String,
     #[serde(default)]
+    pub token_app_id: String,
+    #[serde(default)]
     pub token_created: u64,
     #[serde(default)]
     pub token_retry_after: u64,
@@ -58,7 +60,7 @@ impl Config {
         Status {
             mode: self.mode,
             key_ready: !self.api_key.is_empty(),
-            token_ready: !self.user_token.is_empty() && !self.token_rejected,
+            token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
             request_retry_after: match self.mode {
@@ -66,6 +68,10 @@ impl Config {
                 Mode::ApiKey => self.api_retry_after,
             },
         }
+    }
+
+    pub fn has_current_token(&self) -> bool {
+        self.token_app_id == super::APP_ID && valid_user_token(&self.user_token)
     }
 }
 
@@ -77,6 +83,11 @@ pub(super) fn now() -> u64 {
 }
 pub(super) fn valid_secret(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4096 && value.bytes().all(|byte| (33..=126).contains(&byte))
+}
+pub(super) fn valid_user_token(value: &str) -> bool {
+    valid_secret(value)
+        && !value.bytes().all(|byte| byte == b'0')
+        && !value.starts_with("UpgradeOnly")
 }
 
 fn path() -> Result<PathBuf, Error> {
@@ -208,6 +219,26 @@ pub(super) fn save(config: &Config) -> Result<(), Error> {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_and_placeholder_tokens_are_not_reported_as_ready() {
+        let mut config: Config =
+            serde_json::from_str(r#"{"user_token":"synthetic-legacy-token"}"#).unwrap();
+        assert!(!config.status().token_ready);
+        config.token_app_id = super::super::APP_ID.into();
+        assert!(config.status().token_ready);
+        for invalid in [
+            "".to_owned(),
+            "0".repeat(56),
+            "UpgradeOnly-synthetic".into(),
+        ] {
+            config.user_token = invalid;
+            assert!(!config.status().token_ready);
+            assert!(!valid_user_token(&config.user_token));
+        }
+        config.user_token = "synthetic-current-token".into();
+        config.token_rejected = true;
+        assert!(!config.status().token_ready);
+    }
+    #[test]
     fn credentials_roundtrip_privately_and_corruption_is_not_overwritten_by_load() {
         let root = std::env::temp_dir().join(format!(
             "vk-fast-lyrics-store-{}-{}",
@@ -218,6 +249,7 @@ mod tests {
         let config = Config {
             api_key: "synthetic-key".into(),
             user_token: "synthetic-token".into(),
+            token_app_id: super::super::APP_ID.into(),
             token_retry_after: 123,
             mode: Mode::ApiKey,
             ..Default::default()
@@ -226,6 +258,7 @@ mod tests {
         let restored = load_at(&path).unwrap();
         assert_eq!(restored.api_key, "synthetic-key");
         assert_eq!(restored.user_token, "synthetic-token");
+        assert!(restored.has_current_token());
         assert_eq!(restored.status().mode, Mode::ApiKey);
         fs::write(&path, b"invalid synthetic record").unwrap();
         assert!(load_at(&path).is_err());

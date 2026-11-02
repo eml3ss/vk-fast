@@ -333,6 +333,7 @@ fn generate(
     let mut candidate = config.clone();
     candidate.user_token.zeroize();
     candidate.user_token = token.to_string();
+    candidate.token_app_id = super::APP_ID.into();
     candidate.token_created = now;
     candidate.token_rejected = false;
     store::save(&candidate)?;
@@ -353,7 +354,7 @@ fn prepare(
     match config.mode {
         Mode::ApiKey if config.api_key.is_empty() => Err(Error::MissingKey),
         Mode::Anonymous if config.token_rejected => Err(Error::Auth),
-        Mode::Anonymous if config.user_token.is_empty() => generate(provider, config, canceled),
+        Mode::Anonymous if !config.has_current_token() => generate(provider, config, canceled),
         _ => Ok(()),
     }
 }
@@ -438,9 +439,17 @@ mod tests {
         let provider = Provider::new().unwrap();
         let mut config = store::Config::default();
         config.user_token = "synthetic-current-token".into();
+        config.token_app_id = super::super::APP_ID.into();
         config.token_retry_after = store::now() + 300;
         assert!(matches!(
             generate(&provider, &mut config, &|| false),
+            Err(Error::RateLimited(_))
+        ));
+        assert_eq!(config.user_token, "synthetic-current-token");
+        // Moving away from the retired API must not reset an existing quota.
+        config.token_app_id.clear();
+        assert!(matches!(
+            prepare(&provider, &mut config, &|| false),
             Err(Error::RateLimited(_))
         ));
         assert_eq!(config.user_token, "synthetic-current-token");

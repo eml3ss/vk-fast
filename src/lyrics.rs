@@ -13,8 +13,8 @@ pub use service::{ConfigAction, Event, Service};
 pub use store::{Mode, Status};
 
 const API: &str = "https://api.musixmatch.com/ws/1.1/";
-const ANONYMOUS_API: &str = "https://apic-desktop.musixmatch.com/ws/1.1/";
-const APP_ID: &str = "web-desktop-app-v1.0";
+const ANONYMOUS_API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
+const APP_ID: &str = "mac-ios-v2.0";
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
 const MAX_TEXT: usize = 256 * 1024;
 const MAX_LINES: usize = 4000;
@@ -95,6 +95,7 @@ pub enum Error {
     Captcha,
     RateLimited(u64),
     NotFound,
+    WrongLyrics,
     Network,
     Format,
     Storage,
@@ -127,6 +128,10 @@ impl Error {
             Self::NotFound => t(
                 "Текст этого трека не найден.",
                 "Lyrics for this track were not found.",
+            ),
+            Self::WrongLyrics => t(
+                "Musixmatch вернул неподходящий текст. Попробуйте позже.",
+                "Musixmatch returned incorrect lyrics. Try again later.",
             ),
             Self::Network => t(
                 "Не удалось связаться с Musixmatch.",
@@ -253,7 +258,7 @@ impl Provider {
         else {
             return Err(Error::Auth);
         };
-        if !store::valid_secret(&token) || token.starts_with("UpgradeOnly") {
+        if !store::valid_user_token(&token) {
             return Err(Error::Auth);
         }
         Ok(Zeroizing::new(token))
@@ -274,6 +279,7 @@ impl Provider {
             return Err(Error::NotFound);
         }
         let duration = query.duration.to_string();
+        let deviation = query.duration.div_ceil(20).max(8).to_string();
         let mut params = vec![
             ("q_track", query.title.as_str()),
             ("q_artist", query.artist.as_str()),
@@ -289,6 +295,13 @@ impl Provider {
                     ("usertoken", config.user_token.as_str()),
                     ("subtitle_format", "mxm"),
                 ]);
+                if query.duration > 0 {
+                    params.extend([
+                        ("q_duration", duration.as_str()),
+                        ("f_subtitle_length", duration.as_str()),
+                        ("f_subtitle_length_max_deviation", deviation.as_str()),
+                    ]);
+                }
                 let value =
                     self.request(ANONYMOUS_API, "macro.subtitles.get", &params, canceled)?;
                 parse_macro(&value, query).map(Arc::new)
@@ -300,6 +313,7 @@ impl Provider {
                 params.push(("apikey", config.api_key.as_str()));
                 let matched = self.request(API, "matcher.track.get", &params, canceled)?;
                 let track = matched.get("track").ok_or(Error::NotFound)?;
+                validate_match(track, query)?;
                 if flag(track.get("instrumental")) {
                     let mut lyrics = Lyrics {
                         lines: Vec::new(),
@@ -325,7 +339,6 @@ impl Provider {
                 ];
                 let mut subtitle_params = auth.to_vec();
                 subtitle_params.push(("subtitle_format", "lrc"));
-                let deviation = query.duration.div_ceil(20).max(8).to_string();
                 if query.duration > 0 {
                     subtitle_params.extend([
                         ("f_subtitle_length", duration.as_str()),
@@ -544,7 +557,124 @@ fn validate_lines(lines: &[Line]) -> Result<(), Error> {
     {
         return Err(Error::Format);
     }
+    // A retired API can return a successful response with this placeholder.
+    let prefix = lines
+        .iter()
+        .flat_map(|line| line.text.split_whitespace())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if prefix == "wob gopini den tefe woxica fero" {
+        return Err(Error::WrongLyrics);
+    }
     Ok(())
+}
+
+fn normalized_name(name: &str) -> String {
+    let mut result = String::new();
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            result.push(ch);
+        } else if !matches!(ch, '\'' | '’') && !result.ends_with(' ') {
+            result.push(' ');
+        }
+    }
+    result.trim().to_owned()
+}
+
+fn same_title(left: &str, right: &str) -> bool {
+    let left = normalized_name(left);
+    let right = normalized_name(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    [(&left, &right), (&right, &left)]
+        .into_iter()
+        .any(|(longer, shorter)| {
+            longer
+                .strip_prefix(shorter.as_str())
+                .and_then(|suffix| suffix.strip_prefix(' '))
+                .and_then(|suffix| suffix.split_whitespace().next())
+                .is_some_and(|word| {
+                    matches!(
+                        word,
+                        "feat"
+                            | "ft"
+                            | "featuring"
+                            | "with"
+                            | "remix"
+                            | "edit"
+                            | "version"
+                            | "versions"
+                            | "remaster"
+                            | "remastered"
+                            | "slowed"
+                            | "sped"
+                            | "nightcore"
+                            | "instrumental"
+                            | "live"
+                            | "radio"
+                    )
+                })
+        })
+}
+
+fn same_artist(left: &str, right: &str) -> bool {
+    let left = normalized_name(left);
+    let right = normalized_name(right);
+    !left.is_empty()
+        && !right.is_empty()
+        && (format!(" {left} ").contains(&format!(" {right} "))
+            || format!(" {right} ").contains(&format!(" {left} ")))
+}
+
+fn validate_match(track: &Value, query: &Query) -> Result<(), Error> {
+    let matches_name =
+        |field, aliases, alias_field, wanted: &str, compare: fn(&str, &str) -> bool| {
+            track
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|name| compare(name, wanted))
+                || track
+                    .get(aliases)
+                    .and_then(Value::as_array)
+                    .is_some_and(|list| {
+                        list.iter().any(|alias| {
+                            alias
+                                .get(alias_field)
+                                .unwrap_or(alias)
+                                .as_str()
+                                .is_some_and(|name| compare(name, wanted))
+                        })
+                    })
+        };
+    if matches_name(
+        "track_name",
+        "track_name_translation_list",
+        "track_name",
+        &query.title,
+        same_title,
+    ) && matches_name(
+        "artist_name",
+        "artist_alias_list",
+        "artist_alias",
+        &query.artist,
+        same_artist,
+    ) {
+        Ok(())
+    } else {
+        Err(Error::WrongLyrics)
+    }
+}
+
+fn language(value: Option<&Value>) -> Option<&str> {
+    value?
+        .as_str()
+        .filter(|lang| !lang.is_empty() && *lang != "und")
 }
 
 fn parse_lrc(text: &str) -> Result<Vec<Line>, Error> {
@@ -604,11 +734,22 @@ fn complete_metadata(lyrics: &mut Lyrics, track: Option<&Value>, query: &Query) 
 
 fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
     let calls = value.get("macro_calls").ok_or(Error::Format)?;
-    let track = calls
-        .get("matcher.track.get")
-        .or_else(|| calls.get("track.get"))
-        .and_then(|value| body(value.clone()).ok())
-        .and_then(|mut value| value.get_mut("track").map(Value::take));
+    let track_data = body(
+        calls
+            .get("matcher.track.get")
+            .or_else(|| calls.get("track.get"))
+            .ok_or(Error::NotFound)?
+            .clone(),
+    )?;
+    let track = track_data.get("track").ok_or(Error::NotFound)?;
+    validate_match(track, query)?;
+    let plain_data = calls.get("track.lyrics.get").map(|call| body(call.clone()));
+    let plain_value = plain_data
+        .as_ref()
+        .and_then(|data| data.as_ref().ok())
+        .and_then(|data| data.get("lyrics"));
+    let original_language = language(plain_value.and_then(|value| value.get("lyrics_language")))
+        .or_else(|| language(track.get("lyrics_language")));
     let mut subtitle_error = None;
     if let Some(call) = calls
         .get("track.subtitles.get")
@@ -616,13 +757,25 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
     {
         match body(call.clone()) {
             Ok(data) => {
-                let subtitle = data
-                    .pointer("/subtitle_list/0/subtitle")
-                    .or_else(|| data.get("subtitle"));
-                if let Some(subtitle) = subtitle {
+                let subtitles = data
+                    .get("subtitle_list")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.get("subtitle"))
+                    .chain(data.get("subtitle"));
+                for subtitle in subtitles {
+                    if let (Some(original), Some(actual)) = (
+                        original_language,
+                        language(subtitle.get("subtitle_language")),
+                    ) && !original.eq_ignore_ascii_case(actual)
+                    {
+                        subtitle_error = Some(Error::WrongLyrics);
+                        continue;
+                    }
                     match parse_subtitle(subtitle) {
                         Ok(mut lyrics) => {
-                            complete_metadata(&mut lyrics, track.as_ref(), query);
+                            complete_metadata(&mut lyrics, Some(track), query);
                             return Ok(lyrics);
                         }
                         Err(error) => subtitle_error = Some(error),
@@ -635,16 +788,13 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
             Err(error) => subtitle_error = Some(error),
         }
     }
-    if let Some(call) = calls.get("track.lyrics.get") {
-        let data = body(call.clone())?;
+    if let Some(result) = plain_data {
+        let data = result?;
         let mut lyrics = parse_plain(data.get("lyrics").ok_or(Error::NotFound)?)?;
-        complete_metadata(&mut lyrics, track.as_ref(), query);
+        complete_metadata(&mut lyrics, Some(track), query);
         return Ok(lyrics);
     }
-    if track
-        .as_ref()
-        .is_some_and(|track| flag(track.get("instrumental")))
-    {
+    if flag(track.get("instrumental")) {
         let mut lyrics = Lyrics {
             lines: Vec::new(),
             synced: false,
@@ -653,7 +803,7 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
             source_url: None,
             tracking_url: None,
         };
-        complete_metadata(&mut lyrics, track.as_ref(), query);
+        complete_metadata(&mut lyrics, Some(track), query);
         return Ok(lyrics);
     }
     Err(subtitle_error.unwrap_or(Error::NotFound))
@@ -702,7 +852,7 @@ mod tests {
             {"text":"","time":{"total":30.0}}
         ])).unwrap(),"restricted":false,"lyrics_copyright":"© Synthetic test"});
         let data = json!({"macro_calls":{
-            "matcher.track.get":call(json!({"track":{"track_length":180,"track_share_url":"https://www.musixmatch.com/lyrics/synthetic/test"}})),
+            "matcher.track.get":call(json!({"track":{"track_name":"Synthetic song","artist_name":"Synthetic artist","track_length":180,"track_share_url":"https://www.musixmatch.com/lyrics/synthetic/test"}})),
             "track.subtitles.get":call(json!({"subtitle_list":[{"subtitle":subtitle}]}))
         }});
         let lyrics = parse_macro(&data, &query()).unwrap();
@@ -762,6 +912,7 @@ mod tests {
             Error::Captcha
         );
         let data = json!({"macro_calls":{
+            "matcher.track.get":call(json!({"track":{"track_name":"Synthetic song","artist_name":"Synthetic artist"}})),
             "track.subtitles.get":{"message":{"header":{"status_code":401},"body":{}}},
             "track.lyrics.get":call(json!({"lyrics":{"lyrics_body":"Must not be returned"}}))
         }});
@@ -772,6 +923,7 @@ mod tests {
     #[test]
     fn unavailable_subtitles_can_use_authorized_plain_text_and_invalid_bodies_stay_bounded() {
         let data = json!({"macro_calls":{
+            "matcher.track.get":call(json!({"track":{"track_name":"Synthetic song","artist_name":"Synthetic artist"}})),
             "track.subtitles.get":{"message":{"header":{"status_code":404},"body":{}}},
             "track.lyrics.get":call(json!({"lyrics":{"lyrics_body":"Synthetic plain text","lyrics_copyright":"© Synthetic test"}}))
         }});
@@ -779,5 +931,75 @@ mod tests {
         assert!(parse_plain(&json!({"lyrics_body":"x".repeat(MAX_TEXT+1)})).is_err());
         assert!(parse_subtitle(&json!({"subtitle_body":"[99:99.0]Invalid timestamp"})).is_err());
         assert!(parse_plain(&json!({"lyrics_body":"bad\u{0000}line"})).is_err());
+    }
+
+    #[test]
+    fn successful_but_wrong_matches_and_placeholder_text_are_rejected() {
+        let data = json!({"macro_calls":{
+            "matcher.track.get":call(json!({"track":{"track_name":"A different song","artist_name":"Another artist"}})),
+            "track.lyrics.get":call(json!({"lyrics":{"lyrics_body":"Wrong synthetic text"}}))
+        }});
+        assert_eq!(
+            parse_macro(&data, &query()).unwrap_err(),
+            Error::WrongLyrics
+        );
+        for text in [
+            "Wob gopini den\nTefe woxica fero",
+            " WOB   gopini den\n\nTefe woxica fero ",
+        ] {
+            assert_eq!(
+                parse_plain(&json!({"lyrics_body":text})).unwrap_err(),
+                Error::WrongLyrics
+            );
+        }
+        assert_eq!(
+            parse_subtitle(
+                &json!({"subtitle_body":"[00:01]Wob gopini den\n[00:03]Tefe woxica fero"})
+            )
+            .unwrap_err(),
+            Error::WrongLyrics
+        );
+        assert!(same_title(
+            "Посмотри",
+            "Посмотри (feat. Synthetic guest) [Test Remix]"
+        ));
+        assert!(same_title("Synthetic—Song", "SYNTHETIC SONG (Slowed)"));
+        assert!(!same_title("Synthetic song", "Synthetic song Two"));
+        assert!(same_artist(
+            "Тестовый исполнитель",
+            "Тестовый исполнитель feat. Synthetic guest"
+        ));
+        assert!(!same_artist("Ann", "Anna"));
+    }
+
+    #[test]
+    fn originals_keep_their_language_and_never_use_translated_subtitle_bodies() {
+        for (lang, original) in [
+            ("ru", "Тестовая строка"),
+            ("ja", "テストの行"),
+            ("en", "Synthetic original line"),
+        ] {
+            let subtitle = |language: &str, text: &str| {
+                json!({"subtitle":{
+                    "subtitle_language":language,
+                    "subtitle_body":serde_json::to_string(&json!([{"text":text,"time":{"total":2.0}}])).unwrap(),
+                    "subtitle_translated":{"subtitle_body":"[00:02]Must not replace the original"}
+                }})
+            };
+            let data = json!({"macro_calls":{
+                "matcher.track.get":call(json!({"track":{"track_name":"Synthetic song","artist_name":"Synthetic artist","track_length":180}})),
+                "track.lyrics.get":call(json!({"lyrics":{"lyrics_language":lang,"lyrics_body":original}})),
+                "track.subtitles.get":call(json!({"subtitle_list":[subtitle("other", "Wrong language"),subtitle(lang, original)]}))
+            }});
+            let lyrics = parse_macro(&data, &query()).unwrap();
+            assert!(lyrics.synced);
+            assert_eq!(lyrics.lines[0].text, original);
+            let mut plain_fallback = data;
+            plain_fallback["macro_calls"]["track.subtitles.get"] =
+                call(json!({"subtitle_list":[subtitle("other", "Wrong language")]}));
+            let lyrics = parse_macro(&plain_fallback, &query()).unwrap();
+            assert!(!lyrics.synced);
+            assert_eq!(lyrics.lines[0].text, original);
+        }
     }
 }
