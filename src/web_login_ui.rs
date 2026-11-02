@@ -39,9 +39,6 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
     let changed = state.key.as_ref() != Some(&key);
     if changed {
         state.input.zeroize();
-        if view.step == Step::Identifier {
-            state.input = state.identifier.clone();
-        }
         state.show_password = false;
         state.focus_next = true;
         state.key = Some(key);
@@ -97,18 +94,11 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 },
             );
             let (heading, description) = match view.step {
-                Step::Identifier => (
+                Step::Identifier | Step::Password => (
                     t("Ваш аккаунт", "Your account"),
                     t(
-                        "Введите телефон с кодом страны или почту.",
-                        "Enter your phone with country code or your email.",
-                    ),
-                ),
-                Step::Password => (
-                    t("Введите пароль", "Enter your password"),
-                    t(
-                        "Пароль передаётся VK и не сохраняется в плеере.",
-                        "Your password goes to VK and is not saved by the player.",
+                        "Введите телефон или почту и пароль от VK.",
+                        "Enter your phone or email and your VK password.",
                     ),
                 ),
                 Step::Code => (
@@ -169,13 +159,40 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             text(ui, 138.0, 36.0, description, 14.0, theme::MUTED);
             let controls = width.min(320.0);
             if view.accepts_input() {
+                let credentials = matches!(view.step, Step::Identifier | Step::Password);
+                let identifier = credentials.then(|| {
+                    let field = ui
+                        .add_enabled_ui(view.step == Step::Identifier && !view.busy, |ui| {
+                            ui.put(
+                                rect(180.0, controls, 42.0),
+                                egui::TextEdit::singleline(&mut state.identifier)
+                                    .id_salt("vk-native-identifier")
+                                    .font(FontId::proportional(16.0))
+                                    .vertical_align(Align::Center)
+                                    .char_limit(512)
+                                    .hint_text(if view.step == Step::Password {
+                                        t("Аккаунт выбран в VK", "Account selected in VK")
+                                    } else {
+                                        t("Телефон или почта", "Phone or email")
+                                    })
+                                    .frame(credential_frame()),
+                            )
+                        })
+                        .inner;
+                    clear_undo(ctx, field.id);
+                    field
+                });
                 let field = ui
                     .add_enabled_ui(!view.busy, |ui| {
                         ui.put(
-                            rect(192.0, controls, 48.0),
+                            if credentials {
+                                rect(232.0, controls, 42.0)
+                            } else {
+                                rect(192.0, controls, 48.0)
+                            },
                             egui::TextEdit::singleline(&mut state.input)
                                 .id_salt("vk-native-credential")
-                                .password(view.step == Step::Password && !state.show_password)
+                                .password(credentials && !state.show_password)
                                 .font(if view.step == Step::Code {
                                     FontId::monospace(24.0)
                                 } else {
@@ -189,35 +206,31 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                                 .vertical_align(Align::Center)
                                 .char_limit(512)
                                 .hint_text(match view.step {
-                                    Step::Identifier => t("Телефон или почта", "Phone or email"),
-                                    Step::Password => t("Пароль", "Password"),
+                                    Step::Identifier | Step::Password => t("Пароль", "Password"),
                                     _ => t("Код", "Code"),
                                 })
-                                .frame(
-                                    egui::Frame::new()
-                                        .fill(theme::BACKGROUND)
-                                        .inner_margin(10)
-                                        .corner_radius(10)
-                                        .stroke(egui::Stroke::new(1.0, theme::SCROLL_HANDLE)),
-                                ),
+                                .frame(credential_frame()),
                         )
                     })
                     .inner;
                 if state.focus_next && !view.busy {
-                    field.request_focus();
+                    if view.step == Step::Identifier && state.identifier.is_empty() {
+                        if let Some(identifier) = &identifier {
+                            identifier.request_focus();
+                        }
+                    } else {
+                        field.request_focus();
+                    }
                     state.focus_next = false;
                 }
                 if view.step == Step::Code && field.changed() {
                     state.input.retain(|c| c.is_ascii_digit());
                     state.input.truncate(16);
                 }
-                if let Some(mut edit) = egui::TextEdit::load_state(ctx, field.id) {
-                    edit.clear_undoer();
-                    egui::TextEdit::store_state(ctx, field.id, edit);
-                }
-                if view.step == Step::Password {
+                clear_undo(ctx, field.id);
+                if credentials {
                     ui.put(
-                        rect(246.0, 190.0, 26.0),
+                        rect(278.0, 190.0, 26.0),
                         egui::Checkbox::new(
                             &mut state.show_password,
                             t("Показать пароль", "Show password"),
@@ -227,7 +240,7 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 if view.error {
                     text(
                         ui,
-                        276.0,
+                        if credentials { 304.0 } else { 276.0 },
                         26.0,
                         t(
                             "Проверьте данные и повторите вход.",
@@ -240,28 +253,48 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 let valid = if view.step == Step::Code {
                     state.input.len() == usize::from(view.code_length.max(4))
                 } else {
-                    !state.input.trim().is_empty()
+                    !state.input.is_empty()
+                        && (view.step != Step::Identifier || !state.identifier.trim().is_empty())
                 };
                 let submit = ui
                     .add_enabled_ui(valid && !view.busy, |ui| {
                         ui.put(
-                            rect(310.0, controls, 40.0),
-                            egui::Button::new(t("Продолжить", "Continue"))
-                                .fill(theme::PRIMARY)
-                                .corner_radius(10),
+                            rect(if credentials { 332.0 } else { 310.0 }, controls, 40.0),
+                            egui::Button::new(if credentials {
+                                t("Войти", "Sign in")
+                            } else {
+                                t("Продолжить", "Continue")
+                            })
+                            .fill(theme::PRIMARY)
+                            .corner_radius(10),
                         )
                     })
                     .inner;
+                let identifier_focused = identifier
+                    .as_ref()
+                    .is_some_and(|r| r.has_focus() || r.lost_focus());
+                let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if identifier_focused
+                    && enter_pressed
+                    && !view.busy
+                    && !state.identifier.trim().is_empty()
+                    && state.input.is_empty()
+                {
+                    field.request_focus();
+                }
                 let enter = valid
                     && !view.busy
-                    && (field.has_focus() || field.lost_focus())
-                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    && (field.has_focus() || field.lost_focus() || identifier_focused)
+                    && enter_pressed;
                 if submit.clicked() || enter {
                     if view.step == Step::Identifier {
-                        state.identifier.zeroize();
-                        state.identifier = state.input.trim().to_owned();
+                        control.send_credentials(
+                            state.identifier.trim().to_owned(),
+                            std::mem::take(&mut state.input),
+                        );
+                    } else {
+                        control.send(Action::Submit, std::mem::take(&mut state.input));
                     }
-                    control.send(Action::Submit, std::mem::take(&mut state.input));
                 }
             }
             if matches!(view.step, Step::Captcha | Step::Manual)
@@ -293,7 +326,15 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 );
             } else if view.busy {
                 ui.put(
-                    rect(280.0, 18.0, 18.0),
+                    rect(
+                        if matches!(view.step, Step::Identifier | Step::Password) {
+                            308.0
+                        } else {
+                            280.0
+                        },
+                        18.0,
+                        18.0,
+                    ),
                     egui::Spinner::new().size(18.0).color(theme::ACCENT),
                 );
             }
@@ -361,7 +402,7 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             let mut left = body.center().x - total * 0.5;
             for (action, label, w) in methods {
                 let r =
-                    Rect::from_min_size(egui::pos2(left, body.top() + 366.0), egui::vec2(w, 28.0));
+                    Rect::from_min_size(egui::pos2(left, body.top() + 374.0), egui::vec2(w, 28.0));
                 left += w + 8.0;
                 if ui
                     .add_enabled_ui(!view.busy, |ui| {
@@ -394,6 +435,21 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
         state.clear();
     }
     cancel
+}
+
+fn credential_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::BACKGROUND)
+        .inner_margin(10)
+        .corner_radius(10)
+        .stroke(egui::Stroke::new(1.0, theme::SCROLL_HANDLE))
+}
+
+fn clear_undo(ctx: &egui::Context, id: egui::Id) {
+    if let Some(mut edit) = egui::TextEdit::load_state(ctx, id) {
+        edit.clear_undoer();
+        egui::TextEdit::store_state(ctx, id, edit);
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +552,77 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+    #[test]
+    fn identifier_and_password_share_one_form_and_enter_submits_both() {
+        for language in [Language::Russian, Language::English] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let control = Control::default();
+            let mut state = State::default();
+            control.publish(crate::web_login_state::Snapshot {
+                document: "synthetic".into(),
+                revision: 1,
+                step: Step::Identifier,
+                ..Default::default()
+            });
+            for i in 0..3 {
+                render(
+                    &ctx,
+                    &mut state,
+                    &control,
+                    language,
+                    i as f64 * 0.2,
+                    Vec::new(),
+                );
+            }
+            let (empty, _) = render(&ctx, &mut state, &control, language, 0.8, Vec::new());
+            let mut hints = Vec::new();
+            for shape in &empty.shapes {
+                texts(&shape.shape, &mut |text| {
+                    hints.push(text.galley.text().to_owned())
+                });
+            }
+            for label in [
+                language.text("Телефон или почта", "Phone or email"),
+                language.text("Пароль", "Password"),
+                language.text("Войти", "Sign in"),
+            ] {
+                assert!(hints.iter().any(|text| text == label), "Missing: {label}");
+            }
+            state.identifier = "user@example.test".into();
+            state.input = "synthetic-secret".into();
+            let (filled, _) = render(&ctx, &mut state, &control, language, 1.0, Vec::new());
+            for shape in &filled.shapes {
+                texts(&shape.shape, &mut |text| {
+                    assert!(!text.galley.text().contains("synthetic-secret"));
+                });
+            }
+            render(
+                &ctx,
+                &mut state,
+                &control,
+                language,
+                1.2,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert!(state.input.is_empty());
+            assert_eq!(state.identifier, "user@example.test");
+            assert_eq!(control.take_command().unwrap().value, "user@example.test");
+            control.publish(crate::web_login_state::Snapshot {
+                document: "password-page".into(),
+                revision: 4,
+                step: Step::Password,
+                ..Default::default()
+            });
+            assert_eq!(control.take_command().unwrap().value, "synthetic-secret");
         }
     }
     #[test]
