@@ -222,6 +222,16 @@ impl CoverCache {
     /// Allocates a hover-only square: the surrounding track row keeps its click
     /// behavior. Missing, pending and failed covers share a quiet placeholder.
     pub fn show(&mut self, ui: &mut egui::Ui, url: Option<&str>, size: f32) -> Response {
+        self.show_rounded(ui, url, size, 6)
+    }
+
+    pub fn show_rounded(
+        &mut self,
+        ui: &mut egui::Ui,
+        url: Option<&str>,
+        size: f32,
+        radius: u8,
+    ) -> Response {
         self.receive(ui.ctx());
         self.clock = self.clock.wrapping_add(1);
         let size = size.clamp(1.0, 512.0);
@@ -239,14 +249,14 @@ impl CoverCache {
                 entry.touched = self.clock;
                 if let State::Ready(texture, _, _) = &entry.state {
                     egui::Image::from_texture(texture)
-                        .corner_radius(6)
+                        .corner_radius(radius)
                         .show_loading_spinner(false)
                         .paint_at(ui, rect);
                     return response;
                 }
             }
         }
-        ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+        ui.painter().rect_filled(rect, radius, theme::SELECTED);
         icons::paint(
             ui.painter(),
             rect.shrink(size * 0.27),

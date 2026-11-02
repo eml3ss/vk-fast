@@ -196,7 +196,7 @@ fn the_button_left_of_volume_toggles_the_right_drawer_and_clear_only_removes_man
         for _ in 0..3 {
             account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         }
-        let button = egui::pos2(size.x - 192.0, size.y - 50.0);
+        let button = egui::pos2(size.x - if compact { 172.0 } else { 192.0 }, size.y - 50.0);
         account_ui_click(&ctx, &mut app, size, &mut frame, button);
         assert!(app.queue_ui.open);
         let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());

@@ -148,6 +148,20 @@ pub fn scroll_rows<R>(
     })
 }
 
+pub fn scroll_viewport<R>(
+    ui: &mut egui::Ui,
+    area: egui::ScrollArea,
+    contents: impl FnOnce(&mut egui::Ui, egui::Rect) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    scrollbar_scope(ui, |ui, content_style| {
+        area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show_viewport(ui, |ui, viewport| {
+                ui.set_style(content_style);
+                contents(ui, viewport)
+            })
+    })
+}
+
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let fallback = fonts.families[&FontFamily::Proportional].clone();

@@ -17,6 +17,8 @@ use zeroize::Zeroize;
 mod current_settings_tests;
 #[path = "discord_rpc_app.rs"]
 mod discord_rpc_app;
+#[path = "lyrics_app.rs"]
+mod lyrics_app;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
 #[path = "queue_app.rs"]
@@ -968,6 +970,7 @@ pub struct MusicApp {
     play_order: PlaybackOrder,
     queued_tracks: HashMap<(i64, i64), Track>,
     queue_ui: queue_app::PanelState,
+    lyrics: lyrics_app::State,
     queue_origin: Option<String>,
     home_collections: Vec<home_ui::Collection>,
     home_sources: Vec<crate::web_audio::HomeCollection>,
@@ -1274,6 +1277,7 @@ impl MusicApp {
             play_order: PlaybackOrder::default(),
             queued_tracks: HashMap::new(),
             queue_ui: queue_app::PanelState::default(),
+            lyrics: lyrics_app::State::default(),
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),
@@ -1440,6 +1444,7 @@ impl MusicApp {
             self.covers.rebind_context(ctx);
             self.avatars.rebind_context(ctx);
             self.playlist_controls.rebind(ctx);
+            self.lyrics.rebind(ctx);
             self.qr_texture = self.qr_url.as_deref().and_then(|url| qr_image(ctx, url));
             // Existing worker clones share this target and wake the new window.
             self.repaint_target.set_context(ctx);
@@ -1748,6 +1753,10 @@ impl MusicApp {
     }
 
     fn stop_playback(&mut self) {
+        let ctx = self.ui_context.clone();
+        self.set_lyrics_fullscreen(&ctx, false);
+        self.lyrics.clear_track();
+        self.lyrics.open = false;
         self.discord_rpc.clear();
         self.unavailable_playback.clear();
         self.playlist_controls.cancel_play();
@@ -6173,6 +6182,7 @@ impl MusicApp {
                     .unwrap_or(track.key()),
             ),
             track_menu::Action::Artist(artist) => {
+                self.set_lyrics_fullscreen(ctx, false);
                 self.navigate_music(ctx, MusicPage::Artist(artist))
             }
             track_menu::Action::Album => {
@@ -6460,6 +6470,14 @@ impl MusicApp {
     }
 
     fn handle_track_action(&mut self, ctx: &egui::Context, action: TrackAction) {
+        if self.lyrics.fullscreen
+            && matches!(
+                &action,
+                TrackAction::Artist(_) | TrackAction::Album(_) | TrackAction::TrackAlbum(..)
+            )
+        {
+            self.set_lyrics_fullscreen(ctx, false);
+        }
         match action {
             TrackAction::Menu(track, action) => self.handle_track_menu_action(ctx, &track, action),
             TrackAction::ToggleLike(track) => self.toggle_like(ctx, track),
@@ -6786,9 +6804,9 @@ impl MusicApp {
             },
         );
         let volume_left = if self.compact_seek_bar {
-            (side_row.right() - 204.0).max(seek_row.right() + PLAYER_COLUMN_GAP)
+            (side_row.right() - 252.0).max(seek_row.right() + PLAYER_COLUMN_GAP)
         } else {
-            side_row.right() - 204.0
+            side_row.right() - 252.0
         };
         let volume_rect = egui::Rect::from_min_max(
             egui::pos2(volume_left.min(side_row.right()), side_row.top()),
@@ -6802,7 +6820,7 @@ impl MusicApp {
             |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(volume_rect));
                 let mut volume = snapshot.volume;
-                let volume_width = (volume_rect.width() - 72.0).clamp(17.0, 120.0);
+                let volume_width = (volume_rect.width() - 124.0).clamp(17.0, 120.0);
                 let response =
                     seek_bar::volume(ui, &mut volume, volume_width, t("Громкость", "Volume"));
                 if response.changed() {
@@ -6829,10 +6847,18 @@ impl MusicApp {
                 );
                 release_pointer_focus(&queue);
                 if queue.clicked() {
-                    self.queue_ui.open = !self.queue_ui.open;
-                    if self.queue_ui.open {
-                        self.synchronize_order();
-                    }
+                    self.toggle_queue(&ctx);
+                }
+                let lyrics = icons::toggle_button(
+                    ui,
+                    Icon::Lyrics,
+                    t("Текст", "Lyrics"),
+                    true,
+                    self.lyrics.active && self.lyrics.open,
+                );
+                release_pointer_focus(&lyrics);
+                if lyrics.clicked() {
+                    self.toggle_lyrics(&ctx);
                 }
             },
         );
@@ -7206,7 +7232,7 @@ impl MusicApp {
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
             ],
-            SettingsSection::Playback => &[Setting::NormalizeVolume],
+            SettingsSection::Playback => &[Setting::NormalizeVolume, Setting::Musixmatch],
             SettingsSection::Cache => &[
                 Setting::CacheLimit,
                 Setting::CacheClear,
@@ -7454,33 +7480,41 @@ impl MusicApp {
                 }
             }
             SettingsSection::Playback => {
-                let mut normalize = self.player.normalize_volume();
-                if theme::switch(
-                    ui,
-                    &mut normalize,
-                    t("Нормализация громкости", "Normalize volume"),
-                )
-                .changed()
-                {
-                    self.player.set_normalize_volume(normalize);
-                    self.normalization_save_failed = !save_normalization(normalize);
-                }
-                ui.label(
-                    RichText::new(t(
-                        "Выравнивает воспринимаемую громкость разных треков.",
-                        "Keeps different tracks at a consistent perceived volume.",
-                    ))
-                    .small()
-                    .color(MUTED),
-                );
-                if self.normalization_save_failed {
-                    ui.colored_label(
-                        Color32::from_rgb(255, 158, 153),
-                        t(
-                            "Не удалось сохранить настройку нормализации.",
-                            "Could not save the normalization setting.",
-                        ),
+                if query.matches(Setting::NormalizeVolume) {
+                    let mut normalize = self.player.normalize_volume();
+                    if theme::switch(
+                        ui,
+                        &mut normalize,
+                        t("Нормализация громкости", "Normalize volume"),
+                    )
+                    .changed()
+                    {
+                        self.player.set_normalize_volume(normalize);
+                        self.normalization_save_failed = !save_normalization(normalize);
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Выравнивает воспринимаемую громкость разных треков.",
+                            "Keeps different tracks at a consistent perceived volume.",
+                        ))
+                        .small()
+                        .color(MUTED),
                     );
+                    if self.normalization_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку нормализации.",
+                                "Could not save the normalization setting.",
+                            ),
+                        );
+                    }
+                }
+                if query.matches(Setting::Musixmatch) {
+                    if query.matches(Setting::NormalizeVolume) {
+                        ui.add_space(18.0);
+                    }
+                    self.lyrics_settings(ui);
                 }
             }
             SettingsSection::Cache => {
@@ -7579,7 +7613,15 @@ impl MusicApp {
 
     fn render(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
-        if !self.system_titlebar {
+        self.poll_lyrics(ui.ctx());
+        self.lyrics.install_font(ui.ctx());
+        if self.lyrics.fullscreen
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.set_lyrics_fullscreen(ui.ctx(), false);
+        }
+        if !self.system_titlebar && !self.lyrics.fullscreen {
             let window = ui.ctx().viewport_rect();
             let caption = egui::Rect::from_min_max(
                 window.min,
@@ -7594,8 +7636,14 @@ impl MusicApp {
             && !self.playlist_controls.has_modal()
         {
             if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Extra1)) {
-                self.go_back(ui.ctx());
-            } else if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Extra2)) {
+                if self.lyrics.fullscreen {
+                    self.set_lyrics_fullscreen(ui.ctx(), false);
+                } else {
+                    self.go_back(ui.ctx());
+                }
+            } else if !self.lyrics.fullscreen
+                && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Extra2))
+            {
                 self.go_forward(ui.ctx());
             }
         }
@@ -7607,6 +7655,13 @@ impl MusicApp {
                     .inner_margin(egui::Margin::symmetric(16, PLAYER_PADDING_Y)),
             )
             .show(ui, |ui| self.player_bar(ui));
+        if self.lyrics.fullscreen {
+            egui::CentralPanel::default()
+                .frame(Frame::NONE)
+                .show(ui, |ui| self.lyrics_fullscreen(ui));
+            self.render_overlays_and_shortcuts(ui);
+            return;
+        }
         egui::Panel::left("account")
             .exact_size(252.0)
             .resizable(false)
@@ -7633,7 +7688,7 @@ impl MusicApp {
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| self.toolbar(ui));
-        self.queue_panel(ui);
+        self.right_panel(ui);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BACKGROUND).inner_margin(egui::Margin {
                 left: 8,
@@ -7683,6 +7738,10 @@ impl MusicApp {
         {
             titlebar::resize(ui.ctx());
         }
+        self.render_overlays_and_shortcuts(ui);
+    }
+
+    fn render_overlays_and_shortcuts(&mut self, ui: &mut egui::Ui) {
         if !self.render_track_unavailable_notice(ui.ctx()) && !self.playlist_mix_notice(ui.ctx()) {
             let menu_error = self.track_menu_error.is_some();
             if let Some(error) = self.track_menu_error.as_ref().or(self.like_error.as_ref()) {
@@ -7749,7 +7808,7 @@ impl MusicApp {
             }
         }
         if ui.ctx().current_pass_index() == 0
-            && !self.settings_open
+            && (!self.settings_open || self.lyrics.fullscreen)
             && !self.qr_open
             && self.web_login.is_none()
             && self.playlist_create_form.is_none()
@@ -7795,6 +7854,7 @@ impl MusicApp {
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
         self.poll_system_media(ctx, frame);
+        self.poll_lyrics(ctx);
         self.poll(ctx);
         self.poll_profile_cleanup();
         self.poll_home(ctx);
@@ -8286,6 +8346,7 @@ mod tests {
             play_order: PlaybackOrder::default(),
             queued_tracks: HashMap::new(),
             queue_ui: queue_app::PanelState::default(),
+            lyrics: lyrics_app::State::default(),
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),

@@ -30,6 +30,9 @@ pub enum Icon {
     HeartFilled,
     QueueAdd,
     Queue,
+    Lyrics,
+    Expand,
+    Collapse,
     PlaylistAdd,
     Radio,
     Album,
@@ -565,6 +568,36 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ];
             line(&shoulders);
         }
+        Icon::Lyrics => {
+            painter.rect_stroke(
+                Rect::from_min_max(point(8.0, 2.5), point(16.0, 14.5)),
+                4.0 * scale,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            line(&[
+                (5.0, 10.5),
+                (5.0, 14.0),
+                (8.0, 18.0),
+                (16.0, 18.0),
+                (19.0, 14.0),
+                (19.0, 10.5),
+            ]);
+            line(&[(12.0, 18.0), (12.0, 22.0)]);
+            line(&[(8.0, 22.0), (16.0, 22.0)]);
+        }
+        Icon::Expand => {
+            line(&[(3.0, 9.0), (3.0, 3.0), (9.0, 3.0)]);
+            line(&[(15.0, 3.0), (21.0, 3.0), (21.0, 9.0)]);
+            line(&[(21.0, 15.0), (21.0, 21.0), (15.0, 21.0)]);
+            line(&[(9.0, 21.0), (3.0, 21.0), (3.0, 15.0)]);
+        }
+        Icon::Collapse => {
+            line(&[(3.0, 8.0), (8.0, 8.0), (8.0, 3.0)]);
+            line(&[(16.0, 3.0), (16.0, 8.0), (21.0, 8.0)]);
+            line(&[(21.0, 16.0), (16.0, 16.0), (16.0, 21.0)]);
+            line(&[(8.0, 21.0), (8.0, 16.0), (3.0, 16.0)]);
+        }
         Icon::Queue => {
             line(&[(3.0, 5.0), (21.0, 5.0)]);
             line(&[(3.0, 11.0), (21.0, 11.0)]);
@@ -884,6 +917,9 @@ mod tests {
             Icon::HeartFilled,
             Icon::QueueAdd,
             Icon::Queue,
+            Icon::Lyrics,
+            Icon::Expand,
+            Icon::Collapse,
             Icon::PlaylistAdd,
             Icon::Radio,
             Icon::Album,

@@ -25,6 +25,8 @@ mod i18n;
 mod icons;
 mod keybinds;
 mod library_cache;
+mod lyrics;
+mod lyrics_ui;
 mod model;
 mod music_session_store;
 mod play_order;
