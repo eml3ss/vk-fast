@@ -5190,7 +5190,26 @@ impl MusicApp {
             return;
         }
         match result {
-            Ok(page) => {
+            Ok(mut page) => {
+                if let DetailPage::Artist(fresh) = &mut page
+                    && fresh.releases_error.is_some()
+                    && let Some(old) = self.details.get(&request.key)
+                    && let DetailPage::Artist(old) = old.as_ref()
+                {
+                    let present: HashSet<_> = fresh
+                        .discography
+                        .iter()
+                        .map(|release| (release.album.owner_id, release.album.id))
+                        .collect();
+                    fresh.discography.extend(
+                        old.discography
+                            .iter()
+                            .filter(|release| {
+                                !present.contains(&(release.album.owner_id, release.album.id))
+                            })
+                            .cloned(),
+                    );
+                }
                 if self.details.len() >= 32 && !self.details.contains_key(&request.key) {
                     let retained: HashSet<_> = self
                         .back_history
@@ -5338,7 +5357,7 @@ impl MusicApp {
             (_, Some(DetailPage::Artist(data))) => (
                 Some(data.artist.clone()),
                 data.image_url.clone(),
-                data.albums.clone(),
+                data.latest_releases.clone(),
                 None,
                 Vec::new(),
                 None,
@@ -5510,13 +5529,21 @@ impl MusicApp {
                     ui.ctx()
                         .data_mut(|data| data.insert_temp(expanded_id, !expanded));
                 }
-                if artist.is_some() && !albums.is_empty() {
-                    ui.add_space(20.0);
-                    if let Some(intent) =
-                        detail_ui::releases(ui, &mut self.covers, language, &albums)
-                    {
-                        action = Some(intent);
-                    }
+                if let Some(DetailPage::Artist(artist_page)) = data
+                    && let Some(intent) = detail_ui::artist_releases(
+                        ui,
+                        &mut self.covers,
+                        detail_ui::ReleasesView {
+                            language,
+                            artist_id: &artist_page.artist.id,
+                            latest: &albums,
+                            discography: &artist_page.discography,
+                            incomplete: artist_page.releases_error.is_some(),
+                            loading,
+                        },
+                    )
+                {
+                    action = Some(intent);
                 }
             },
         );
@@ -5525,6 +5552,7 @@ impl MusicApp {
             return;
         }
         match action {
+            Some(detail_ui::Action::ReloadReleases) => self.ensure_detail(&ctx, true),
             Some(detail_ui::Action::EditPlaylist) => {
                 if let MusicPage::Playlist(reference) = page {
                     self.open_playlist_editor(&ctx, reference, false);
@@ -13035,7 +13063,9 @@ mod tests {
                 artist: artist.clone(),
                 image_url: None,
                 tracks: tracks.clone(),
-                albums: Vec::new(),
+                latest_releases: Vec::new(),
+                discography: Vec::new(),
+                releases_error: None,
             })),
         );
         app.navigate_music(&ctx, MusicPage::Album(album));

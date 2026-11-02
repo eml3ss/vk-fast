@@ -6,6 +6,7 @@
 mod app;
 mod app_icon;
 mod app_paths;
+mod artist_releases;
 mod audio_cache;
 mod audio_output;
 mod auth_return;
@@ -513,12 +514,13 @@ fn check_details() -> Result<(), String> {
     println!(
         "Страница исполнителя: {} треков, {} релизов, изображение: {}.",
         artist.tracks.len(),
-        artist.albums.len(),
+        artist.discography.len(),
         artist.image_url.is_some()
     );
     let album = artist
-        .albums
+        .discography
         .first()
+        .map(|release| &release.album)
         .or(track.album.as_ref())
         .ok_or("У исполнителя нет релизов.")?;
     let album = client

@@ -3,6 +3,7 @@
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke};
 
 use crate::{
+    artist_releases::{Kind as ReleaseKind, Release},
     cover_art::CoverCache,
     i18n::Language,
     icons::{self, Icon},
@@ -40,6 +41,7 @@ pub enum Action {
     OpenArtist(ArtistRef),
     OpenCreator(i64),
     EditPlaylist,
+    ReloadReleases,
 }
 
 /// The names remain separate click targets even when VK supplies one combined
@@ -449,22 +451,112 @@ fn collection_header(
     action
 }
 
-/// Releases retain the order VK supplies. No release is labelled "latest" just
-/// because it happens to be the first item in an unordered response.
+pub struct ReleasesView<'a> {
+    pub language: Language,
+    pub artist_id: &'a str,
+    pub latest: &'a [Release],
+    pub discography: &'a [Release],
+    pub incomplete: bool,
+    pub loading: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ReleaseTab {
+    #[default]
+    Albums,
+    Singles,
+}
+
+pub fn artist_releases(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: ReleasesView<'_>,
+) -> Option<Action> {
+    let mut action = releases(ui, covers, view.language, view.latest);
+    ui.add_space(22.0);
+    let id = ui.make_persistent_id(("artist-release-tab", view.artist_id));
+    let mut tab = ui
+        .ctx()
+        .data(|data| data.get_temp::<ReleaseTab>(id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.selectable_value(
+            &mut tab,
+            ReleaseTab::Albums,
+            view.language.text("Альбомы", "Albums"),
+        );
+        ui.selectable_value(
+            &mut tab,
+            ReleaseTab::Singles,
+            view.language.text("Синглы и EP", "Singles & EPs"),
+        );
+    });
+    ui.ctx().data_mut(|data| data.insert_temp(id, tab));
+    ui.add_space(10.0);
+    if view.incomplete {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(view.language.text(
+                    "Не удалось загрузить всю дискографию.",
+                    "Could not load the full discography.",
+                ))
+                .small()
+                .color(theme::MUTED),
+            );
+            if ui
+                .add_enabled(
+                    !view.loading,
+                    egui::Button::new(view.language.text("Повторить", "Retry")).frame(false),
+                )
+                .clicked()
+            {
+                action = Some(Action::ReloadReleases);
+            }
+        });
+        ui.add_space(6.0);
+    }
+    let filtered: Vec<_> = view
+        .discography
+        .iter()
+        .filter(|release| match tab {
+            ReleaseTab::Albums => matches!(release.kind, ReleaseKind::Album | ReleaseKind::Unknown),
+            ReleaseTab::Singles => matches!(release.kind, ReleaseKind::Single | ReleaseKind::Ep),
+        })
+        .collect();
+    if filtered.is_empty() && !view.incomplete {
+        ui.label(
+            RichText::new(match tab {
+                ReleaseTab::Albums => view.language.text("Альбомов пока нет", "No albums yet"),
+                ReleaseTab::Singles => view
+                    .language
+                    .text("Синглов и EP пока нет", "No singles or EPs yet"),
+            })
+            .color(theme::MUTED),
+        );
+    }
+    ui.push_id(("artist-discography", view.artist_id, tab as u8), |ui| {
+        if let Some(intent) = release_grid(ui, covers, view.language, &filtered) {
+            action = Some(intent);
+        }
+    });
+    action
+}
+
+/// The catalog supplies latest releases in display order. Fit one row to the window.
 pub fn releases(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     language: Language,
-    albums: &[AlbumRef],
+    releases: &[Release],
 ) -> Option<Action> {
-    if albums.is_empty() {
+    if releases.is_empty() {
         return None;
     }
     ui.add_space(22.0);
     theme::inset_heading(ui, |ui| {
         ui.add(
             egui::Label::new(
-                RichText::new(language.text("Релизы", "Releases"))
+                RichText::new(language.text("Последние релизы", "Latest releases"))
                     .size(20.0)
                     .family(theme::semibold()),
             )
@@ -472,79 +564,129 @@ pub fn releases(
         )
     });
     ui.add_space(8.0);
-    let columns = ((ui.available_width() + 14.0) / 174.0)
-        .floor()
-        .clamp(1.0, 5.0) as usize;
+    let visible: Vec<_> = releases
+        .iter()
+        .take(release_columns(ui.available_width()))
+        .collect();
+    ui.push_id("latest-releases", |ui| {
+        release_grid(ui, covers, language, &visible)
+    })
+    .inner
+}
+
+fn release_columns(width: f32) -> usize {
+    ((width + 14.0) / 174.0).floor().clamp(1.0, 16.0) as usize
+}
+
+fn release_grid(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    language: Language,
+    releases: &[&Release],
+) -> Option<Action> {
+    if releases.is_empty() {
+        return None;
+    }
+    let columns = release_columns(ui.available_width());
     let width = ((ui.available_width() - 14.0 * columns.saturating_sub(1) as f32) / columns as f32)
         .max(1.0);
+    let card_height = (width - 24.0).clamp(1.0, 200.0) + 65.0;
+    let row_height = card_height + 10.0;
+    let rows = releases.len().div_ceil(columns);
+    let (area, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), rows as f32 * row_height - 10.0),
+        Sense::hover(),
+    );
+    let start = (((ui.clip_rect().top() - area.top()) / row_height)
+        .floor()
+        .max(0.0) as usize)
+        .min(rows);
+    let end = (((ui.clip_rect().bottom() - area.top()) / row_height)
+        .ceil()
+        .max(0.0) as usize)
+        .min(rows);
     let mut action = None;
-    for row in albums.chunks(columns) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            for album in row {
-                ui.push_id(("release", album.owner_id, album.id), |ui| {
-                    let art_size = (width - 24.0).clamp(1.0, 200.0);
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(width, art_size + 65.0), Sense::click());
-                    let fill = if response.hovered() || response.has_focus() {
-                        Color32::from_rgb(31, 38, 49)
-                    } else {
-                        theme::SURFACE
-                    };
-                    ui.painter().rect_filled(rect, 12.0, fill);
-                    if response.has_focus() {
-                        ui.painter().rect_stroke(
-                            rect,
-                            12.0,
-                            Stroke::new(1.0, theme::ACCENT),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    let art = egui::Rect::from_min_size(
-                        rect.min + egui::vec2((width - art_size) * 0.5, 12.0),
-                        egui::Vec2::splat(art_size),
-                    );
-                    artwork(ui, covers, art, album.cover_url.as_deref(), "release-art");
-                    let mut text = child(
-                        ui,
-                        "release-title",
-                        egui::Rect::from_min_max(
-                            egui::pos2(rect.left() + 12.0, art.bottom() + 11.0),
-                            rect.max - egui::vec2(12.0, 6.0),
-                        ),
-                    );
-                    text.spacing_mut().item_spacing.y = 2.0;
-                    text.add(
-                        egui::Label::new(RichText::new(&album.title).family(theme::semibold()))
-                            .truncate()
-                            .selectable(false),
-                    );
-                    text.add(
-                        egui::Label::new(
-                            RichText::new(language.text("Альбом", "Album"))
-                                .small()
-                                .color(theme::MUTED),
-                        )
-                        .selectable(false),
-                    );
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            ui.is_enabled(),
-                            &album.title,
-                        )
-                    });
-                    if response.clicked() {
-                        response.request_focus();
-                        action = Some(Action::OpenAlbum(album.clone()));
-                    }
-                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                });
+    for row in start..end {
+        for column in 0..columns {
+            let Some(release) = releases.get(row * columns + column) else {
+                break;
+            };
+            let rect = egui::Rect::from_min_size(
+                area.min + egui::vec2(column as f32 * (width + 14.0), row as f32 * row_height),
+                egui::vec2(width, card_height),
+            );
+            if let Some(intent) = release_card(ui, covers, language, release, rect) {
+                action = Some(intent);
             }
-        });
-        ui.add_space(6.0);
+        }
     }
     action
+}
+
+fn release_card(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    language: Language,
+    release: &Release,
+    rect: egui::Rect,
+) -> Option<Action> {
+    let album = &release.album;
+    ui.push_id(("release", album.owner_id, album.id), |ui| {
+        let response = ui.interact(rect, ui.id().with("card"), Sense::click());
+        let fill = if response.hovered() || response.has_focus() {
+            Color32::from_rgb(31, 38, 49)
+        } else {
+            theme::SURFACE
+        };
+        ui.painter().rect_filled(rect, 12.0, fill);
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                12.0,
+                Stroke::new(1.0, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let art_size = (rect.width() - 24.0).clamp(1.0, 200.0);
+        let art = egui::Rect::from_min_size(
+            rect.min + egui::vec2((rect.width() - art_size) * 0.5, 12.0),
+            egui::Vec2::splat(art_size),
+        );
+        artwork(ui, covers, art, album.cover_url.as_deref(), "release-art");
+        let mut text = child(
+            ui,
+            "release-title",
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 12.0, art.bottom() + 11.0),
+                rect.max - egui::vec2(12.0, 6.0),
+            ),
+        );
+        text.spacing_mut().item_spacing.y = 2.0;
+        text.add(
+            egui::Label::new(RichText::new(&album.title).family(theme::semibold()))
+                .truncate()
+                .selectable(false),
+        );
+        text.add(
+            egui::Label::new(
+                RichText::new(release.caption(language))
+                    .small()
+                    .color(theme::MUTED),
+            )
+            .truncate()
+            .selectable(false),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &album.title)
+        });
+        let clicked = response.clicked();
+        if clicked {
+            response.surrender_focus();
+        }
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        clicked.then(|| Action::OpenAlbum(album.clone()))
+    })
+    .inner
 }
 
 fn child(ui: &mut egui::Ui, id: &'static str, rect: egui::Rect) -> egui::Ui {
@@ -1416,6 +1558,88 @@ mod tests {
     }
 
     #[test]
+    fn artist_latest_stays_one_row_and_discography_tabs_filter_their_cards() {
+        let release = |id, title: String, kind| Release {
+            album: AlbumRef {
+                id,
+                owner_id: -42,
+                title,
+                access_key: None,
+                cover_url: None,
+            },
+            kind,
+            year: Some(2026),
+        };
+        let latest: Vec<_> = (1..=12)
+            .map(|id| release(id, format!("Latest {id}"), ReleaseKind::Single))
+            .collect();
+        let discography = vec![
+            release(20, "Album only".into(), ReleaseKind::Album),
+            release(21, "Single only".into(), ReleaseKind::Single),
+            release(22, "EP only".into(), ReleaseKind::Ep),
+        ];
+        for width in [600.0, 1040.0] {
+            let context = egui::Context::default();
+            theme::install(&context);
+            let mut covers = CoverCache::new();
+            let mut frame = |tick, events| {
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 1000.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        artist_releases(
+                            ui,
+                            &mut covers,
+                            ReleasesView {
+                                language: Language::English,
+                                artist_id: "synthetic",
+                                latest: &latest,
+                                discography: &discography,
+                                incomplete: false,
+                                loading: false,
+                            },
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output
+            };
+            let find = |output: &egui::FullOutput, title: &str| {
+                output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == title => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+            };
+            frame(1, vec![]);
+            let output = frame(2, vec![]);
+            assert!(find(&output, "Latest releases").is_some());
+            let top = find(&output, "Latest 1").unwrap().top();
+            for id in 1..=release_columns(width) {
+                assert!((find(&output, &format!("Latest {id}")).unwrap().top() - top).abs() < 1.0);
+            }
+            assert!(find(&output, &format!("Latest {}", release_columns(width) + 1)).is_none());
+            assert!(find(&output, "Album only").is_some());
+            assert!(find(&output, "Single only").is_none());
+            let tab = find(&output, "Singles & EPs").unwrap().center();
+            frame(3, pointer(tab, true));
+            frame(4, pointer(tab, false));
+            let output = frame(5, vec![]);
+            assert!(find(&output, "Album only").is_none());
+            assert!(find(&output, "Single only").is_some());
+            assert!(find(&output, "EP only").is_some());
+        }
+    }
+
+    #[test]
     fn release_card_opens_the_supplied_album_identity() {
         let context = egui::Context::default();
         theme::install(&context);
@@ -1444,7 +1668,11 @@ mod tests {
                         ui,
                         &mut covers,
                         Language::Russian,
-                        std::slice::from_ref(&album),
+                        &[Release {
+                            album: album.clone(),
+                            kind: ReleaseKind::Album,
+                            year: None,
+                        }],
                     );
                 },
             );
