@@ -30,15 +30,10 @@ pub struct Release {
 }
 impl Release {
     pub fn from_value(value: &Value) -> Option<Self> {
-        let kind = ["album_type", "release_type"]
+        let kind = [value.get("album"), value.get("meta"), Some(value)]
             .into_iter()
-            .filter_map(|field| value.get(field).and_then(Value::as_str))
-            .find_map(|kind| match kind.trim().to_ascii_lowercase().as_str() {
-                "album" | "main" | "lp" | "compilation" => Some(Kind::Album),
-                "single" => Some(Kind::Single),
-                "ep" | "extended_play" => Some(Kind::Ep),
-                _ => None,
-            })
+            .flatten()
+            .find_map(kind_from_metadata)
             .unwrap_or_default();
         Some(Self {
             album: AlbumRef::from_value(value)?,
@@ -70,6 +65,31 @@ impl Release {
             self.album.access_key = release.album.access_key;
         }
     }
+}
+
+fn kind_from_metadata(value: &Value) -> Option<Kind> {
+    if value
+        .get("is_single")
+        .is_some_and(|value| value.as_bool() == Some(true) || value.as_u64() == Some(1))
+    {
+        return Some(Kind::Single);
+    }
+    if value
+        .get("is_ep")
+        .is_some_and(|value| value.as_bool() == Some(true) || value.as_u64() == Some(1))
+    {
+        return Some(Kind::Ep);
+    }
+    ["album_type", "release_type", "type", "kind"]
+        .into_iter()
+        .filter_map(|field| value.get(field).and_then(Value::as_str))
+        .chain(value.as_str())
+        .find_map(|kind| match kind.trim().to_lowercase().as_str() {
+            "album" | "main" | "lp" | "compilation" | "альбом" => Some(Kind::Album),
+            "single" | "сингл" => Some(Kind::Single),
+            "ep" | "extended_play" | "мини-альбом" => Some(Kind::Ep),
+            _ => None,
+        })
 }
 
 /// Preserve VK's order and canonical identities across catalog and API pages.
@@ -120,5 +140,22 @@ mod tests {
             releases.iter().map(|r| r.album.id).collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn nested_catalog_metadata_and_single_flags_are_not_lost() {
+        for (metadata, expected) in [
+            (json!({"album":{"type":"single"}}), Kind::Single),
+            (json!({"meta":{"type":"ep"}}), Kind::Ep),
+            (json!({"album":{"is_single":1}}), Kind::Single),
+            (json!({"type":"album"}), Kind::Album),
+        ] {
+            let mut value = json!({"id":1,"owner_id":-42,"title":"Synthetic release","type":"ugc"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(metadata.as_object().unwrap().clone());
+            assert_eq!(Release::from_value(&value).unwrap().kind, expected);
+        }
     }
 }

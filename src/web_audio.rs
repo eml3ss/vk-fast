@@ -1911,7 +1911,9 @@ impl WebAudioClient {
         let (mut page, streams) = parse_artist_page(&value, &reference)?;
         self.commit_home_streams(expected_owner, generation, streams, canceled)?;
         if let Err(error) =
-            self.load_artist_discography(expected_owner, generation, &mut page, canceled)
+            crate::artist_catalog::load(&mut page, &value, canceled, |method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            })
         {
             if matches!(
                 error,
@@ -1922,29 +1924,6 @@ impl WebAudioClient {
             page.releases_error = Some(error);
         }
         Ok(page)
-    }
-
-    fn load_artist_discography(
-        &self,
-        owner: i64,
-        generation: u64,
-        page: &mut ArtistPage,
-        canceled: &AtomicBool,
-    ) -> Result<(), WebAudioError> {
-        let artist_id = page.artist.id.clone();
-        load_artist_releases_with(page, canceled, |offset| {
-            self.detail_request(
-                owner,
-                generation,
-                "audio.getAlbumsByArtist",
-                vec![
-                    ("artist_id", artist_id.clone()),
-                    ("count", "100".into()),
-                    ("offset", offset.to_string()),
-                ],
-                canceled,
-            )
-        })
     }
 
     /// Read the current account's created and saved playlists. The default
@@ -3003,62 +2982,6 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
         },
         streams,
     ))
-}
-
-fn load_artist_releases_with(
-    page: &mut ArtistPage,
-    canceled: &AtomicBool,
-    mut request: impl FnMut(usize) -> Result<Value, WebAudioError>,
-) -> Result<(), WebAudioError> {
-    let mut offset = 0;
-    for _ in 0..MAX_BATCH_REQUESTS {
-        if canceled.load(Ordering::Acquire) {
-            return Err(WebAudioError::Canceled);
-        }
-        let response = request(offset)?;
-        if canceled.load(Ordering::Acquire) {
-            return Err(WebAudioError::Canceled);
-        }
-        let items = response
-            .get("items")
-            .and_then(Value::as_array)
-            .ok_or(WebAudioError::Format)?;
-        if items.len() > 100 {
-            return Err(WebAudioError::TooLarge);
-        }
-        let releases: Vec<_> = items
-            .iter()
-            .filter_map(crate::artist_releases::Release::from_value)
-            .collect();
-        let added = crate::artist_releases::merge(&mut page.discography, releases.clone());
-        // Enrich only the catalog's latest ids; this must not append old releases to that row.
-        for latest in &mut page.latest_releases {
-            if let Some(fresh) = releases.iter().find(|release| {
-                release.album.owner_id == latest.album.owner_id
-                    && release.album.id == latest.album.id
-            }) {
-                latest.enrich(fresh.clone());
-            }
-        }
-        offset += items.len();
-        let total = response
-            .get("count")
-            .and_then(Value::as_u64)
-            .filter(|count| *count > 0);
-        if items.is_empty()
-            || total.is_some_and(|total| offset as u64 >= total)
-            || (total.is_none() && items.len() < 100)
-        {
-            if page.latest_releases.is_empty() {
-                page.latest_releases = page.discography.iter().take(10).cloned().collect();
-            }
-            return Ok(());
-        }
-        if offset > 100 && added == 0 {
-            return Err(WebAudioError::Pagination);
-        }
-    }
-    Err(WebAudioError::Pagination)
 }
 
 struct UserPlaylistPage {
@@ -7826,49 +7749,6 @@ mod detail_tests {
             parse_artist_page(&catalog(), &unrelated),
             Err(WebAudioError::Format)
         ));
-    }
-
-    #[test]
-    fn artist_discography_pages_enrich_latest_without_appending_older_releases() {
-        let (mut page, _) = parse_artist_page(&catalog(), &artist()).unwrap();
-        let canceled = AtomicBool::new(false);
-        let mut offsets = Vec::new();
-        load_artist_releases_with(&mut page, &canceled, |offset| {
-            offsets.push(offset);
-            let end = (offset + 100).min(101);
-            let items: Vec<_> = (offset+1..=end).map(|id|json!({
-                "id":id,"owner_id":-200,"title":format!("Release {id}"),
-                "album_type":if id==3 {"single"} else if id==4 {"ep"} else {"album"},"year":2026
-            })).collect();
-            Ok(json!({"count":101,"items":items}))
-        })
-        .unwrap();
-        assert_eq!(offsets, [0, 100]);
-        assert_eq!(page.discography.len(), 101);
-        assert_eq!(
-            page.latest_releases
-                .iter()
-                .map(|release| release.album.id)
-                .collect::<Vec<_>>(),
-            [3, 4]
-        );
-        assert_eq!(
-            page.latest_releases[0].kind,
-            crate::artist_releases::Kind::Single
-        );
-        assert_eq!(
-            page.latest_releases[1].kind,
-            crate::artist_releases::Kind::Ep
-        );
-        assert!(page.latest_releases[0].album.cover_url.is_some());
-        canceled.store(true, Ordering::Release);
-        assert_eq!(
-            load_artist_releases_with(&mut page, &canceled, |_| panic!(
-                "must not request after cancellation"
-            )),
-            Err(WebAudioError::Canceled)
-        );
-        assert_eq!(page.discography.len(), 101);
     }
 
     #[test]
