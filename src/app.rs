@@ -6656,19 +6656,48 @@ impl MusicApp {
                         metadata_action = Some(TrackAction::Album(album.clone()));
                     }
                 }
+                let cover_gap = ui.spacing().item_spacing.x;
+                let heart_gap = 6.0;
+                let max_text_width = (metadata.width()
+                    - artwork_size
+                    - cover_gap
+                    - if has_track { 22.0 + heart_gap } else { 0.0 })
+                .max(0.0);
+                let title_job = title_track.as_ref().map_or_else(
+                    || {
+                        egui::text::LayoutJob::simple_singleline(
+                            title.clone(),
+                            title_font.clone(),
+                            ui.visuals().text_color(),
+                        )
+                    },
+                    |track| {
+                        theme::track_title(track, ui.visuals().text_color(), title_font.clone())
+                    },
+                );
+                let title_width = ui.painter().layout_job(title_job.clone()).size().x;
+                let artist_width = ui.fonts_mut(|fonts| {
+                    let mut width = |text: &str| {
+                        fonts
+                            .layout_no_wrap(text.to_owned(), artist_font.clone(), MUTED)
+                            .size()
+                            .x
+                    };
+                    if artists.is_empty() {
+                        width(&artist)
+                    } else {
+                        let separator = width(", ");
+                        artists
+                            .iter()
+                            .map(|artist| width(&artist.name))
+                            .sum::<f32>()
+                            + separator * artists.len().saturating_sub(1) as f32
+                    }
+                });
+                let text_width = title_width.max(artist_width).ceil().min(max_text_width);
+                ui.spacing_mut().item_spacing.x = heart_gap;
                 ui.allocate_ui_with_layout(
-                    egui::vec2(
-                        (metadata.width()
-                            - artwork_size
-                            - ui.spacing().item_spacing.x
-                            - if has_track {
-                                22.0 + ui.spacing().item_spacing.x
-                            } else {
-                                0.0
-                            })
-                        .max(0.0),
-                        metadata_height,
-                    ),
+                    egui::vec2(text_width, metadata_height),
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
@@ -6677,40 +6706,17 @@ impl MusicApp {
                             Layout::left_to_right(Align::Center),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                let text = title_track.as_ref().map_or_else(
-                                    || {
-                                        egui::WidgetText::from(
-                                            RichText::new(&title).font(title_font.clone()),
-                                        )
-                                    },
-                                    |track| {
-                                        egui::WidgetText::from(theme::track_title(
-                                            track,
-                                            ui.visuals().text_color(),
-                                            title_font.clone(),
-                                        ))
-                                    },
-                                );
-                                let text_width = ui.fonts_mut(|fonts| {
-                                    fonts
-                                        .layout_no_wrap(
-                                            title.clone(),
-                                            title_font.clone(),
-                                            ui.visuals().text_color(),
-                                        )
-                                        .size()
-                                        .x
-                                });
-                                let width = text_width.min(ui.available_width().max(0.0));
+                                let width = title_width.min(ui.available_width().max(0.0));
                                 let title_response = ui.add_sized(
                                     egui::vec2(width, title_line_height),
-                                    egui::Label::new(text).truncate().selectable(false).sense(
-                                        if has_track {
+                                    egui::Label::new(title_job.clone())
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(if has_track {
                                             Sense::click()
                                         } else {
                                             Sense::hover()
-                                        },
-                                    ),
+                                        }),
                                 );
                                 if let Some(key) = track_key
                                     && title_response
