@@ -73,6 +73,15 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == "--print-data-paths") {
+        let config =
+            app_paths::config_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+        let cache =
+            app_paths::cache_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+        println!("{}", serde_json::json!({"config": config, "cache": cache}));
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--web-login") {
         let language = args
             .windows(2)
@@ -256,6 +265,11 @@ fn main() -> eframe::Result {
         single_instance::Acquisition::AlreadyRunning => return Ok(()),
     };
     let activation = instance.activations();
+    #[cfg(windows)]
+    {
+        app_paths::config_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+        app_paths::cache_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    }
     if preferences::migrate_legacy().is_err() {
         eprintln!("Не удалось перенести настройки VK Fast в каталог конфигурации.");
     }

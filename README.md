@@ -50,7 +50,7 @@ Node.js, npm и Tauri CLI для сборки приложения не нужн
 
 ### Windows
 
-Готовую portable-сборку нужно распаковать целиком и запустить `vk-fast.exe`. Для окна входа нужен **Microsoft Edge WebView2 Runtime**. Звук выводится через WASAPI; минимальный FFmpeg с Mbed TLS и встроенными корневыми сертификатами включён в архив.
+Установщик NSIS предлагает папку приложения и раздельный выбор хранения настроек и кэша: AppData или папка установки. Также доступна portable-сборка: распакуйте её целиком и запустите `vk-fast.exe`. Для окна входа нужен **Microsoft Edge WebView2 Runtime**. Звук выводится через WASAPI; минимальный FFmpeg включён в поставку.
 
 Кросс-сборка из Linux требует официального Rust toolchain с целью `x86_64-pc-windows-msvc`, LLVM, Python 3.11+ и `cargo-xwin`. Для первой сборки декодера также нужны Bash, curl, tar/xz/bzip2, make, patch и GCC. Готовый декодер переиспользуется при следующих сборках. [Подготовка toolchain и упаковка Windows](docs/windows.md), [состав FFmpeg](docs/windows-ffmpeg.md).
 
@@ -75,6 +75,8 @@ cargo build --release --locked
 ./scripts/build-windows.sh --output dist
 ```
 
+Для установщика добавьте `--installer`. На Linux для запуска закреплённого компилятора NSIS нужен Wine; компилятор скачивается автоматически с проверкой SHA-256.
+
 Правила работы с кодом и команды проверок находятся в [AGENTS.md](AGENTS.md).
 
 ## Хранение данных
@@ -86,6 +88,8 @@ cargo build --release --locked
 | Кэши | `$XDG_CACHE_HOME/vk-fast` или `~/.cache/vk-fast` | `cache` рядом с `.exe` |
 
 Лимит аудиокэша не включает библиотеку и изображения. Логи включаются в настройках и по умолчанию выключены. Файлы сессии и профиль webview содержат данные входа и не предназначены для публикации.
+
+После установки на Windows выбранные папки определяет `vk-fast-storage.ini` рядом с программой. В режиме AppData используются `%LOCALAPPDATA%\VK Fast\config` и `%LOCALAPPDATA%\VK Fast\cache`. Удаление приложения сохраняет пользовательские данные.
 
 ## Лицензия
 

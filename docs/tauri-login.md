@@ -30,7 +30,7 @@
 
 ## Хранение и выход
 
-На Linux пути начинаются с `$XDG_STATE_HOME/vk-fast`, если XDG-переменная содержит абсолютный путь; иначе — с `~/.local/state/vk-fast`. На Windows эти данные находятся в `config` рядом с `.exe`.
+На Linux пути начинаются с `$XDG_STATE_HOME/vk-fast`, если XDG-переменная содержит абсолютный путь; иначе — с `~/.local/state/vk-fast`. На Windows эти данные находятся в выбранной папке `config`: рядом с `.exe` либо в `%LOCALAPPDATA%\VK Fast` ([выбор в установщике](windows.md)).
 
 | Путь | Назначение |
 | --- | --- |
