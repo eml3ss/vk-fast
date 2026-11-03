@@ -662,22 +662,21 @@ pub fn run_helper(language: Language) -> Result<(), String> {
             let mut retry=Instant::now();let mut loading_since=Instant::now();
             let mut entry_attempt: Option<(String,u64,u8,Instant)>=None;
             let mut last_good: Option<(u64,LoginSnapshot)>=None;
-            let mut unavailable_since: Option<Instant>=None;
             while !setup_done.load(Ordering::Acquire) {
                 let epoch=setup_revision.load(Ordering::Acquire);
                 let inspected=inspect(&window).filter(|view|last_good.as_ref().is_none_or(|(at,old)|*at==epoch || old.document!=view.document));
                 let ready=inspected.is_some();
                 let mut view=if let Some(view)=inspected {
-                    unavailable_since=None;
                     last_good=Some((epoch,view.clone()));view
                 } else if let Some((_,previous))=last_good.as_ref().filter(|(at,_)|*at==epoch) {
                     let mut view=previous.clone();view.busy=true;
-                    if unavailable_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(10) {view.step=Step::Manual;view.busy=false;}
                     view
                 } else {LoginSnapshot::default()};
                 let raw_step=view.step;
                 if raw_step!=Step::Loading {loading_since=Instant::now();}
-                if raw_step==Step::Loading && loading_since.elapsed()>Duration::from_secs(10) {view.step=Step::Manual;}
+                // A slow navigation is not an unknown form. Offer the original
+                // page without discarding the password for this explicit attempt.
+                if raw_step==Step::Loading && loading_since.elapsed()>Duration::from_secs(10) {view.open_page_available=true;}
                 let mut ack=false;let mut open=false;
                 match receiver.try_recv() {
                     Ok(command)=>{
@@ -950,8 +949,8 @@ mod tests {
                 }
                 assert!(submitted,"Hidden webview did not process the native form command");
                 assert!(!window.is_visible().unwrap());
-                let html="<form><input name='password' type='password' autocomplete='current-password'><button type='submit' disabled>Continue</button></form>";
-                let setup=format!("document.body.innerHTML={}; window.fixturePasswordSubmits=0; document.querySelector('input').oninput=()=>setTimeout(()=>document.querySelector('button').disabled=false,150); document.querySelector('form').onsubmit=e=>{{e.preventDefault();window.fixturePassword=document.querySelector('input').value;window.fixturePasswordSubmits++;}};true;",serde_json::to_string(html).unwrap());
+                let html="<form><div hidden style='display:block'><input name='username' autocomplete='username' value='synthetic-login'></div><input name='password' type='password' autocomplete='current-password'><button type='submit' disabled>Continue</button></form>";
+                let setup=format!("document.body.innerHTML={}; window.fixturePasswordSubmits=0; document.querySelector('[name=password]').oninput=()=>setTimeout(()=>document.querySelector('button').disabled=false,150); document.querySelector('form').onsubmit=e=>{{e.preventDefault();window.fixturePassword=document.querySelector('[name=password]').value;window.fixturePasswordSubmits++;}};true;",serde_json::to_string(html).unwrap());
                 assert_eq!(evaluate(&window,setup),Some(serde_json::Value::Bool(true)));
                 let mut dispatched=false;
                 for _ in 0..30 {
@@ -973,10 +972,12 @@ mod tests {
                     thread::sleep(Duration::from_millis(100));
                 }
                 assert!(password_submitted,"Delayed validation did not submit the password exactly once");
+                assert_eq!(evaluate(&window,"document.querySelector('[name=username]').value === 'synthetic-login'".into()),Some(serde_json::Value::Bool(true)));
                 assert!(!window.is_visible().unwrap(),"Password entry must remain hidden");
                 evaluate(&window,"document.body.innerHTML='<div data-test-id=\"captcha-widget\" style=\"background:white;border-radius:16px;padding:24px;font:18px sans-serif\">Local verification UI test — no CAPTCHA service</div>'; true".into());
                 let view:LoginSnapshot=serde_json::from_value(evaluate(&window,"window.__vkFastAuth.snapshot()".into()).unwrap()).unwrap();
-                assert_eq!(view.step,Step::Captcha);
+                let diagnostic=if view.step!=Step::Captcha {evaluate(&window,"(() => { const e=document.querySelector('[data-test-id=captcha-widget]'); const nodes=[]; for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);nodes.push({tag:n.tagName,hidden:n.hidden,inert:n.inert,aria:n.getAttribute('aria-hidden'),display:s.display,visibility:s.visibility,opacity:s.opacity});} return {present:!!e,rect:e?.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],nodes}; })()".into())}else{None};
+                assert_eq!(view.step,Step::Captcha,"Local fixture visibility: {diagnostic:?}");
                 let mut popup=flow::Popup::default();challenge_window(&window,popup.update(&view,false,false),false);
                 thread::sleep(Duration::from_millis(600));
                 assert!(window.is_visible().unwrap());assert!(!window.is_decorated().unwrap());

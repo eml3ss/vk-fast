@@ -33,6 +33,12 @@ impl Popup {
         if open {
             self.manual = view.step != Step::Captcha;
             self.dismissed = false;
+        } else if view.accepts_input()
+            || matches!(view.step, Step::Entry | Step::Methods | Step::Approval)
+        {
+            // A recovered ordinary form belongs in the native dialog, even
+            // when an earlier unrecognized step was opened manually.
+            self.manual = false;
         }
         let requested = self.manual || (view.step == Step::Captcha && !self.dismissed);
         if !requested && self.visible {
@@ -96,7 +102,7 @@ mod tests {
         assert_eq!(p.update(&v, false, false), Change::None);
     }
     #[test]
-    fn explicitly_opened_site_remains_visible_across_native_steps() {
+    fn an_opened_fallback_returns_to_native_when_a_password_form_is_recognized() {
         let mut p = Popup::default();
         let mut v = Snapshot {
             step: Step::Manual,
@@ -105,6 +111,8 @@ mod tests {
         assert_eq!(p.update(&v, true, false), Change::Show(500, 650));
         v.step = Step::Password;
         assert_eq!(p.update(&v, false, false), Change::None);
-        assert!(p.manual());
+        assert!(!p.manual());
+        assert_eq!(p.update(&v, false, false), Change::Hide);
+        assert_eq!(p.update(&v, false, false), Change::None);
     }
 }

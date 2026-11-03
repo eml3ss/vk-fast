@@ -42,6 +42,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub back_option: bool,
     #[serde(default)]
+    pub open_page_available: bool,
+    #[serde(default)]
     pub width: u16,
     #[serde(default)]
     pub height: u16,
@@ -371,6 +373,24 @@ mod tests {
         assert!(c.take_command().is_none());
         c.publish(view(Step::Password, 4));
         assert_eq!(c.take_command().unwrap().value, "synthetic");
+    }
+
+    #[test]
+    fn slow_page_loading_does_not_discard_the_password_when_manual_help_is_offered() {
+        let c = Control::default();
+        c.publish(view(Step::Identifier, 1));
+        assert!(c.send_credentials("user@example.test".into(), "synthetic".into()));
+        c.take_command().unwrap();
+        for _ in 0..60 {
+            c.publish(Snapshot {
+                open_page_available: true,
+                ..view(Step::Loading, 2)
+            });
+            assert!(c.take_command().is_none());
+        }
+        c.publish(view(Step::Password, 3));
+        assert_eq!(c.take_command().unwrap().value, "synthetic");
+        assert!(c.state.lock().unwrap().credentials.is_none());
     }
 
     #[test]

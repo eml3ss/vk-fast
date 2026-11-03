@@ -11,7 +11,7 @@ function fixture(host='vk.ru',path='/') {
     }
     getAttribute(name){return this.attrs[name]??null;}
     getClientRects(){return this.hidden?[]:[this.getBoundingClientRect()];}
-    getBoundingClientRect(){return {width:320,height:364,x:0,y:0};}
+    getBoundingClientRect(){return this.rect||{width:320,height:364,x:0,y:0,left:0,top:0,right:320,bottom:364};}
     closest(selector){return selector==='form'?this.form:null;}
     querySelectorAll(selector){return select(selector,nodes.filter(n=>n.form===this));}
     click(){this.clicks++;this.onClick?.();}
@@ -38,9 +38,9 @@ function fixture(host='vk.ru',path='/') {
   for(const key of ['cookie','forms'])Object.defineProperty(document,key,{get(){throw Error('Sensitive DOM access');}});
   for(const key of ['localStorage','sessionStorage'])Object.defineProperty(window,key,{get(){throw Error('Browser storage access');}});
   const location={protocol:'https:',hostname:host,pathname:path,href:`https://${host}${path}?private=do-not-export`};
-  installAuthBridge({window,document,location,getComputedStyle:()=>({display:'block',visibility:'visible'}),HTMLInputElement:Input,Event:class{constructor(type){this.type=type}},setTimeout:(fn,delay=0)=>timers.push({fn,delay}),globalThis:{crypto:{randomUUID:()=>`fixture-${++documentNumber}`}},URL,now:()=>clock});
+  installAuthBridge({window,document,location,getComputedStyle:el=>({display:'block',visibility:'visible',opacity:'1',...el.style}),HTMLInputElement:Input,Event:class{constructor(type){this.type=type}},setTimeout:(fn,delay=0)=>timers.push({fn,delay}),globalThis:{crypto:{randomUUID:()=>`fixture-${++documentNumber}`}},URL,now:()=>clock});
   const tick=()=>{const timer=timers.shift();if(timer){clock+=timer.delay;timer.fn();}};
-  return {api:window.__vkFastAuth,Input,Element,values,set:list=>{nodes=list;},advance:ms=>{clock+=ms;},tick,flush(){while(timers.length)tick();}};
+  return {api:window.__vkFastAuth,Input,Element,values,set:list=>{nodes=list;},viewport:(width,height)=>{window.innerWidth=width;window.innerHeight=height;},advance:ms=>{clock+=ms;},tick,flush(){while(timers.length)tick();}};
 }
 function command(f,action,value=''){const s=f.api.snapshot();return {document:s.document,revision:s.revision,action,value};}
 {
@@ -132,5 +132,45 @@ function command(f,action,value=''){const s=f.api.snapshot();return {document:s.
  const f=fixture(),form=new f.Element('form',{name:'EnterPhoneOrMailForm'}),phone=new f.Input({type:'tel',name:'login'}),email=new f.Input({type:'text',autocomplete:'username'}),tab=new f.Element('button',{'data-test-id':'email-id'},'Email'),submit=new f.Element('button',{'data-test-id':'submit_btn',type:'submit'},'Sign in');
  phone.form=email.form=submit.form=form;email.hidden=true;tab.onClick=()=>{phone.hidden=true;email.hidden=false;};f.set([form,phone,email,tab,submit]);
  assert.equal(f.api.perform(command(f,'submit','user@example.test')),true);f.flush();assert.equal(f.values.get(email),'user@example.test');assert.equal(f.values.get(phone),undefined);assert.equal(submit.clicks,1);
+}
+{
+ for(const concealment of ['hidden-wrapper','aria-hidden','inert','transparent','offscreen']) {
+  const f=fixture('id.vk.ru','/auth');
+  const form=new f.Element('form'),wrapper=new f.Element('div');
+  const autofill=new f.Input({name:'username',autocomplete:'username'});
+  const field=new f.Input({type:'password',name:'password',autocomplete:'current-password'});
+  const submit=new f.Element('button',{type:'submit'},'Continue');
+  autofill.parentElement=wrapper;
+  autofill.form=field.form=submit.form=form;
+  if(concealment==='hidden-wrapper')wrapper.attrs.hidden='';
+  if(concealment==='aria-hidden')wrapper.attrs['aria-hidden']='true';
+  if(concealment==='inert')wrapper.inert=true;
+  if(concealment==='transparent')wrapper.style={opacity:'0'};
+  if(concealment==='offscreen')autofill.rect={width:320,height:30,left:-10000,top:0,right:-9680,bottom:30};
+  f.set([form,wrapper,autofill,field,submit]);
+  assert.equal(f.api.snapshot().step,'password',concealment+' must not turn the password screen into a mixed form');
+  assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);
+  f.flush();
+  assert.equal(f.values.get(autofill),undefined);
+  assert.equal(f.values.get(field),'synthetic-password');
+  assert.equal(submit.clicks,1);
+ }
+}
+{
+ const f=fixture('id.vk.ru','/auth'),field=new f.Input({type:'text',autocomplete:'current-password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+ f.set([field,submit]);
+ assert.equal(f.api.snapshot().step,'password','The website eye toggle must retain password semantics');
+ assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);f.flush();
+ assert.equal(submit.clicks,1);
+ const username=new f.Input({autocomplete:'username'});f.set([username,field,submit]);
+ assert.equal(f.api.snapshot().step,'manual','A genuinely visible mixed form remains unsupported');
+}
+{
+ const f=fixture('id.vk.ru','/auth'),widget=new f.Element('div',{'data-test-id':'captcha-widget'});
+ f.viewport(0,0);widget.rect={width:0,height:176,left:8,top:8,right:8,bottom:184};f.set([widget]);
+ assert.equal(f.api.snapshot().step,'captcha','Hidden WebKit has no viewport yet, but its CAPTCHA must still be shown');
+ assert.equal(f.api.perform(command(f,'submit','not-a-code')),false);
+ const hidden=new f.Element('div',{hidden:''});widget.parentElement=hidden;
+ assert.notEqual(f.api.snapshot().step,'captcha','An explicitly hidden widget remains hidden even before first show');
 }
 console.log('Offline login bridge contracts passed.');

@@ -337,7 +337,8 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                     }
                 }
             }
-            if matches!(view.step, Step::Captcha | Step::Manual)
+            if (matches!(view.step, Step::Captcha | Step::Manual)
+                || (view.step == Step::Loading && view.open_page_available))
                 && ui
                     .add_enabled_ui(!view.busy, |ui| {
                         ui.put(
@@ -361,7 +362,15 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 Step::Loading | Step::Entry | Step::Approval | Step::Finishing
             ) {
                 ui.put(
-                    rect(232.0, 24.0, 24.0),
+                    rect(
+                        if view.open_page_available {
+                            282.0
+                        } else {
+                            232.0
+                        },
+                        24.0,
+                        24.0,
+                    ),
                     egui::Spinner::new().size(24.0).color(theme::ACCENT),
                 );
             } else if view.busy && !view.error {

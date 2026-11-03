@@ -8,7 +8,22 @@ export function installAuthBridge({window, document, location, getComputedStyle,
   const documentId = globalThis.crypto?.randomUUID?.() || `doc-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const ids = new WeakMap(); let nextId=0, revision=0, signature='', formSignature='', pending=0, pendingSignature='', attempt=0;
   const id = node => { if (!node) return 0; if (!ids.has(node)) ids.set(node,++nextId); return ids.get(node); };
-  const visible = el => !!el && el.isConnected && el.getClientRects().length>0 && getComputedStyle(el).display!=='none' && getComputedStyle(el).visibility!=='hidden';
+  const visible = el => {
+    if(!el || !el.isConnected || !el.getClientRects().length)return false;
+    // VK keeps autofill username inputs inside a hidden wrapper on password
+    // screens. CSS can give those inputs a box; they are not another login step.
+    for(let node=el;node;node=node.parentElement) {
+      const style=getComputedStyle(node);
+      if(node.hidden || node.inert || node.getAttribute('hidden')!==null || node.getAttribute('aria-hidden')==='true'
+        || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || style.opacity==='0')return false;
+    }
+    const rect=el.getBoundingClientRect();
+    // Hidden WebKit windows can report a 0×0 viewport and zero-width block
+    // widgets. Semantic visibility still applies before the first native show.
+    if(window.innerWidth===0 || window.innerHeight===0)return true;
+    return rect.width>0 && rect.height>0 && rect.right>0 && rect.bottom>0
+      && (!window.innerWidth || rect.left<window.innerWidth) && (!window.innerHeight || rect.top<window.innerHeight);
+  };
   const all = (selector,scope=document) => Array.from(scope.querySelectorAll(selector)).filter(visible);
   const text = el => (el?.getAttribute('aria-label') || el?.innerText || el?.textContent || '').replace(/\s+/g,' ').trim();
   const byText = (re,scope=document,enabledOnly=false) => all('button,a,[role="button"]',scope).find(el=>re.test(text(el)) && (!enabledOnly || (!el.disabled && el.getAttribute('aria-disabled')!=='true')));
@@ -34,7 +49,7 @@ export function installAuthBridge({window, document, location, getComputedStyle,
     const entry=bySelector('[data-testid="enter-another-way"], [data-testid="add-another-account"]');
     const fields=all('input').filter(el=>!['hidden','search','checkbox','radio','button','submit'].includes(el.type));
     if(fields.some(el=>el.autocomplete==='new-password'))return {step:'manual',fields:[]};
-    const passwords=fields.filter(el=>el.type==='password');
+    const passwords=fields.filter(el=>el.type==='password' || el.autocomplete==='current-password');
     const code=fields.filter(el=>{
       const name=[el.name,el.id,el.autocomplete,el.getAttribute('aria-label'),el.getAttribute('placeholder')].join(' ');
       return !/country|dial.?code|prefix/i.test(name) && (/one-time-code|(?:^|[_ -])(?:otp|code|pin)(?:[_ -]|$)|код/i.test(name) || (el.inputMode==='numeric' && el.maxLength>=4 && el.maxLength<=8));
