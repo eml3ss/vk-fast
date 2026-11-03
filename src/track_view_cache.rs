@@ -29,6 +29,7 @@ impl Source {
 #[derive(Default)]
 struct Membership {
     source: Option<Source>,
+    owner: i64,
     first: HashMap<Key, (usize, Key)>,
     #[cfg(test)]
     builds: usize,
@@ -111,25 +112,32 @@ impl TrackViewCache {
         VisibleRows::Matching(cached.indices.clone())
     }
 
-    /// Preserve the original scan's FIRST matching row, including foreign rows.
-    /// Caller applies account/optimistic alias/removal rules to the returned key.
-    pub(super) fn library_key(&self, library: &[Track], track: &Track) -> Option<Key> {
+    /// Only exact audio IDs and explicitly confirmed owned-copy sources count.
+    /// Public track pages can group different versions and are not membership IDs.
+    pub(super) fn library_key(&self, library: &[Track], track: &Track, owner: i64) -> Option<Key> {
         let source = Source::new(library, self.revision.get());
         let mut cached = self.membership.borrow_mut();
-        if cached.source != Some(source) {
+        if cached.source != Some(source) || cached.owner != owner {
             cached.first.clear();
             for (position, saved) in library.iter().enumerate() {
-                for key in [Some(saved.key()), saved.release_key].into_iter().flatten() {
+                if saved.owner_id != owner {
+                    continue;
+                }
+                for key in [Some(saved.key()), saved.library_source_key]
+                    .into_iter()
+                    .flatten()
+                {
                     cached.first.entry(key).or_insert((position, saved.key()));
                 }
             }
             cached.source = Some(source);
+            cached.owner = owner;
             #[cfg(test)]
             {
                 cached.builds += 1;
             }
         }
-        [Some(track.key()), track.release_key]
+        [Some(track.key()), track.library_source_key]
             .into_iter()
             .flatten()
             .filter_map(|key| cached.first.get(&key))
@@ -142,53 +150,39 @@ impl TrackViewCache {
 mod tests {
     use super::*;
 
-    fn track(owner_id: i64, id: i64, release_key: Option<Key>) -> Track {
+    fn track(owner_id: i64, id: i64, library_source_key: Option<Key>) -> Track {
         Track {
             owner_id,
             id,
-            release_key,
+            library_source_key,
             ..crate::model::demo_tracks().remove(0)
         }
     }
 
-    fn original(library: &[Track], track: &Track) -> Option<Key> {
-        library
-            .iter()
-            .find(|saved| {
-                saved.key() == track.key()
-                    || saved.release_key == Some(track.key())
-                    || track.release_key == Some(saved.key())
-                    || (track.release_key.is_some() && saved.release_key == track.release_key)
-            })
-            .map(Track::key)
-    }
-
     #[test]
-    fn membership_matches_the_scan_for_all_identity_directions_and_first_foreign_row() {
+    fn membership_requires_exact_audio_or_confirmed_source_for_the_current_account() {
         let library = vec![
-            track(-200, 1, Some((-300, 5))),
+            track(-200, 1, None),
             track(42, 2, Some((-300, 5))),
             track(42, 3, None),
+            track(99, 4, Some((-300, 5))),
         ];
         let cache = TrackViewCache::default();
-        for query in [
-            track(-200, 1, None),
-            track(-300, 5, None),
-            track(-9, 8, Some((-300, 5))),
-            track(-9, 8, Some((42, 3))),
-            track(42, 3, None),
-            track(-9, 8, None),
+        for (query, expected) in [
+            (track(-200, 1, None), None),
+            (track(-300, 5, None), Some((42, 2))),
+            (track(42, 2, Some((-300, 5))), Some((42, 2))),
+            (track(42, 3, None), Some((42, 3))),
+            (track(-300, 6, None), None),
         ] {
-            assert_eq!(
-                cache.library_key(&library, &query),
-                original(&library, &query)
-            );
+            assert_eq!(cache.library_key(&library, &query, 42), expected);
         }
-        assert_eq!(
-            cache.library_key(&library, &track(42, 2, Some((-300, 5)))),
-            Some((-200, 1))
-        );
         assert_eq!(cache.membership.borrow().builds, 1);
+        assert_eq!(
+            cache.library_key(&library, &track(-300, 5, None), 99),
+            Some((99, 4))
+        );
+        assert_eq!(cache.membership.borrow().builds, 2);
     }
 
     #[test]
@@ -217,16 +211,16 @@ mod tests {
         let cache = TrackViewCache::default();
         assert_eq!(cache.visible(&tracks, "before").len(), 1);
         assert_eq!(
-            cache.library_key(&tracks, &track(-200, 9, None)),
+            cache.library_key(&tracks, &track(-200, 9, None), 42),
             Some((42, 1))
         );
         tracks[0] = track(42, 2, Some((-200, 10)));
         tracks[0].title = "After".into();
         cache.invalidate();
         assert!(cache.visible(&tracks, "before").is_empty());
-        assert_eq!(cache.library_key(&tracks, &track(-200, 9, None)), None);
+        assert_eq!(cache.library_key(&tracks, &track(-200, 9, None), 42), None);
         assert_eq!(
-            cache.library_key(&tracks, &track(-200, 10, None)),
+            cache.library_key(&tracks, &track(-200, 10, None), 42),
             Some((42, 2))
         );
         assert_eq!(cache.membership.borrow().builds, 2);
@@ -274,7 +268,7 @@ mod tests {
                 .len()
                 == 1
         );
-        assert_eq!(app.owned_library_key(&track(-200, 9, None)), None);
+        assert_eq!(app.owned_library_key(&track(-200, 9, None)), Some((42, 1)));
         assert_eq!(
             app.track_view_cache
                 .visible(&app.library.tracks, "beforeversion")
@@ -302,7 +296,8 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(app.owned_library_key(&track(-200, 10, None)), Some((42, 1)));
+        assert_eq!(app.owned_library_key(&track(-200, 10, None)), None);
+        assert_eq!(app.library.tracks[0].library_source_key, Some((-200, 9)));
         assert!(app.demo);
         assert!(
             app.session

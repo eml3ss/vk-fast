@@ -364,6 +364,7 @@ mod tests {
             }),
             library_liked: None,
             release_key: None,
+            library_source_key: None,
             unavailable: None,
         }
     }

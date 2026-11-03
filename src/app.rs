@@ -17,6 +17,9 @@ use zeroize::Zeroize;
 mod current_settings_tests;
 #[path = "discord_rpc_app.rs"]
 mod discord_rpc_app;
+#[cfg(test)]
+#[path = "library_membership_tests.rs"]
+mod library_membership_tests;
 #[path = "lyrics_app.rs"]
 mod lyrics_app;
 #[path = "playlist_actions.rs"]
@@ -908,10 +911,10 @@ impl Library {
         let received = page.items.len();
         self.total = page.count.or(self.total);
         self.offset = self.offset.saturating_add(received);
-        let availability: HashMap<_, _> = self
+        let known_metadata: HashMap<_, _> = self
             .tracks
             .iter()
-            .filter_map(|track| track.unavailable.map(|status| (track.key(), status)))
+            .map(|track| (track.key(), (track.unavailable, track.library_source_key)))
             .collect();
         let mut old = std::mem::take(&mut self.tracks);
         let tail = old.split_off(self.fresh_prefix.min(old.len()));
@@ -921,8 +924,9 @@ impl Library {
             .map(|(index, track)| (track.key(), index))
             .collect();
         for mut track in page.items {
-            if track.unavailable.is_none() {
-                track.unavailable = availability.get(&track.key()).copied();
+            if let Some((unavailable, source)) = known_metadata.get(&track.key()) {
+                track.unavailable = track.unavailable.or(*unavailable);
+                track.library_source_key = track.library_source_key.or(*source);
             }
             if let Some(index) = known.get(&track.key()).copied() {
                 old[index] = track;
@@ -4623,7 +4627,7 @@ impl MusicApp {
         let owner = self.session.as_ref()?.profile.id;
         if self.removed_from_library.contains(&track.key())
             || track
-                .release_key
+                .library_source_key
                 .is_some_and(|key| self.removed_from_library.contains(&key))
         {
             return None;
@@ -4633,7 +4637,7 @@ impl MusicApp {
             .copied()
             .or_else(|| {
                 self.track_view_cache
-                    .library_key(&self.library.tracks, track)
+                    .library_key(&self.library.tracks, track, owner)
             })
             .filter(|key| key.0 == owner)
     }
@@ -4644,7 +4648,7 @@ impl MusicApp {
         };
         if self.removed_from_library.contains(&track.key())
             || track
-                .release_key
+                .library_source_key
                 .is_some_and(|key| self.removed_from_library.contains(&key))
         {
             return false;
@@ -4659,9 +4663,8 @@ impl MusicApp {
         let liked = self.track_is_liked(track);
         let pending = self.like_request.as_ref().is_some_and(|request| {
             request.source.key() == track.key()
-                || request.source.release_key == Some(track.key())
-                || track.release_key == Some(request.source.key())
-                || (track.release_key.is_some() && request.source.release_key == track.release_key)
+                || request.source.library_source_key == Some(track.key())
+                || track.library_source_key == Some(request.source.key())
         });
         let response = icons::heart_button(
             ui,
@@ -4804,7 +4807,7 @@ impl MusicApp {
         self.library.tracks.retain(|track| {
             let remove = self.removed_from_library.contains(&track.key())
                 || track
-                    .release_key
+                    .library_source_key
                     .is_some_and(|key| self.removed_from_library.contains(&key));
             if remove && index < self.library.fresh_prefix {
                 removed_prefix += 1;
@@ -4817,13 +4820,13 @@ impl MusicApp {
 
     fn apply_library_change(&mut self, ctx: &egui::Context, source: &Track, change: LibraryChange) {
         let mut identities = HashSet::from([source.key()]);
-        identities.extend(source.release_key);
+        identities.extend(source.library_source_key);
         match change {
             LibraryChange::AlreadyAdded => {
                 self.update_known_tracks(|track| {
                     if identities.contains(&track.key())
                         || track
-                            .release_key
+                            .library_source_key
                             .is_some_and(|key| identities.contains(&key))
                     {
                         track.library_liked = Some(true);
@@ -4836,12 +4839,23 @@ impl MusicApp {
                     self.like_aliases.insert(*key, owned);
                     self.removed_from_library.remove(key);
                 }
-                if !self.library.tracks.iter().any(|track| track.key() == owned) {
+                let confirmed_source = source
+                    .library_source_key
+                    .or_else(|| (source.key() != owned).then_some(source.key()));
+                if let Some(saved) = self
+                    .library
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.key() == owned)
+                {
+                    saved.library_source_key = confirmed_source;
+                } else {
                     let mut saved = source.clone();
                     saved.owner_id = owned.0;
                     saved.id = owned.1;
                     saved.url = None;
                     saved.library_liked = Some(true);
+                    saved.library_source_key = confirmed_source;
                     saved.release_key = source
                         .release_key
                         .or_else(|| (source.key() != owned).then_some(source.key()));
@@ -4851,7 +4865,7 @@ impl MusicApp {
                 self.update_known_tracks(|track| {
                     if identities.contains(&track.key())
                         || track
-                            .release_key
+                            .library_source_key
                             .is_some_and(|key| identities.contains(&key))
                     {
                         track.library_liked = Some(true);
@@ -4865,7 +4879,7 @@ impl MusicApp {
                 }
                 for track in &self.library.tracks {
                     if identities.contains(&track.key()) {
-                        identities.extend(track.release_key);
+                        identities.extend(track.library_source_key);
                     }
                 }
                 for (alias, saved) in &self.like_aliases {
@@ -4887,7 +4901,7 @@ impl MusicApp {
                 self.update_known_tracks(|track| {
                     if identities.contains(&track.key())
                         || track
-                            .release_key
+                            .library_source_key
                             .is_some_and(|key| identities.contains(&key))
                     {
                         track.library_liked = Some(false);
@@ -5036,12 +5050,14 @@ impl MusicApp {
             }
             if let Some(native_liked) = metadata.library_liked {
                 let liked = if removed.contains(&track.key())
-                    || track.release_key.is_some_and(|key| removed.contains(&key))
+                    || track
+                        .library_source_key
+                        .is_some_and(|key| removed.contains(&key))
                 {
                     false
                 } else if added.contains_key(&track.key())
                     || track
-                        .release_key
+                        .library_source_key
                         .is_some_and(|key| added.contains_key(&key))
                 {
                     true
@@ -8328,6 +8344,7 @@ mod tests {
                     album: None,
                     library_liked: None,
                     release_key: None,
+                    library_source_key: None,
                 });
                 for position in [0.0_f64, 599.0, 600.0] {
                     // The player is stopped and has no device/source. This
@@ -8757,6 +8774,7 @@ mod tests {
                             album: None,
                             library_liked: None,
                             release_key: None,
+                            library_source_key: None,
                         })
                         .collect();
                     app.library.total = Some(0); // The old counter showed N of 0.
@@ -9843,6 +9861,7 @@ mod tests {
                     album: None,
                     library_liked: None,
                     release_key: None,
+                    library_source_key: None,
                 };
                 app.library.tracks = [1, 2, 3]
                     .into_iter()
@@ -10781,6 +10800,7 @@ mod tests {
                     album: None,
                     library_liked: None,
                     release_key: None,
+                    library_source_key: None,
                 })
                 .collect(),
         }
@@ -11003,16 +11023,18 @@ mod tests {
     }
 
     #[test]
-    fn hearts_recover_membership_by_exact_release_identity_and_preserve_explicit_unliked_history() {
+    fn hearts_recover_confirmed_source_identity_and_preserve_explicit_unliked_history() {
         let ctx = egui::Context::default();
         let mut app = search_test_app(&ctx);
         let mut owned = like_test_page(1, &[1]).items.remove(0);
         owned.release_key = Some((-6, 99));
+        owned.library_source_key = Some((-6, 99));
         app.library.tracks = vec![owned.clone()];
         let mut source = owned.clone();
         source.owner_id = -6;
         source.id = 99;
         source.release_key = None;
+        source.library_source_key = None;
         assert_eq!(app.owned_library_key(&source), Some(owned.key()));
         assert!(app.track_is_liked(&source));
         let mut unrelated = source.clone();

@@ -130,8 +130,11 @@ pub struct Track {
     pub album: Option<AlbumRef>,
     /// VK's explicit My Music membership; absence means it was not supplied.
     pub library_liked: Option<bool>,
-    /// Canonical release audio identity, separate from an account's saved copy.
+    /// Public track-page identity; multiple audio versions can share this page.
     pub release_key: Option<(i64, i64)>,
+    /// Exact source of an owned copy, confirmed by a successful library action.
+    /// Never inferred from a title or public track-page identity.
+    pub library_source_key: Option<(i64, i64)>,
     /// Explicit VK restriction state. Missing stream URLs are not evidence.
     pub unavailable: Option<bool>,
 }
@@ -504,6 +507,7 @@ impl From<TrackWire> for Track {
             album,
             library_liked,
             release_key,
+            library_source_key: None,
             unavailable,
         }
     }
@@ -688,6 +692,7 @@ pub fn demo_tracks() -> Vec<Track> {
         album: None,
         library_liked: None,
         release_key: None,
+        library_source_key: None,
         unavailable: None,
     })
     .collect()

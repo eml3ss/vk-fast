@@ -4374,6 +4374,7 @@ fn parse_track(value: &Value) -> Result<Track, WebAudioError> {
         album: album_from_object(metadata),
         library_liked: library_liked_from_object(metadata),
         release_key: release_key_from_object(metadata),
+        library_source_key: None,
         unavailable: if let Some(row) = value.as_array() {
             audio_unavailable_from_fields(row.get(21), None, row.get(10), None, None)
         } else {

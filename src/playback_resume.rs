@@ -194,6 +194,7 @@ mod tests {
                 }),
                 library_liked: Some(false),
                 release_key: Some((-7, 8)),
+                library_source_key: None,
                 unavailable: None,
             },
         }

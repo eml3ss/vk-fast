@@ -18,6 +18,9 @@ const FORMAT_VERSION: u8 = 1;
 // Before this revision generic stream-resolution failures were persisted as
 // rights restrictions. Keep their track metadata, but discard that evidence.
 const AVAILABILITY_REVISION: u8 = 2;
+// Older positive flags could have spread through a shared public track page.
+// Refresh those flags, retaining metadata and explicit removals from history.
+const MEMBERSHIP_REVISION: u8 = 1;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TRACKS: usize = 50_000;
 const MAX_TEXT: usize = 4096;
@@ -87,6 +90,10 @@ struct StoredTrack {
     #[serde(default)]
     release_key: Option<(i64, i64)>,
     #[serde(default)]
+    library_source_key: Option<(i64, i64)>,
+    #[serde(default)]
+    membership_revision: Option<u8>,
+    #[serde(default)]
     unavailable: Option<bool>,
     #[serde(default)]
     availability_revision: Option<u8>,
@@ -135,6 +142,10 @@ struct BorrowedTrack<'a> {
     library_liked: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     release_key: Option<(i64, i64)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    library_source_key: Option<(i64, i64)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    membership_revision: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,6 +340,9 @@ pub(crate) fn encode_bounded(
                 )
             })
             || track.release_key.is_some_and(|key| !valid_release_key(key))
+            || track
+                .library_source_key
+                .is_some_and(|key| !valid_release_key(key))
         {
             return Err(invalid());
         }
@@ -350,6 +364,10 @@ pub(crate) fn encode_bounded(
                 }),
                 library_liked: track.library_liked,
                 release_key: track.release_key,
+                library_source_key: track.library_source_key,
+                membership_revision: (track.library_liked.is_some()
+                    || track.library_source_key.is_some())
+                .then_some(MEMBERSHIP_REVISION),
                 unavailable: track.unavailable,
                 availability_revision: track.unavailable.map(|_| AVAILABILITY_REVISION),
             });
@@ -482,6 +500,9 @@ pub(crate) fn decode_bounded(
                 )
             })
             || track.release_key.is_some_and(|key| !valid_release_key(key))
+            || track
+                .library_source_key
+                .is_some_and(|key| !valid_release_key(key))
         {
             return Err(invalid());
         }
@@ -510,8 +531,13 @@ pub(crate) fn decode_bounded(
                     access_key: None,
                     cover_url: album.cover_url.as_deref().and_then(valid_cover_url),
                 }),
-                library_liked: track.library_liked,
+                library_liked: track.library_liked.filter(|liked| {
+                    !liked || track.membership_revision == Some(MEMBERSHIP_REVISION)
+                }),
                 release_key: track.release_key,
+                library_source_key: track
+                    .library_source_key
+                    .filter(|_| track.membership_revision == Some(MEMBERSHIP_REVISION)),
                 unavailable: track
                     .unavailable
                     .filter(|_| track.availability_revision == Some(AVAILABILITY_REVISION)),
@@ -666,6 +692,7 @@ mod tests {
             album: None,
             library_liked: None,
             release_key: None,
+            library_source_key: None,
             unavailable: None,
         }
     }
@@ -822,6 +849,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_positive_flags_are_rechecked_without_losing_metadata_or_explicit_removals() {
+        let mut removed = track(901);
+        removed.owner_id = 42;
+        removed.library_liked = Some(false);
+        removed.library_source_key = Some((-7, 81));
+        let mut old_positive = track(8);
+        old_positive.library_liked = Some(true);
+        old_positive.release_key = Some((-7, 80));
+        let bytes = encode_bounded(42, &[removed, old_positive], MAX_BYTES, MAX_TRACKS).unwrap();
+        let mut stored: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for row in stored["tracks"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("membership_revision");
+        }
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let restored = decode_bounded(&bytes, 42, MAX_BYTES, MAX_TRACKS).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].library_liked, Some(false));
+        assert_eq!(restored[0].library_source_key, None);
+        assert_eq!(restored[1].library_liked, None);
+        assert_eq!(restored[1].release_key, Some((-7, 80)));
+        assert_eq!(restored[1].title, "Track 8");
+    }
+
+    #[test]
     fn explicit_likes_and_release_identity_survive_restart_without_credentials() {
         let fixture = Fixture::new();
         let path = fixture.path(42);
@@ -829,6 +880,7 @@ mod tests {
         unliked_own_copy.owner_id = 42;
         unliked_own_copy.library_liked = Some(false);
         unliked_own_copy.release_key = Some((-7, 8));
+        unliked_own_copy.library_source_key = Some((-7, 80));
         unliked_own_copy.album = Some(AlbumRef {
             id: 9,
             owner_id: -7,
@@ -852,6 +904,7 @@ mod tests {
         let restored = load_at(&path, 42).unwrap().unwrap();
         assert_eq!(restored[0].key(), (42, 901));
         assert_eq!(restored[0].library_liked, Some(false));
+        assert_eq!(restored[0].library_source_key, Some((-7, 80)));
         assert_eq!(restored[1].library_liked, Some(true));
         assert_eq!(restored[0].release_key, restored[1].release_key);
         assert_eq!(restored[2].library_liked, None);
@@ -867,11 +920,13 @@ mod tests {
             .unwrap();
         assert_eq!(recent[0].library_liked, Some(false));
         assert_eq!(recent[0].release_key, Some((-7, 8)));
+        assert_eq!(recent[0].library_source_key, Some((-7, 80)));
 
         let mut old = stored;
         for row in old["tracks"].as_array_mut().unwrap() {
             row.as_object_mut().unwrap().remove("library_liked");
             row.as_object_mut().unwrap().remove("release_key");
+            row.as_object_mut().unwrap().remove("library_source_key");
         }
         fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         let old_rows = load_at(&path, 42).unwrap().unwrap();
