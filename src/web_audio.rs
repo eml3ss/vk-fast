@@ -31,8 +31,10 @@ use crate::{
     web_session::SessionCookie,
 };
 
+mod owner_page;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
+pub use owner_page::OwnerPage;
 pub use playlist_manage::{
     PLAYLIST_DESCRIPTION_MAX_CHARS, PlaylistCoverChange, PlaylistEditDetails, PlaylistEditUpdate,
 };

@@ -22,6 +22,9 @@ mod discord_rpc_app;
 mod library_membership_tests;
 #[path = "lyrics_app.rs"]
 mod lyrics_app;
+#[cfg(test)]
+#[path = "owner_page_tests.rs"]
+mod owner_page_tests;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
 #[path = "queue_app.rs"]
@@ -339,6 +342,7 @@ enum MusicPage {
     Artist(ArtistRef),
     Album(AlbumRef),
     Playlist(AlbumRef),
+    Owner(crate::web_audio::PlaylistCreator),
     TrackAlbum((i64, i64), String),
 }
 
@@ -355,6 +359,7 @@ impl MusicPage {
                 Some(format!("playlist:{}_{}", playlist.owner_id, playlist.id))
             }
             Self::TrackAlbum(key, _) => Some(format!("track-album:{}_{}", key.0, key.1)),
+            Self::Owner(creator) => Some(format!("owner:{}", creator.owner_id)),
             _ => None,
         }
     }
@@ -365,6 +370,7 @@ enum DetailPage {
     Artist(crate::web_audio::ArtistPage),
     Album(crate::web_audio::AlbumPage),
     Playlist(crate::web_audio::AlbumPage),
+    Owner(crate::web_audio::OwnerPage),
 }
 
 impl DetailPage {
@@ -372,6 +378,7 @@ impl DetailPage {
         match self {
             Self::Artist(page) => &page.tracks,
             Self::Album(page) | Self::Playlist(page) => &page.tracks,
+            Self::Owner(_) => &[],
         }
     }
 }
@@ -2021,6 +2028,7 @@ impl MusicApp {
             MusicPage::Artist(_)
             | MusicPage::Album(_)
             | MusicPage::Playlist(_)
+            | MusicPage::Owner(_)
             | MusicPage::TrackAlbum(_, _) => self.page.detail_key().unwrap_or_default(),
             MusicPage::Home | MusicPage::Library => "library".into(),
         }
@@ -3358,6 +3366,7 @@ impl MusicApp {
             MusicPage::Artist(_)
             | MusicPage::Album(_)
             | MusicPage::Playlist(_)
+            | MusicPage::Owner(_)
             | MusicPage::TrackAlbum(_, _) => self
                 .page
                 .detail_key()
@@ -4781,6 +4790,7 @@ impl MusicApp {
             let tracks = match Arc::make_mut(page) {
                 DetailPage::Artist(page) => &mut page.tracks,
                 DetailPage::Album(page) | DetailPage::Playlist(page) => &mut page.tracks,
+                DetailPage::Owner(_) => continue,
             };
             for track in tracks {
                 update(track);
@@ -5099,6 +5109,7 @@ impl MusicApp {
             let tracks = match Arc::make_mut(page) {
                 DetailPage::Artist(page) => &mut page.tracks,
                 DetailPage::Album(page) | DetailPage::Playlist(page) => &mut page.tracks,
+                DetailPage::Owner(_) => continue,
             };
             for track in tracks {
                 enrich(track);
@@ -5160,6 +5171,9 @@ impl MusicApp {
                     MusicPage::Playlist(playlist) => client
                         .album_page(owner, &playlist, &worker_cancel)
                         .map(DetailPage::Playlist),
+                    MusicPage::Owner(creator) => client
+                        .owner_page(owner, &creator, 0, &worker_cancel)
+                        .map(DetailPage::Owner),
                     MusicPage::TrackAlbum(key, _) => client
                         .track_metadata(owner, key, &worker_cancel)
                         .and_then(|track| track.album.ok_or(WebAudioError::NoAlbum))
@@ -5206,6 +5220,25 @@ impl MusicApp {
         }
         match result {
             Ok(mut page) => {
+                if let DetailPage::Owner(batch) = &mut page {
+                    if batch.offset > 0 {
+                        if let Some(cached) = self.details.get_mut(&request.key)
+                            && let DetailPage::Owner(cached) = Arc::make_mut(cached)
+                        {
+                            cached.append(batch.clone());
+                        }
+                        ctx.request_repaint();
+                        return;
+                    }
+                    if batch.playlists_error.is_some()
+                        && let Some(cached) = self.details.get(&request.key)
+                        && let DetailPage::Owner(cached) = cached.as_ref()
+                    {
+                        batch.playlists = cached.playlists.clone();
+                        batch.total = cached.total;
+                        batch.next_offset = cached.next_offset;
+                    }
+                }
                 if let DetailPage::Artist(fresh) = &mut page
                     && fresh.releases_error.is_some()
                     && let Some(old) = self.details.get(&request.key)
@@ -5350,6 +5383,10 @@ impl MusicApp {
         let loading = self.detail_request.is_some();
         if let Some(error) = &self.detail_error {
             ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language));
+        }
+        if let MusicPage::Owner(creator) = &page {
+            self.owner_content(ui, creator);
+            return;
         }
         let stored = page
             .detail_key()
@@ -5579,12 +5616,8 @@ impl MusicApp {
             Some(detail_ui::Action::OpenAlbum(album)) => {
                 self.navigate_music(&ctx, MusicPage::Album(album))
             }
-            Some(detail_ui::Action::OpenCreator(owner_id)) if owner_id != 0 => {
-                let kind = if owner_id > 0 { "id" } else { "club" };
-                ctx.open_url(egui::OpenUrl::new_tab(format!(
-                    "https://vk.ru/{kind}{}",
-                    owner_id.unsigned_abs()
-                )));
+            Some(detail_ui::Action::OpenCreator(creator)) if creator.owner_id != 0 => {
+                self.navigate_music(&ctx, MusicPage::Owner(creator));
             }
             Some(detail_ui::Action::Play) if playing => self.toggle_playback(&ctx),
             Some(detail_ui::Action::Play | detail_ui::Action::Shuffle) if !tracks.is_empty() => {
@@ -5597,6 +5630,94 @@ impl MusicApp {
                 self.start_queue(&ctx, tracks.to_vec());
             }
             _ => {}
+        }
+    }
+
+    fn owner_content(&mut self, ui: &mut egui::Ui, creator: &crate::web_audio::PlaylistCreator) {
+        let stored = self
+            .page
+            .detail_key()
+            .and_then(|key| self.details.get(&key))
+            .cloned();
+        let page = stored.as_deref().and_then(|page| match page {
+            DetailPage::Owner(page) => Some(page),
+            _ => None,
+        });
+        let action = crate::owner_ui::show(
+            ui,
+            &mut self.covers,
+            self.language,
+            creator,
+            page,
+            self.detail_request.is_some(),
+        );
+        let ctx = ui.ctx().clone();
+        match action {
+            Some(crate::owner_ui::Action::OpenPlaylist(playlist)) => {
+                self.navigate_music(&ctx, MusicPage::Playlist(playlist))
+            }
+            Some(crate::owner_ui::Action::More) if self.detail_error.is_none() => {
+                self.load_more_owner(&ctx)
+            }
+            Some(crate::owner_ui::Action::Retry) => {
+                if page.is_some_and(|page| {
+                    page.retry_offset
+                        .is_some_and(|offset| offset > 0 && page.next_offset == Some(offset))
+                }) {
+                    self.load_more_owner(&ctx);
+                } else {
+                    self.ensure_detail(&ctx, true);
+                }
+            }
+            Some(crate::owner_ui::Action::More) | None => {}
+        }
+    }
+
+    fn load_more_owner(&mut self, ctx: &egui::Context) {
+        if self.detail_request.is_some() || self.settings_open {
+            return;
+        }
+        let MusicPage::Owner(creator) = self.page.clone() else {
+            return;
+        };
+        let key = self.page.detail_key().expect("Owner page identity");
+        let Some(DetailPage::Owner(page)) = self.details.get(&key).map(Arc::as_ref) else {
+            return;
+        };
+        let Some(offset) = page.next_offset else {
+            return;
+        };
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        self.detail_error = None;
+        match thread::Builder::new()
+            .name("vk-owner-playlists".into())
+            .spawn(move || {
+                let result = client
+                    .owner_page(owner, &creator, offset, &worker_cancel)
+                    .map(DetailPage::Owner);
+                let _ = sender.send(result);
+                ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.detail_request = Some(DetailRequest {
+                    owner,
+                    key,
+                    canceled,
+                    receiver,
+                });
+            }
+            Err(_) => self.detail_error = Some(WebAudioError::Network),
         }
     }
 
@@ -12945,6 +13066,25 @@ mod tests {
         let creator = account_ui_text_rect(&output, "Creator group")
             .unwrap()
             .center();
+        let publisher = crate::web_audio::PlaylistCreator {
+            owner_id: -99,
+            name: "Creator group".into(),
+        };
+        app.details.insert(
+            MusicPage::Owner(publisher.clone()).detail_key().unwrap(),
+            Arc::new(DetailPage::Owner(crate::web_audio::OwnerPage {
+                creator: publisher.clone(),
+                image_url: None,
+                description: None,
+                unavailable: false,
+                playlists: Vec::new(),
+                total: Some(0),
+                offset: 0,
+                next_offset: None,
+                playlists_error: None,
+                retry_offset: None,
+            })),
+        );
         account_ui_frame(
             &ctx,
             &mut app,
@@ -12959,16 +13099,11 @@ mod tests {
             &mut frame,
             seek_pointer(creator, false),
         );
-        assert!(
-            released
-                .platform_output
-                .commands
-                .iter()
-                .any(|command| matches!(command,
-            egui::OutputCommand::OpenUrl(url) if url.url=="https://vk.ru/club99"))
-        );
-        assert!(matches!(&app.page, MusicPage::Playlist(found) if *found==reference));
+        assert!(released.platform_output.commands.is_empty());
+        assert!(app.page == MusicPage::Owner(publisher));
         assert_eq!(app.playing.as_ref().unwrap().id, 88);
+        app.go_back(&ctx);
+        assert!(matches!(&app.page, MusicPage::Playlist(found) if *found==reference));
         app.prepare_view_queue();
         assert_eq!(
             app.play_queue

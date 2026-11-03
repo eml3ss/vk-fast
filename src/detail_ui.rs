@@ -39,7 +39,7 @@ pub enum Action {
     Shuffle,
     OpenAlbum(AlbumRef),
     OpenArtist(ArtistRef),
-    OpenCreator(i64),
+    OpenCreator(crate::web_audio::PlaylistCreator),
     EditPlaylist,
     ReloadReleases,
 }
@@ -314,9 +314,9 @@ fn playlist_creator(
     });
     let clicked = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(language.text("Открыть создателя в VK", "Open creator in VK"))
+        .on_hover_text(language.text("Открыть страницу владельца", "Open owner page"))
         .clicked();
-    clicked.then_some(Action::OpenCreator(creator.owner_id))
+    clicked.then_some(Action::OpenCreator(creator.clone()))
 }
 
 fn collection_header(
@@ -739,7 +739,7 @@ fn backdrop(color: Option<Color32>) -> (Color32, Color32) {
     (tint(0.23), tint(0.07))
 }
 
-fn background(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
+pub(crate) fn background(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
     let (left, right) = backdrop(color);
     for step in 0..32 {
         let fraction = step as f32 / 31.0;
@@ -1034,7 +1034,13 @@ mod tests {
                 for (tick, target) in [(4, name.center()), (8, arrow.center())] {
                     render(tick, pointer(target, true));
                     let (_, action) = render(tick + 1, pointer(target, false));
-                    assert_eq!(action, Some(Action::OpenCreator(owner)));
+                    assert_eq!(
+                        action,
+                        Some(Action::OpenCreator(crate::web_audio::PlaylistCreator {
+                            owner_id: owner,
+                            name: "Cynthoni".into()
+                        }))
+                    );
                 }
             }
         }

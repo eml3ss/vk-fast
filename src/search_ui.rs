@@ -420,7 +420,7 @@ pub fn playlist_results(
     action
 }
 
-fn playlist_caption(language: Language, playlist: &UserPlaylist) -> String {
+pub(crate) fn playlist_caption(language: Language, playlist: &UserPlaylist) -> String {
     let kind = language.text("Плейлист", "Playlist");
     if let Some(count) = playlist.track_count {
         let noun = match language {

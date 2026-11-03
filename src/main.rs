@@ -31,6 +31,7 @@ mod lyrics;
 mod lyrics_ui;
 mod model;
 mod music_session_store;
+mod owner_ui;
 mod play_order;
 mod playback;
 mod playback_modes;
