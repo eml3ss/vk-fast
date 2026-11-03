@@ -1,4 +1,4 @@
-//! Global restored window dimensions, independent of account and audio caches.
+//! Global restored window geometry, independent of account and audio caches.
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -15,6 +15,8 @@ static WRITES: Mutex<()> = Mutex::new(());
 pub struct SavedWindow {
     pub size: [f32; 2],
     pub maximized: bool,
+    /// Outer position in physical desktop pixels; negative monitor origins are valid.
+    pub position_pixels: Option<[i32; 2]>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -23,6 +25,8 @@ struct StoredWindow {
     format_version: u8,
     size: [f32; 2],
     maximized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position_pixels: Option<[i32; 2]>,
 }
 
 fn invalid() -> io::Error {
@@ -33,6 +37,11 @@ fn valid(window: SavedWindow) -> bool {
     window.size.iter().all(|value| value.is_finite())
         && (320.0..=16384.0).contains(&window.size[0])
         && (240.0..=16384.0).contains(&window.size[1])
+        && window.position_pixels.is_none_or(|position| {
+            position
+                .iter()
+                .all(|value| (-1_000_000..=1_000_000).contains(value))
+        })
 }
 
 #[cfg_attr(test, allow(dead_code))] // Unit tests use isolated paths, not the user's config.
@@ -126,6 +135,7 @@ fn load_from(path: &Path) -> io::Result<Option<SavedWindow>> {
     let window = SavedWindow {
         size: stored.size,
         maximized: stored.maximized,
+        position_pixels: stored.position_pixels,
     };
     if stored.format_version != 1 || !valid(window) {
         return Err(invalid());
@@ -153,6 +163,7 @@ fn save_to(path: &Path, window: SavedWindow) -> io::Result<()> {
         format_version: 1,
         size: window.size,
         maximized: window.maximized,
+        position_pixels: window.position_pixels,
     })
     .map_err(|_| invalid())?;
     if bytes.len() as u64 > MAX_BYTES {
@@ -221,14 +232,43 @@ mod tests {
             let window = SavedWindow {
                 size: [1184.5, 742.25],
                 maximized,
+                position_pixels: Some([-1680, 120]),
             };
             save_to(&path, window).unwrap();
             assert_eq!(load_from(&path).unwrap(), Some(window));
         }
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["format_version"], 1);
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn older_size_only_files_load_and_invalid_positions_do_not_replace_them() {
+        let directory = Directory::new();
+        let path = directory.path();
+        let old = SavedWindow {
+            size: [1040.0, 720.0],
+            maximized: true,
+            position_pixels: None,
+        };
+        save_to(&path, old).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&before).contains("position_pixels"));
+        assert_eq!(load_from(&path).unwrap(), Some(old));
+        for position in [[i32::MIN, 0], [0, i32::MAX], [1_000_001, 0]] {
+            assert!(
+                save_to(
+                    &path,
+                    SavedWindow {
+                        position_pixels: Some(position),
+                        ..old
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
     }
 
     #[test]
@@ -238,6 +278,7 @@ mod tests {
         let saved = SavedWindow {
             size: [1040.0, 720.0],
             maximized: false,
+            position_pixels: None,
         };
         save_to(&path, saved).unwrap();
         let before = fs::read(&path).unwrap();
@@ -254,7 +295,8 @@ mod tests {
                     &path,
                     SavedWindow {
                         size,
-                        maximized: true
+                        maximized: true,
+                        position_pixels: None,
                     }
                 )
                 .is_err()
@@ -273,6 +315,7 @@ mod tests {
             SavedWindow {
                 size: [800.0, 540.0],
                 maximized: true,
+                position_pixels: None,
             },
         )
         .unwrap();
@@ -298,6 +341,7 @@ mod tests {
         let saved = SavedWindow {
             size: [900.0, 600.0],
             maximized: false,
+            position_pixels: None,
         };
         save_to(&path, saved).unwrap();
         assert_eq!(

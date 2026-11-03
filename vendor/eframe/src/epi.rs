@@ -366,6 +366,11 @@ pub struct NativeOptions {
     /// Wayland desktop currently not supported.
     pub centered: bool,
 
+    /// Restored root outer position in physical desktop pixels (Windows Glow).
+    /// Applied while hidden, clamped to connected monitors, before maximization.
+    #[cfg(target_os = "windows")]
+    pub window_position_pixels: Option<[i32; 2]>,
+
     /// Configures glow instance.
     #[cfg(feature = "glow")]
     pub glow_options: egui_glow::GlowConfiguration,
@@ -452,6 +457,9 @@ impl Default for NativeOptions {
             window_builder: None,
 
             centered: false,
+
+            #[cfg(target_os = "windows")]
+            window_position_pixels: None,
 
             #[cfg(feature = "glow")]
             glow_options: egui_glow::GlowConfiguration::default(),

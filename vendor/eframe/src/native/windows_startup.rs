@@ -9,7 +9,7 @@ pub(super) fn construction_builder(requested: &ViewportBuilder) -> ViewportBuild
 
 trait Target {
     fn cloak(&mut self, enabled: bool) -> std::io::Result<()>;
-    fn apply_restored(&mut self, builder: &ViewportBuilder);
+    fn apply_restored(&mut self, builder: &ViewportBuilder, position_pixels: Option<[i32; 2]>);
     fn maximize(&mut self);
     fn hide(&mut self);
 }
@@ -17,6 +17,7 @@ trait Target {
 fn prepare(
     target: &mut impl Target,
     requested: &ViewportBuilder,
+    position_pixels: Option<[i32; 2]>,
     owned: &mut bool,
 ) -> std::io::Result<()> {
     let maximize = requested.maximized == Some(true);
@@ -28,12 +29,76 @@ fn prepare(
     // these normal dimensions back into an already maximized native window.
     let mut restored = requested.clone();
     restored.maximized = None;
-    target.apply_restored(&restored);
+    target.apply_restored(&restored, position_pixels);
     if maximize {
         target.maximize();
         target.hide();
     }
     Ok(())
+}
+
+struct Monitor {
+    bounds: egui::Rect,
+    pixels_per_point: f32,
+}
+
+/// Monitors are supplied primary-first. Keep desktop coordinates in physical
+/// pixels, including negative origins, rather than mixing per-monitor DPI units.
+fn clamp_position(
+    position: [i32; 2],
+    size_points: egui::Vec2,
+    monitors: &[Monitor],
+) -> Option<[i32; 2]> {
+    if !size_points.is_finite() || size_points.min_elem() <= 0.0 {
+        return None;
+    }
+    let position = egui::pos2(position[0] as f32, position[1] as f32);
+    let mut selected = None;
+    let mut most_overlap = 0.0;
+    for monitor in monitors {
+        if !monitor.bounds.is_finite()
+            || monitor.bounds.size().min_elem() <= 0.0
+            || !monitor.pixels_per_point.is_finite()
+            || monitor.pixels_per_point <= 0.0
+        {
+            continue;
+        }
+        let window = egui::Rect::from_min_size(position, size_points * monitor.pixels_per_point);
+        let overlap = window
+            .intersect(monitor.bounds)
+            .size()
+            .max(egui::Vec2::ZERO);
+        let area = overlap.x * overlap.y;
+        if selected.is_none() || area > most_overlap {
+            selected = Some(monitor);
+            most_overlap = area;
+        }
+    }
+    let monitor = selected?;
+    let size_pixels = size_points * monitor.pixels_per_point;
+    let caption = egui::Rect::from_min_size(
+        position,
+        egui::vec2(
+            size_pixels.x - 1.0,
+            (32.0 * monitor.pixels_per_point).min(size_pixels.y) - 1.0,
+        ),
+    );
+    // Preserve intentional placement spanning adjacent displays. A window only
+    // needs recovery when its top controls would be outside the desktop.
+    if [
+        caption.left_top(),
+        caption.right_top(),
+        caption.left_bottom(),
+        caption.right_bottom(),
+    ]
+    .iter()
+    .all(|point| monitors.iter().any(|screen| screen.bounds.contains(*point)))
+    {
+        return Some([position.x.round() as i32, position.y.round() as i32]);
+    }
+    let room = (monitor.bounds.size() - size_pixels).max(egui::Vec2::ZERO);
+    let position = position.clamp(monitor.bounds.min, monitor.bounds.min + room);
+    Some([position.x.round() as i32, position.y.round() as i32])
 }
 
 fn release_cloak(
@@ -93,8 +158,56 @@ mod native {
         fn cloak(&mut self, enabled: bool) -> io::Result<()> {
             cloak(self.window, enabled)
         }
-        fn apply_restored(&mut self, builder: &ViewportBuilder) {
-            egui_winit::apply_viewport_builder_to_window(self.ctx, self.window, builder);
+        fn apply_restored(&mut self, builder: &ViewportBuilder, position_pixels: Option<[i32; 2]>) {
+            let mut builder = builder.clone();
+            let mut restored_position = None;
+            if let Some(position) = position_pixels {
+                let zoom = self.ctx.zoom_factor();
+                let scale = self.window.scale_factor() as f32 * zoom;
+                let inner = self.window.inner_size();
+                let outer = self.window.outer_size();
+                let frame = egui::vec2(
+                    outer.width.saturating_sub(inner.width) as f32,
+                    outer.height.saturating_sub(inner.height) as f32,
+                ) / scale;
+                let size = builder
+                    .inner_size
+                    .unwrap_or_else(|| egui::vec2(inner.width as f32, inner.height as f32) / scale)
+                    + frame;
+                let monitors: Vec<_> = self
+                    .window
+                    .primary_monitor()
+                    .into_iter()
+                    .chain(self.window.available_monitors())
+                    .map(|monitor| {
+                        let origin = monitor.position();
+                        let size = monitor.size();
+                        Monitor {
+                            bounds: egui::Rect::from_min_size(
+                                egui::pos2(origin.x as f32, origin.y as f32),
+                                egui::vec2(size.width as f32, size.height as f32),
+                            ),
+                            pixels_per_point: monitor.scale_factor() as f32 * zoom,
+                        }
+                    })
+                    .collect();
+                if let Some([x, y]) = clamp_position(position, size, &monitors) {
+                    // Moving first lets WM_DPICHANGED select the destination
+                    // DPI before the normal client dimensions are reapplied.
+                    self.window
+                        .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                    restored_position = Some(winit::dpi::PhysicalPosition::new(x, y));
+                }
+                builder.position = None;
+            }
+            egui_winit::apply_viewport_builder_to_window(self.ctx, self.window, &builder);
+            // A DPI transition may suggest a shifted outer rectangle. Preserve
+            // the requested desktop origin after restoring the normal size.
+            if let Some(position) = restored_position
+                && self.window.outer_position().ok() != Some(position)
+            {
+                self.window.set_outer_position(position);
+            }
         }
         fn maximize(&mut self) {
             self.window.set_maximized(true);
@@ -113,6 +226,7 @@ mod native {
             ctx: &egui::Context,
             window: &Arc<Window>,
             requested: &ViewportBuilder,
+            position_pixels: Option<[i32; 2]>,
         ) -> io::Result<Self> {
             let mut startup = Self {
                 window: Arc::downgrade(window),
@@ -126,6 +240,7 @@ mod native {
             super::prepare(
                 &mut NativeTarget { window, ctx },
                 requested,
+                position_pixels,
                 &mut startup.cloaked,
             )?;
             Ok(startup)
@@ -162,10 +277,65 @@ pub(crate) use native::WindowStartup;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_keeps_physical_coordinates_across_monitor_scales_and_negative_origins() {
+        let monitors = [
+            Monitor {
+                bounds: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0)),
+                pixels_per_point: 1.0,
+            },
+            Monitor {
+                bounds: egui::Rect::from_min_size(
+                    egui::pos2(-2560.0, -200.0),
+                    egui::vec2(2560.0, 1440.0),
+                ),
+                pixels_per_point: 1.5,
+            },
+        ];
+        let size = egui::vec2(1040.0, 750.0);
+        assert_eq!(
+            clamp_position([-2300, -80], size, &monitors),
+            Some([-2300, -80])
+        );
+        assert_eq!(clamp_position([120, 80], size, &monitors), Some([120, 80]));
+        let spanning = [
+            Monitor {
+                bounds: monitors[0].bounds,
+                pixels_per_point: 1.0,
+            },
+            Monitor {
+                bounds: egui::Rect::from_min_size(
+                    egui::pos2(1920.0, 0.0),
+                    egui::vec2(3840.0, 2160.0),
+                ),
+                pixels_per_point: 2.0,
+            },
+        ];
+        assert_eq!(
+            clamp_position([1700, 80], size, &spanning),
+            Some([1700, 80])
+        );
+        // The old left monitor is disconnected; recover onto the primary.
+        assert_eq!(
+            clamp_position([-2300, -80], size, &monitors[..1]),
+            Some([0, 0])
+        );
+        assert_eq!(
+            clamp_position([5000, 5000], size, &monitors[..1]),
+            Some([880, 330])
+        );
+        assert_eq!(
+            clamp_position([400, 400], egui::vec2(5000.0, 4000.0), &monitors[..1]),
+            Some([0, 0])
+        );
+        assert_eq!(clamp_position([120, 80], size, &[]), None);
+    }
     struct Fake {
         events: Vec<&'static str>,
         cloaked: bool,
         normal_size: egui::Vec2,
+        normal_position: Option<[i32; 2]>,
         fail_cloak: bool,
     }
     impl Target for Fake {
@@ -177,10 +347,11 @@ mod tests {
             self.cloaked = enabled;
             Ok(())
         }
-        fn apply_restored(&mut self, builder: &ViewportBuilder) {
+        fn apply_restored(&mut self, builder: &ViewportBuilder, position: Option<[i32; 2]>) {
             assert!(builder.maximized.is_none());
             self.events.push("restored-bounds");
             self.normal_size = builder.inner_size.expect("restored dimensions");
+            self.normal_position = position;
         }
         fn maximize(&mut self) {
             assert!(self.cloaked || self.fail_cloak);
@@ -205,10 +376,11 @@ mod tests {
             events: vec!["create-hidden-nonmax"],
             cloaked: false,
             normal_size: egui::Vec2::ZERO,
+            normal_position: None,
             fail_cloak: false,
         };
         let mut owned = false;
-        prepare(&mut target, &requested, &mut owned).expect("startup cloak");
+        prepare(&mut target, &requested, Some([-1680, 120]), &mut owned).expect("startup cloak");
         assert!(owned);
         assert_eq!(
             target.events,
@@ -221,6 +393,7 @@ mod tests {
             ]
         );
         assert_eq!(target.normal_size, egui::vec2(1040.0, 720.0));
+        assert_eq!(target.normal_position, Some([-1680, 120]));
     }
 
     #[test]
@@ -233,10 +406,11 @@ mod tests {
             events: vec![],
             cloaked: false,
             normal_size: egui::Vec2::ZERO,
+            normal_position: None,
             fail_cloak: true,
         };
         let mut owned = false;
-        assert!(prepare(&mut target, &requested, &mut owned).is_err());
+        assert!(prepare(&mut target, &requested, None, &mut owned).is_err());
         assert!(!owned);
         assert!(!target.cloaked);
         assert_eq!(target.events, ["cloak"]);
@@ -254,10 +428,11 @@ mod tests {
             events: vec![],
             cloaked: false,
             normal_size: egui::Vec2::ZERO,
+            normal_position: None,
             fail_cloak: false,
         };
         let mut owned = false;
-        prepare(&mut target, &requested, &mut owned).expect("startup cloak");
+        prepare(&mut target, &requested, None, &mut owned).expect("startup cloak");
         let mut gate = super::super::first_frame::FirstFrame::new(Some(false));
         gate.present(
             || {
@@ -291,7 +466,7 @@ mod tests {
             fn cloak(&mut self, _: bool) -> std::io::Result<()> {
                 Ok(())
             }
-            fn apply_restored(&mut self, _: &ViewportBuilder) {
+            fn apply_restored(&mut self, _: &ViewportBuilder, _: Option<[i32; 2]>) {
                 panic!("synthetic native setup failure");
             }
             fn maximize(&mut self) {
@@ -304,6 +479,7 @@ mod tests {
             prepare(
                 &mut PanickingTarget,
                 &ViewportBuilder::default().with_maximized(true),
+                None,
                 &mut owned,
             )
         }));

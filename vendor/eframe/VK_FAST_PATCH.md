@@ -7,6 +7,12 @@ The upstream MIT and Apache-2.0 license texts are included unchanged.
 
 Changes:
 
+- Windows Glow accepts a root outer position in physical desktop pixels.
+  Startup clamps it to a connected monitor, moves the still-hidden normal
+  window before applying DPI-scaled dimensions, and only then maximizes under
+  the existing DWM cloak. Both immediate WGL and deferred creation use this
+  order; a different monitor scale does not multiply the stored desktop origin.
+
 - A safe Windows `allow_foreground_activation(pid)` wrapper lets a newly
   user-launched secondary process transfer foreground permission to the
   existing instance before notifying it. Zero and the all-processes sentinel

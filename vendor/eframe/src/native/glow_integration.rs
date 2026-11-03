@@ -119,6 +119,9 @@ impl Drop for GlowWinitRunning<'_> {
 struct GlutinWindowContext {
     egui_ctx: egui::Context,
 
+    #[cfg(target_os = "windows")]
+    window_position_pixels: Option<[i32; 2]>,
+
     swap_interval: glutin::surface::SwapInterval,
     gl_config: glutin::config::Config,
 
@@ -1195,7 +1198,12 @@ impl GlutinWindowContext {
         let startup = window
             .as_ref()
             .map(|window| {
-                super::windows_startup::WindowStartup::prepare(egui_ctx, window, &viewport_builder)
+                super::windows_startup::WindowStartup::prepare(
+                    egui_ctx,
+                    window,
+                    &viewport_builder,
+                    native_options.window_position_pixels,
+                )
             })
             .transpose()
             .map_err(|error| crate::Error::AppCreation(Box::new(error)))?;
@@ -1297,6 +1305,8 @@ impl GlutinWindowContext {
 
         let mut slf = Self {
             egui_ctx: egui_ctx.clone(),
+            #[cfg(target_os = "windows")]
+            window_position_pixels: native_options.window_position_pixels,
             swap_interval,
             gl_config,
             current_gl_context: None,
@@ -1396,6 +1406,7 @@ impl GlutinWindowContext {
                         &self.egui_ctx,
                         &window,
                         &viewport.builder,
+                        self.window_position_pixels,
                     )
                     .map_err(|error| crate::Error::AppCreation(Box::new(error)))?,
                 );

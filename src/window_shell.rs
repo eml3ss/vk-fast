@@ -57,6 +57,7 @@ impl ResidentApp for MusicApp {
 struct WindowGeometry {
     size: egui::Vec2,
     position: Option<egui::Pos2>,
+    position_pixels: Option<[i32; 2]>,
     maximized: bool,
     fullscreen: bool,
 }
@@ -69,12 +70,13 @@ impl WindowGeometry {
                 .filter(|size| usable_size(*size))
                 .unwrap_or(egui::vec2(1040.0, 720.0)),
             position: viewport.position.filter(|position| position.is_finite()),
+            position_pixels: None,
             maximized: viewport.maximized.unwrap_or(false),
             fullscreen: viewport.fullscreen.unwrap_or(false),
         }
     }
 
-    fn remember(&mut self, viewport: &egui::ViewportInfo) {
+    fn remember(&mut self, viewport: &egui::ViewportInfo, zoom_factor: f32) {
         if viewport.minimized == Some(true) {
             return;
         }
@@ -88,8 +90,46 @@ impl WindowGeometry {
             }
             if let Some(rect) = viewport.outer_rect.filter(|rect| rect.min.is_finite()) {
                 self.position = Some(rect.min);
+                if let Some(scale) = viewport.native_pixels_per_point {
+                    let position = rect.min * (scale * zoom_factor);
+                    if position.is_finite()
+                        && scale > 0.0
+                        && zoom_factor > 0.0
+                        && position.x.abs() <= 1_000_000.0
+                        && position.y.abs() <= 1_000_000.0
+                    {
+                        self.position_pixels =
+                            Some([position.x.round() as i32, position.y.round() as i32]);
+                    }
+                }
             }
         }
+    }
+
+    fn restore(&mut self, saved: crate::window_state::SavedWindow) {
+        self.size = egui::Vec2::from(saved.size);
+        self.maximized = saved.maximized;
+        self.position_pixels = saved.position_pixels;
+    }
+
+    fn saved(self) -> crate::window_state::SavedWindow {
+        crate::window_state::SavedWindow {
+            size: [self.size.x, self.size.y],
+            maximized: self.maximized,
+            position_pixels: self.position_pixels,
+        }
+    }
+
+    fn apply_options(self, mut options: eframe::NativeOptions) -> eframe::NativeOptions {
+        options.viewport = self.apply(options.viewport);
+        #[cfg(windows)]
+        if let Some(position) = self.position_pixels {
+            // Startup applies physical coordinates on the destination monitor
+            // before maximizing or presenting the first frame.
+            options.viewport.position = None;
+            options.window_position_pixels = Some(position);
+        }
+        options
     }
 
     fn apply(self, viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
@@ -122,7 +162,8 @@ struct WindowApp<A> {
 
 impl<A: ResidentApp> eframe::App for WindowApp<A> {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        ctx.input(|input| self.geometry.remember(input.viewport()));
+        let zoom = ctx.zoom_factor();
+        ctx.input(|input| self.geometry.remember(input.viewport(), zoom));
         if let Some(app) = &mut self.app {
             app.logic(ctx, frame);
         }
@@ -132,7 +173,8 @@ impl<A: ResidentApp> eframe::App for WindowApp<A> {
         if let Some(app) = &mut self.app {
             app.ui(ui, frame);
         }
-        ui.input(|input| self.geometry.remember(input.viewport()));
+        let zoom = ui.ctx().zoom_factor();
+        ui.input(|input| self.geometry.remember(input.viewport(), zoom));
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
@@ -196,21 +238,19 @@ pub fn run_native<A: ResidentApp + 'static>(
 ) -> eframe::Result {
     let mut initial = Some(create_app);
     let first_options = native_options();
+    let mut first_geometry = WindowGeometry::from_viewport(&first_options.viewport);
+    #[cfg(test)]
+    let saved = None;
     #[cfg(not(test))]
-    let first_options = {
-        let mut options = first_options;
-        if let Ok(Some(saved)) = crate::window_state::load() {
-            options.viewport = options
-                .viewport
-                .with_inner_size(saved.size)
-                .with_maximized(saved.maximized);
-            crate::diagnostics::event("window", "restore: saved_geometry");
-        }
-        options
-    };
+    let saved = crate::window_state::load().ok().flatten();
+    if let Some(saved) = saved {
+        first_geometry.restore(saved);
+        crate::diagnostics::event("window", "restore: saved_geometry");
+    }
+    let first_options = first_geometry.apply_options(first_options);
     let handoff = Rc::new(RefCell::new(Handoff::<A> {
         app: None,
-        geometry: WindowGeometry::from_viewport(&first_options.viewport),
+        geometry: first_geometry,
     }));
     let mut first_options = Some(first_options);
     loop {
@@ -221,8 +261,9 @@ pub fn run_native<A: ResidentApp + 'static>(
             (state.app.take(), state.geometry)
         };
         if let Some(app) = &retained {
-            options.viewport = geometry
-                .apply(options.viewport)
+            options = geometry.apply_options(options);
+            options.viewport = options
+                .viewport
                 .with_decorations(app.uses_system_titlebar());
         }
         let creator = if retained.is_none() {
@@ -274,12 +315,7 @@ pub fn run_native<A: ResidentApp + 'static>(
 
 fn save_geometry(geometry: WindowGeometry) {
     #[cfg(not(test))]
-    if crate::window_state::save(crate::window_state::SavedWindow {
-        size: [geometry.size.x, geometry.size.y],
-        maximized: geometry.maximized,
-    })
-    .is_err()
-    {
+    if crate::window_state::save(geometry.saved()).is_err() {
         crate::diagnostics::event("window", "save: failed");
     }
     #[cfg(test)]
@@ -543,53 +579,134 @@ mod tests {
     }
 
     #[test]
-    fn recreation_keeps_restored_bounds_while_maximized_and_ignores_invalid_geometry() {
-        let viewport = egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]);
-        let mut geometry = WindowGeometry::from_viewport(&viewport);
-        geometry.remember(&egui::ViewportInfo {
+    fn persisted_position_uses_desktop_pixels_and_survives_maximize_minimize_and_reopen() {
+        let mut geometry = WindowGeometry::from_viewport(&egui::ViewportBuilder::default());
+        let normal = egui::ViewportInfo {
             inner_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(40.0, 50.0),
-                egui::vec2(1100.0, 800.0),
+                egui::pos2(-890.0, 90.0),
+                egui::vec2(900.0, 600.0),
             )),
             outer_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(34.0, 25.0),
-                egui::vec2(1112.0, 831.0),
+                egui::pos2(-900.0, 60.0),
+                egui::vec2(920.0, 640.0),
             )),
+            native_pixels_per_point: Some(1.5),
             maximized: Some(false),
             fullscreen: Some(false),
             ..Default::default()
-        });
-        geometry.remember(&egui::ViewportInfo {
-            inner_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1920.0, 1080.0),
-            )),
-            outer_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1920.0, 1080.0),
-            )),
-            maximized: Some(true),
-            ..Default::default()
-        });
+        };
+        geometry.remember(&normal, 1.25);
+        assert_eq!(geometry.position_pixels, Some([-1688, 113]));
+        for viewport in [
+            egui::ViewportInfo {
+                maximized: Some(true),
+                ..normal.clone()
+            },
+            egui::ViewportInfo {
+                minimized: Some(true),
+                ..normal.clone()
+            },
+            egui::ViewportInfo {
+                fullscreen: Some(true),
+                ..normal.clone()
+            },
+        ] {
+            geometry.remember(
+                &egui::ViewportInfo {
+                    outer_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(-32000.0, -32000.0),
+                        egui::vec2(1920.0, 1080.0),
+                    )),
+                    ..viewport
+                },
+                1.25,
+            );
+            assert_eq!(geometry.position_pixels, Some([-1688, 113]));
+            assert_eq!(geometry.size, egui::vec2(900.0, 600.0));
+        }
+        geometry.remember(
+            &egui::ViewportInfo {
+                maximized: Some(true),
+                ..normal
+            },
+            1.25,
+        );
+        let mut restored = WindowGeometry::from_viewport(&egui::ViewportBuilder::default());
+        restored.restore(geometry.saved());
+        assert_eq!(restored.position_pixels, Some([-1688, 113]));
+        assert_eq!(restored.size, geometry.size);
+        assert!(restored.maximized);
+        assert!(!restored.fullscreen);
+        let options = restored.apply_options(eframe::NativeOptions::default());
+        assert_eq!(options.viewport.inner_size, Some(geometry.size));
+        assert_eq!(options.viewport.maximized, Some(true));
+        #[cfg(windows)]
+        {
+            assert_eq!(options.window_position_pixels, restored.position_pixels);
+            assert_eq!(options.viewport.position, None);
+        }
+    }
+
+    #[test]
+    fn recreation_keeps_restored_bounds_while_maximized_and_ignores_invalid_geometry() {
+        let viewport = egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]);
+        let mut geometry = WindowGeometry::from_viewport(&viewport);
+        geometry.remember(
+            &egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(40.0, 50.0),
+                    egui::vec2(1100.0, 800.0),
+                )),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(34.0, 25.0),
+                    egui::vec2(1112.0, 831.0),
+                )),
+                maximized: Some(false),
+                fullscreen: Some(false),
+                ..Default::default()
+            },
+            1.0,
+        );
+        geometry.remember(
+            &egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1920.0, 1080.0),
+                )),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1920.0, 1080.0),
+                )),
+                maximized: Some(true),
+                ..Default::default()
+            },
+            1.0,
+        );
         let builder = geometry.apply(egui::ViewportBuilder::default());
         assert_eq!(builder.inner_size, Some(egui::vec2(1100.0, 800.0)));
         assert_eq!(builder.position, Some(egui::pos2(34.0, 25.0)));
         assert_eq!(builder.maximized, Some(true));
-        geometry.remember(&egui::ViewportInfo {
-            inner_rect: Some(egui::Rect::NOTHING),
-            maximized: Some(false),
-            ..Default::default()
-        });
+        geometry.remember(
+            &egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::NOTHING),
+                maximized: Some(false),
+                ..Default::default()
+            },
+            1.0,
+        );
         assert_eq!(geometry.size, egui::vec2(1100.0, 800.0));
-        geometry.remember(&egui::ViewportInfo {
-            inner_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1.0, 1.0),
-            )),
-            minimized: Some(true),
-            maximized: Some(true),
-            ..Default::default()
-        });
+        geometry.remember(
+            &egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1.0, 1.0),
+                )),
+                minimized: Some(true),
+                maximized: Some(true),
+                ..Default::default()
+            },
+            1.0,
+        );
         assert_eq!(geometry.size, egui::vec2(1100.0, 800.0));
         assert!(!geometry.maximized);
     }

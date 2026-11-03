@@ -14,6 +14,8 @@
 
 Папка приложения должна быть доступна для записи. При входе через окно VK используется установленный [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). QR-вход не использует webview. Обычные профили браузеров приложение не читает.
 
+Размер, положение окна и развёрнутое состояние сохраняются в `config/window.json` при закрытии, в том числе в трей. Если монитор отключён, окно возвращается в пределы доступного экрана.
+
 ## Сборка на Linux
 
 Для основного приложения нужны официальный Rust 1.95+ с целью `x86_64-pc-windows-msvc`, Cargo, LLVM (`clang-cl`, `lld-link`, `llvm-lib`, `llvm-rc`), Python 3.11+ и [cargo-xwin](https://github.com/rust-cross/cargo-xwin) для загрузки MSVC CRT/Windows SDK. Используйте компилятор и стандартную библиотеку из одного официального toolchain.
