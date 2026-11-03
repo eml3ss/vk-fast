@@ -1,4 +1,5 @@
 * text=auto eol=lf
+docs/third-party/** -text -whitespace
 
 # These files are verified byte-for-byte by the decoder build recipe.
 *.pem -text

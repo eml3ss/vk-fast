@@ -4,6 +4,8 @@
 
 Неофициальный настольный плеер VK Music для **Linux и Windows** на Rust и egui/eframe. Русский и английский интерфейс, тёмная тема и нативный вывод звука. Проект не связан с VK.
 
+Готовые сборки: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). Для Linux доступны AppImage и tar.gz (x86-64, glibc 2.39+), для Windows — portable и NSIS-установщик.
+
 ## Возможности
 
 - Личная библиотека, VK Mix, недавние прослушивания и рекомендации.
@@ -47,6 +49,8 @@
 Inter встроен в приложение; системные шрифты для других письменностей подключаются при запуске. На Linux они определяются через Fontconfig.
 
 Node.js, npm и Tauri CLI для сборки приложения не нужны. FFmpeg запускается отдельным процессом; заголовки `libavcodec` и `libavformat` не требуются.
+
+В готовые Linux-пакеты включены GTK/WebKit, клиент PipeWire и минимальный FFmpeg. Подробнее: [сборка и запуск Linux-пакетов](docs/linux.md).
 
 ### Windows
 

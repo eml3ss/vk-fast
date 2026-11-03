@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Collect notices shipped by the Windows dependency graph fixed in Cargo.lock."""
+"""Collect notices from the platform dependency graph fixed in Cargo.lock."""
+import argparse
 import json
 from pathlib import Path
 import subprocess
 
 root = Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser()
+parser.add_argument("--target", default="x86_64-pc-windows-msvc")
+parser.add_argument("--output", type=Path)
+args = parser.parse_args()
 metadata = json.loads(subprocess.check_output([
-    "cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "x86_64-pc-windows-msvc",
+    "cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", args.target,
 ], cwd=root))
 active = {node["id"] for node in metadata["resolve"]["nodes"]}
 output = []
@@ -27,7 +32,7 @@ for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version
     for path in sorted(files):
         if path.is_file() and path.stat().st_size < 1024 * 1024:
             output += ["--- " + path.name + " ---", path.read_text(errors="replace"), ""]
-destination = root / "target/windows-third-party-licenses.txt"
+destination = args.output or root / ("target/windows-third-party-licenses.txt" if "windows" in args.target else "target/linux-third-party-licenses.txt")
 destination.parent.mkdir(parents=True, exist_ok=True)
 destination.write_text("\n".join(output), encoding="utf-8")
 print(destination)

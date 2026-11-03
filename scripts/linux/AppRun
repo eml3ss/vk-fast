@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+bundle_root="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
+export APPDIR="$bundle_root"
+export PIPEWIRE_MODULE_DIR="$bundle_root/usr/lib/pipewire-0.3"
+export SPA_PLUGIN_DIR="$bundle_root/usr/lib/spa-0.2"
+export PIPEWIRE_CONFIG_DIR="$bundle_root/usr/share/pipewire"
+exec "$bundle_root/AppRun.runtime" "$@"
