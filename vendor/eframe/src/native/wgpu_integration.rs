@@ -1064,7 +1064,7 @@ impl Viewport {
         self.deferred_commands.append(&mut commands);
 
         if let Some(window) = self.window.as_ref() {
-            egui_winit::process_viewport_commands(
+            super::winit_integration::process_viewport_commands(
                 egui_ctx,
                 &mut self.info,
                 core::mem::take(&mut self.deferred_commands),

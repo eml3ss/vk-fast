@@ -9,6 +9,32 @@ use egui::ViewportId;
 #[cfg(feature = "accesskit")]
 use egui_winit::accesskit_winit;
 
+pub(crate) fn process_viewport_commands(
+    ctx: &egui::Context,
+    info: &mut egui::ViewportInfo,
+    commands: impl IntoIterator<Item = egui::ViewportCommand>,
+    window: &Window,
+    actions: &mut Vec<egui_winit::ActionRequested>,
+) {
+    #[cfg(target_os = "windows")]
+    super::windows_focus::dispatch(
+        commands,
+        true,
+        || super::windows_focus::focus_window(window),
+        |command| {
+            egui_winit::process_viewport_commands(
+                ctx,
+                info,
+                std::iter::once(command),
+                window,
+                actions,
+            )
+        },
+    );
+    #[cfg(not(target_os = "windows"))]
+    egui_winit::process_viewport_commands(ctx, info, commands, window, actions);
+}
+
 /// Interaction state belongs to the last UI pass, not a CPU-only logic tick.
 /// In particular, `run_logic` may return a default cursor and no IME output
 /// simply because it did not run any widgets.

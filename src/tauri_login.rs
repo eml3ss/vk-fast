@@ -575,6 +575,11 @@ fn challenge_window(window: &tauri::WebviewWindow, change: flow::Change, covered
                 if matches!(change, flow::Change::Show(..)) {
                     let _ = view.center();
                     let _ = view.show();
+                    #[cfg(target_os = "windows")]
+                    if let Ok(handle) = view.hwnd() {
+                        eframe::focus_windows_window(handle.0 as isize);
+                    }
+                    #[cfg(not(target_os = "windows"))]
                     let _ = view.set_focus();
                 }
             }

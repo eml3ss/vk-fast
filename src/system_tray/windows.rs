@@ -1,4 +1,4 @@
-use super::windows_input::{ActivationGate, LeftClick, menu_command};
+use super::windows_input::{ActivationGate, LeftClick, dark_menu, menu_command};
 use super::*;
 use std::sync::{
     Mutex, Once,
@@ -13,6 +13,20 @@ static ROUTE: Mutex<Option<Route>> = Mutex::new(None);
 static HANDLERS: Once = Once::new();
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+fn sync_menu_theme() {
+    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    let personal = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .ok();
+    let apps = personal
+        .as_ref()
+        .and_then(|key| key.get_value("AppsUseLightTheme").ok());
+    let system = personal
+        .as_ref()
+        .and_then(|key| key.get_value("SystemUsesLightTheme").ok());
+    eframe::set_windows_context_menu_theme(dark_menu(apps, system));
+}
+
 #[derive(Clone)]
 struct Route {
     id: String,
@@ -23,6 +37,24 @@ struct Route {
 fn register_handlers() {
     HANDLERS.call_once(|| {
         TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
+            if matches!(
+                &event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                let ours = ROUTE.lock().ok().is_some_and(|route| {
+                    route
+                        .as_ref()
+                        .is_some_and(|route| route.id == event.id().as_ref())
+                });
+                if ours {
+                    sync_menu_theme();
+                }
+                return;
+            }
             let input = match &event {
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
@@ -65,6 +97,7 @@ fn register_handlers() {
                         Command::Show => "menu_show",
                         Command::TogglePlayback => "menu_toggle_playback",
                         Command::Next => "menu_next",
+                        Command::Previous => "menu_previous",
                         Command::Quit => "menu_quit",
                         Command::Unavailable => "menu_unavailable",
                     },
@@ -80,6 +113,7 @@ pub(super) struct Backend {
     id: String,
     show: MenuItem,
     playback: MenuItem,
+    previous: MenuItem,
     next: MenuItem,
     quit: MenuItem,
 }
@@ -87,6 +121,7 @@ pub(super) struct Backend {
 impl Backend {
     pub(super) fn new(relay: Relay, language: Language) -> Result<Self, Error> {
         register_handlers();
+        sync_menu_theme();
         let id = format!(
             "vk-fast-tray-{}",
             GENERATION.fetch_add(1, Ordering::Relaxed)
@@ -94,11 +129,13 @@ impl Backend {
         let labels = labels(language, false);
         let show = MenuItem::with_id(format!("{id}.show"), labels.show, true, None);
         let playback = MenuItem::with_id(format!("{id}.play"), labels.playback, true, None);
+        let previous = MenuItem::with_id(format!("{id}.previous"), labels.previous, true, None);
         let next = MenuItem::with_id(format!("{id}.next"), labels.next, true, None);
         let quit = MenuItem::with_id(format!("{id}.quit"), labels.quit, true, None);
         let menu = Menu::new();
         menu.append_items(&[
             &show,
+            &previous,
             &playback,
             &next,
             &PredefinedMenuItem::separator(),
@@ -128,6 +165,7 @@ impl Backend {
             id,
             show,
             playback,
+            previous,
             next,
             quit,
         })
@@ -141,6 +179,7 @@ impl Backend {
         let labels = labels(language, playing);
         self.show.set_text(labels.show);
         self.playback.set_text(labels.playback);
+        self.previous.set_text(labels.previous);
         self.next.set_text(labels.next);
         self.quit.set_text(labels.quit);
     }

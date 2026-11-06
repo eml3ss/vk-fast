@@ -26,6 +26,7 @@ mod platform;
 pub enum Command {
     Show,
     TogglePlayback,
+    Previous,
     Next,
     Quit,
     Unavailable,
@@ -76,6 +77,7 @@ impl Relay {
 struct Labels {
     show: &'static str,
     playback: &'static str,
+    previous: &'static str,
     next: &'static str,
     quit: &'static str,
 }
@@ -88,6 +90,7 @@ fn labels(language: Language, playing: bool) -> Labels {
         } else {
             language.text("Воспроизвести", "Play")
         },
+        previous: language.text("Предыдущий трек", "Previous track"),
         next: language.text("Следующий трек", "Next track"),
         quit: language.text("Выйти", "Exit"),
     }

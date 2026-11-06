@@ -35,10 +35,15 @@ pub(super) fn menu_command(route_id: &str, event_id: &str) -> Option<Command> {
     match suffix {
         "show" => Some(Command::Show),
         "play" => Some(Command::TogglePlayback),
+        "previous" => Some(Command::Previous),
         "next" => Some(Command::Next),
         "quit" => Some(Command::Quit),
         _ => None,
     }
+}
+
+pub(super) fn dark_menu(apps_light: Option<u32>, system_light: Option<u32>) -> bool {
+    apps_light.or(system_light).is_some_and(|light| light == 0)
 }
 
 #[cfg(test)]
@@ -82,6 +87,7 @@ mod tests {
         for (suffix, expected) in [
             ("show", Command::Show),
             ("play", Command::TogglePlayback),
+            ("previous", Command::Previous),
             ("next", Command::Next),
             ("quit", Command::Quit),
         ] {
@@ -101,5 +107,14 @@ mod tests {
         ] {
             assert_eq!(menu_command("vk-fast-tray-2", rejected), None, "{rejected}");
         }
+    }
+
+    #[test]
+    fn native_menu_follows_windows_app_theme_with_safe_fallbacks() {
+        assert!(dark_menu(Some(0), Some(1)));
+        assert!(!dark_menu(Some(1), Some(0)));
+        assert!(dark_menu(None, Some(0)));
+        assert!(!dark_menu(None, Some(1)));
+        assert!(!dark_menu(None, None));
     }
 }

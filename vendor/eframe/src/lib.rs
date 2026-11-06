@@ -184,6 +184,21 @@ pub fn allow_foreground_activation(process_id: u32) -> bool {
     }
 }
 
+/// Request activation of a live window belonging to this process, without
+/// generating keyboard input or bypassing Windows' foreground restrictions.
+#[cfg(target_os = "windows")]
+pub fn focus_windows_window(handle: isize) -> bool {
+    native::windows_focus::focus_hwnd(handle)
+}
+
+/// Apply the requested native popup-menu palette to this process. Reapply
+/// before opening a menu to follow system preference changes without polling.
+/// Unsupported Windows builds retain their default palette; high contrast wins.
+#[cfg(target_os = "windows")]
+pub fn set_windows_context_menu_theme(dark: bool) -> bool {
+    native::windows_menu::apply(dark)
+}
+
 pub(crate) mod stopwatch;
 
 // ----------------------------------------------------------------------------

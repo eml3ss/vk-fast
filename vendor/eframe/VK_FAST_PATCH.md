@@ -7,6 +7,19 @@ The upstream MIT and Apache-2.0 license texts are included unchanged.
 
 Changes:
 
+- Windows viewport focus commands bypass winit's synthetic-Alt foreground
+  workaround. A direct Win32 request is made only for a visible, restored HWND
+  owned by this process; an already foreground window is left alone. If Windows
+  denies activation, only taskbar attention is requested. No keyboard events,
+  keyboard-state resets or input-queue attachment are used. Glow and WGPU share
+  the same ordered dispatch. A safe HWND wrapper also serves the VK challenge
+  window without routing through another toolkit's activation workaround.
+- A process-local popup-menu palette wrapper resolves the supported system
+  theme functions once. Windows 10 1809 and 1903+ use their respective function
+  signatures; older/unsupported builds keep the native default. High contrast
+  overrides forced palettes. The application reapplies the current Windows
+  preference immediately before the tray popup opens, without a polling timer.
+
 - Windows Glow accepts a root outer position in physical desktop pixels.
   Startup clamps it to a connected monitor, moves the still-hidden normal
   window before applying DPI-scaled dimensions, and only then maximizes under

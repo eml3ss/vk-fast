@@ -194,6 +194,7 @@ impl ksni::Tray for TrayData {
         let labels = labels(self.language, self.playing);
         [
             (labels.show, Command::Show),
+            (labels.previous, Command::Previous),
             (labels.playback, Command::TogglePlayback),
             (labels.next, Command::Next),
             (labels.quit, Command::Quit),
@@ -207,7 +208,7 @@ impl ksni::Tray for TrayData {
                 ..Default::default()
             }
             .into();
-            if index == 3 {
+            if index == 4 {
                 vec![ksni::MenuItem::Separator, item]
             } else {
                 vec![item]
@@ -271,15 +272,19 @@ mod tests {
         ksni::Tray::activate(&mut data, 0, 0);
         assert_eq!(urgent.swap(0, Ordering::AcqRel), URGENT_SHOW);
         let menu = ksni::Tray::menu(&data);
-        assert_eq!(menu.len(), 5);
-        for (index, expected) in [(1, Command::TogglePlayback), (2, Command::Next)] {
+        assert_eq!(menu.len(), 6);
+        for (index, expected) in [
+            (1, Command::Previous),
+            (2, Command::TogglePlayback),
+            (3, Command::Next),
+        ] {
             let ksni::MenuItem::Standard(item) = &menu[index] else {
                 panic!("Menu item")
             };
             (item.activate)(&mut data);
             assert_eq!(receiver.try_recv().unwrap(), expected);
         }
-        let ksni::MenuItem::Standard(exit) = &menu[4] else {
+        let ksni::MenuItem::Standard(exit) = &menu[5] else {
             panic!("Exit")
         };
         (exit.activate)(&mut data);

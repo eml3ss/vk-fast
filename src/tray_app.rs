@@ -92,6 +92,9 @@ impl MusicApp {
             Command::Next => {
                 self.handle_system_media_command(ctx, crate::system_media::Command::Next)
             }
+            Command::Previous => {
+                self.handle_system_media_command(ctx, crate::system_media::Command::Previous)
+            }
             Command::Quit => self.request_quit(ctx),
             Command::Unavailable => {
                 self.tray.failed = true;
