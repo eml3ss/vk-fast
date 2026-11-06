@@ -24,6 +24,7 @@ pub struct View<'a> {
     pub error: Option<Error>,
     pub loading: bool,
     pub position: f64,
+    pub playing: bool,
     pub fullscreen: bool,
     pub retry_allowed: bool,
 }
@@ -31,6 +32,7 @@ struct Row {
     galley: Arc<egui::Galley>,
     top: f32,
     height: f32,
+    gap: bool,
 }
 pub struct State {
     stamp: Option<(usize, u32, u32)>,
@@ -39,6 +41,7 @@ pub struct State {
     follow: bool,
     last_active: Option<usize>,
     last_position: Option<f64>,
+    gap_clock: GapClock,
 }
 impl Default for State {
     fn default() -> Self {
@@ -49,6 +52,7 @@ impl Default for State {
             follow: true,
             last_active: None,
             last_position: None,
+            gap_clock: GapClock::default(),
         }
     }
 }
@@ -56,6 +60,42 @@ impl State {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+}
+
+#[derive(Default)]
+struct GapClock {
+    identity: Option<(usize, usize)>,
+    elapsed: f64,
+    last_frame: Option<f64>,
+}
+impl GapClock {
+    fn advance(&mut self, identity: Option<(usize, usize)>, playing: bool, now: f64) -> f64 {
+        if self.identity != identity {
+            self.identity = identity;
+            self.elapsed = 0.0;
+            self.last_frame = None;
+        }
+        if identity.is_some()
+            && playing
+            && let Some(last) = self.last_frame
+        {
+            self.elapsed += (now - last).clamp(0.0, 0.1);
+        }
+        self.last_frame = Some(now);
+        self.elapsed
+    }
+}
+
+fn gap_marker(text: &str) -> bool {
+    matches!(text.trim(), "" | "..." | "…" | "•••")
+}
+
+fn dot_radius(size: f32, dot: usize, phase: Option<f64>) -> f32 {
+    let pulse = phase.map_or(1.0, |seconds| {
+        let angle = (seconds / 2.4 - dot as f64 / 3.0) * std::f64::consts::TAU;
+        (0.85 + (angle.cos() + 1.0).powi(2) * 0.13) as f32
+    });
+    size * 0.13 * pulse
 }
 
 pub fn show(
@@ -217,6 +257,7 @@ pub fn show(
                 view.position,
                 size,
                 view.fullscreen,
+                view.playing,
             ) {
                 action = Some(Action::Seek(at));
             }
@@ -340,6 +381,7 @@ fn caption_job(ui: &mut egui::Ui, rect: Rect, mut job: egui::text::LayoutJob) {
         );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lines(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -348,6 +390,7 @@ fn lines(
     position: f64,
     size: f32,
     fullscreen: bool,
+    playing: bool,
 ) -> Option<f64> {
     let mut action = None;
     if state
@@ -371,6 +414,16 @@ fn lines(
         state.follow = false;
     }
     let active = data.active_at(position);
+    let gap = active.filter(|index| {
+        data.lines
+            .get(*index)
+            .is_some_and(|line| gap_marker(&line.text))
+    });
+    let phase = state.gap_clock.advance(
+        gap.map(|index| (data as *const Lyrics as usize, index)),
+        playing,
+        ui.input(|input| input.time),
+    );
     let should_follow = state.follow && active != state.last_active;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(rect));
@@ -392,11 +445,8 @@ fn lines(
                     state.height = 12.0;
                     let font = FontId::proportional(size);
                     for line in &data.lines {
-                        let text = if line.text.trim().is_empty() {
-                            "•••"
-                        } else {
-                            line.text.as_str()
-                        };
+                        let gap = gap_marker(&line.text);
+                        let text = if gap { "•••" } else { line.text.as_str() };
                         let galley = ui.painter().layout(
                             text.into(),
                             font.clone(),
@@ -408,6 +458,7 @@ fn lines(
                             galley,
                             top: state.height,
                             height,
+                            gap,
                         });
                         state.height += height;
                     }
@@ -453,13 +504,29 @@ fn lines(
                     let color = if !data.synced || active == Some(index) || response.hovered() {
                         Color32::from_rgb(238, 241, 247)
                     } else {
-                        Color32::from_gray(154)
+                        Color32::from_gray(124)
                     };
-                    ui.painter().galley_with_override_text_color(
-                        line.min + egui::vec2(4.0, 2.0),
-                        row.galley.clone(),
-                        color,
-                    );
+                    if row.gap {
+                        let animated = data.synced && active == Some(index);
+                        let center = line.min
+                            + egui::vec2(4.0 + size * 0.18, row.galley.size().y * 0.5 + 2.0);
+                        for dot in 0..3 {
+                            ui.painter().circle_filled(
+                                center + egui::vec2(dot as f32 * size * 0.6, 0.0),
+                                dot_radius(size, dot, animated.then_some(phase)),
+                                color,
+                            );
+                        }
+                        if animated && playing {
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        ui.painter().galley_with_override_text_color(
+                            line.min + egui::vec2(4.0, 2.0),
+                            row.galley.clone(),
+                            color,
+                        );
+                    }
                     if data.synced {
                         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                         if response.clicked() {
@@ -497,4 +564,118 @@ fn background(painter: &egui::Painter, rect: Rect, color: Option<Color32>) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn draw(
+        ctx: &egui::Context,
+        state: &mut State,
+        data: &Lyrics,
+        time: f64,
+        playing: bool,
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 260.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                lines(
+                    ui,
+                    state,
+                    ui.available_rect_before_wrap(),
+                    data,
+                    1.0,
+                    18.0,
+                    false,
+                    playing,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn radii(output: &egui::FullOutput) -> Vec<f32> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle) => Some(circle.radius),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn synced_gap_breathes_in_sequence_and_freezes_on_pause_but_plain_lyrics_are_static() {
+        for synced in [true, false] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut state = State::default();
+            let mut data = crate::lyrics::test_data(3, synced);
+            data.lines[0].text.clear();
+            let start = draw(&ctx, &mut state, &data, 0.0, true);
+            let mut later = start.clone();
+            for frame in 1..=8 {
+                later = draw(&ctx, &mut state, &data, f64::from(frame) * 0.1, true);
+            }
+            assert_eq!(radii(&start).len(), 3);
+            if synced {
+                assert_ne!(radii(&start), radii(&later));
+                assert_ne!(radii(&later)[0], radii(&later)[1]);
+                let paused = draw(&ctx, &mut state, &data, 5.0, false);
+                let still = draw(&ctx, &mut state, &data, 10.0, false);
+                assert_eq!(radii(&paused), radii(&still));
+                assert_eq!(radii(&later), radii(&paused));
+            } else {
+                assert_eq!(radii(&start), radii(&later));
+                assert!(radii(&later).windows(2).all(|pair| pair[0] == pair[1]));
+                assert_eq!(state.gap_clock.elapsed, 0.0);
+            }
+        }
+        for text in ["", "...", "…", "•••", "  ...  "] {
+            assert!(gap_marker(text));
+        }
+        assert!(!gap_marker("A line..."));
+    }
+
+    #[test]
+    fn only_inactive_synced_lines_use_the_darker_color() {
+        for synced in [true, false] {
+            let ctx = egui::Context::default();
+            let mut state = State::default();
+            let data = crate::lyrics::test_data(3, synced);
+            let output = draw(&ctx, &mut state, &data, 0.0, false);
+            let colors: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text().starts_with("Synthetic lyric line") =>
+                    {
+                        Some(text.override_text_color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(colors.len(), 3);
+            assert_eq!(colors[0], Some(Color32::from_rgb(238, 241, 247)));
+            assert_eq!(
+                colors[1],
+                Some(if synced {
+                    Color32::from_gray(124)
+                } else {
+                    Color32::from_rgb(238, 241, 247)
+                })
+            );
+        }
+    }
 }

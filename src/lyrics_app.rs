@@ -241,7 +241,7 @@ impl MusicApp {
         ui: &mut egui::Ui,
         fullscreen: bool,
     ) -> Option<lyrics_ui::Action> {
-        let position = self.playback_snapshot().position;
+        let snapshot = self.playback_snapshot();
         let retry_allowed = self
             .lyrics
             .status
@@ -256,7 +256,8 @@ impl MusicApp {
                 lyrics: self.lyrics.data.as_deref(),
                 error: self.lyrics.error,
                 loading: self.lyrics.pending.is_some() || self.lyrics.settings_busy,
-                position,
+                position: snapshot.position,
+                playing: matches!(snapshot.state, PlaybackState::Playing),
                 fullscreen,
                 retry_allowed,
             },

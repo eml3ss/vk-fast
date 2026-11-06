@@ -3789,17 +3789,6 @@ impl MusicApp {
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         if self.settings_open {
-                            theme::inset_heading(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(language.text("Настройки", "Settings"))
-                                            .size(26.0)
-                                            .family(theme::semibold()),
-                                    )
-                                    .truncate()
-                                    .selectable(false),
-                                )
-                            });
                             None
                         } else {
                             Some(search_ui::input(ui, &mut self.search.input, language))
@@ -5442,6 +5431,10 @@ impl MusicApp {
         let data = stored.as_deref();
         let can_edit_playlist =
             matches!(&page, MusicPage::Playlist(reference) if self.can_edit_playlist(reference));
+        let follow = match &page {
+            MusicPage::Playlist(reference) => self.playlist_follow_view(reference),
+            _ => None,
+        };
         let tracks = data.map_or(&[][..], DetailPage::tracks);
         let active = matches!(
             self.player.snapshot().state,
@@ -5554,6 +5547,7 @@ impl MusicApp {
                             loading,
                             playing,
                             can_edit_playlist,
+                            follow,
                         },
                     );
                 }
@@ -5673,6 +5667,11 @@ impl MusicApp {
         }
         match action {
             Some(detail_ui::Action::ReloadReleases) => self.ensure_detail(&ctx, true),
+            Some(detail_ui::Action::TogglePlaylistLike) => {
+                if let MusicPage::Playlist(reference) = page {
+                    self.toggle_playlist_follow(&ctx, reference);
+                }
+            }
             Some(detail_ui::Action::EditPlaylist) => {
                 if let MusicPage::Playlist(reference) = page {
                     self.open_playlist_editor(&ctx, reference, false);
@@ -7470,6 +7469,31 @@ impl MusicApp {
 
     fn settings_content(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 36.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                theme::inset_heading(ui, |ui| {
+                    let title = language.text("Настройки", "Settings");
+                    let width = ui
+                        .painter()
+                        .layout_no_wrap(
+                            title.into(),
+                            egui::FontId::new(26.0, theme::semibold()),
+                            ui.visuals().text_color(),
+                        )
+                        .size()
+                        .x;
+                    ui.add_sized(
+                        egui::vec2(width.min(ui.available_width()), 36.0),
+                        egui::Label::new(RichText::new(title).size(26.0).family(theme::semibold()))
+                            .truncate()
+                            .selectable(false),
+                    )
+                });
+            },
+        );
+        ui.add_space(10.0);
         let field_spacing = ui.spacing().item_spacing.y;
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.set_max_width(ui.available_width().min(640.0));
@@ -8031,7 +8055,7 @@ impl MusicApp {
             .frame(Frame::new().fill(BACKGROUND).inner_margin(egui::Margin {
                 left: 8,
                 right: 8,
-                top: if self.settings_open || matches!(self.page, MusicPage::Search(_)) {
+                top: if !self.settings_open && matches!(self.page, MusicPage::Search(_)) {
                     8
                 } else {
                     16
@@ -11941,6 +11965,7 @@ mod tests {
 
     pub(super) fn search_test_playlist(id: i64) -> crate::web_audio::UserPlaylist {
         crate::web_audio::UserPlaylist {
+            original: None,
             album: AlbumRef {
                 owner_id: -42,
                 id,
@@ -12346,10 +12371,10 @@ mod tests {
                 language.text("Поиск по настройкам", "Search settings"),
             )
             .unwrap();
-            assert!(heading.top() < 50.0 && field.top() > heading.bottom());
+            assert!(heading.top() >= 60.0 && field.top() > heading.bottom());
             assert!(
-                field.top() < 90.0,
-                "The settings search should sit directly under the toolbar heading"
+                (8.0..=34.0).contains(&(field.top() - heading.bottom())),
+                "The settings search should sit directly under the page heading: {heading:?}; {field:?}"
             );
             let point = field.center();
             settings_search_test_frame(&ctx, &mut app, &mut frame, seek_pointer(point, true));
@@ -12437,14 +12462,15 @@ mod tests {
             app.cache_stats.as_ref().unwrap().used_bytes,
             initial.used_bytes
         );
+        let heading = account_ui_text_rect(&output, "Settings").unwrap();
         let field = account_ui_shapes(&output)
             .into_iter()
             .find_map(|shape| match shape {
                 egui::Shape::Rect(rect)
                     if rect.fill == SURFACE
                         && (rect.rect.height() - 38.0).abs() < 0.5
-                        && rect.rect.top() > 50.0
-                        && rect.rect.top() < 110.0
+                        && rect.rect.top() > heading.bottom()
+                        && rect.rect.top() < heading.bottom() + 32.0
                         && rect.rect.width() > 400.0 =>
                 {
                     Some(rect.rect)
@@ -13281,6 +13307,7 @@ mod tests {
         };
         let response = || {
             vec![crate::web_audio::UserPlaylist {
+                original: None,
                 album: reference.clone(),
                 subtitle: "Selection".into(),
                 track_count: Some(2),

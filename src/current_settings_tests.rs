@@ -31,6 +31,60 @@ fn content_text(output: &egui::FullOutput, caption: &str) -> egui::Rect {
 }
 
 #[test]
+fn settings_heading_shares_the_music_page_top_and_keeps_its_search_below() {
+    for language in [Language::Russian, Language::English] {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::tests::search_test_app(&ctx);
+        app.language = language;
+        app.demo = false;
+        let size = egui::vec2(1120.0, 850.0);
+        let mut tick = 0;
+        app.page = MusicPage::Library;
+        let library = warm(&ctx, &mut app, size, &mut tick);
+        let music = content_text(&library, language.text("Моя музыка", "My music"));
+        let search_top = |output: &egui::FullOutput| {
+            account_ui_shapes(output)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == SURFACE
+                            && rect.rect.left() > 252.0
+                            && rect.rect.width() > 500.0
+                            && (30.0..=40.0).contains(&rect.rect.height())
+                            && rect.rect.top() > music.bottom() =>
+                    {
+                        Some(rect.rect.top())
+                    }
+                    _ => None,
+                })
+                .min_by(f32::total_cmp)
+                .unwrap()
+        };
+        app.settings_open = true;
+        let settings = warm(&ctx, &mut app, size, &mut tick);
+        let heading = content_text(&settings, language.text("Настройки", "Settings"));
+        let input = content_text(
+            &settings,
+            language.text("Поиск по настройкам", "Search settings"),
+        );
+        assert!(
+            (heading.top() - music.top()).abs() <= 2.0
+                && (heading.bottom() - music.bottom()).abs() < 0.5,
+            "Settings title: {heading:?}; music title: {music:?}"
+        );
+        assert!((heading.left() - music.left()).abs() < 1.0);
+        assert!(
+            (search_top(&settings) - search_top(&library)).abs() < 0.5,
+            "Search surfaces should align: settings={}, library={}",
+            search_top(&settings),
+            search_top(&library)
+        );
+        assert!(input.top() > heading.bottom() + 8.0);
+        assert!(app.workers.is_empty());
+    }
+}
+
+#[test]
 fn discord_presence_switch_is_searchable_and_does_not_change_playback_or_start_user_ipc_in_tests() {
     for language in [Language::Russian, Language::English] {
         let ctx = egui::Context::default();

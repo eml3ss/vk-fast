@@ -322,6 +322,7 @@ mod tests {
             unavailable: false,
             playlists: (0..count)
                 .map(|index| UserPlaylist {
+                    original: None,
                     album: AlbumRef {
                         owner_id: -71,
                         id: index as i64 + 1,

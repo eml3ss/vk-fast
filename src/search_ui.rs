@@ -741,6 +741,7 @@ mod tests {
 
     fn playlist(id: i64) -> UserPlaylist {
         UserPlaylist {
+            original: None,
             album: AlbumRef {
                 owner_id: -42,
                 id,

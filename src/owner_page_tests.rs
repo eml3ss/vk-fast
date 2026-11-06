@@ -17,6 +17,7 @@ fn page(id: i64, offset: usize, items: &[i64]) -> OwnerPage {
         playlists: items
             .iter()
             .map(|item| UserPlaylist {
+                original: None,
                 album: AlbumRef {
                     owner_id: id,
                     id: *item,

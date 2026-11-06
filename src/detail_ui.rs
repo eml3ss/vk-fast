@@ -31,6 +31,13 @@ pub struct AlbumView<'a> {
     pub loading: bool,
     pub playing: bool,
     pub can_edit_playlist: bool,
+    pub follow: Option<FollowView>,
+}
+
+#[derive(Clone, Copy)]
+pub struct FollowView {
+    pub saved: bool,
+    pub busy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +48,7 @@ pub enum Action {
     OpenArtist(ArtistRef),
     OpenCreator(crate::web_audio::PlaylistCreator),
     EditPlaylist,
+    TogglePlaylistLike,
     ReloadReleases,
 }
 
@@ -221,6 +229,7 @@ pub fn artist_header(
         view.track_count,
         view.loading,
         view.playing,
+        None,
     )
 }
 
@@ -401,6 +410,11 @@ fn collection_header(
         view.track_count,
         view.loading,
         view.playing,
+        if playlist && !view.can_edit_playlist {
+            view.follow
+        } else {
+            None
+        },
     )
     .or(action);
     if playlist && view.can_edit_playlist {
@@ -745,54 +759,20 @@ fn backdrop(color: Option<Color32>) -> (Color32, Color32) {
 
 pub(crate) fn background(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
     let (left, right) = backdrop(color);
-    for step in 0..32 {
-        let fraction = step as f32 / 31.0;
-        let channel = |left: u8, right: u8| {
-            (f32::from(left) + (f32::from(right) - f32::from(left)) * fraction).round() as u8
-        };
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + rect.width() * step as f32 / 32.0, rect.top()),
-            egui::pos2(
-                rect.left() + rect.width() * (step + 1) as f32 / 32.0,
-                rect.bottom(),
-            ),
-        );
-        painter
-            .with_clip_rect(painter.clip_rect().intersect(strip))
-            .rect_filled(
-                rect,
-                16.0,
-                Color32::from_rgb(
-                    channel(left.r(), right.r()),
-                    channel(left.g(), right.g()),
-                    channel(left.b(), right.b()),
-                ),
-            );
-    }
+    theme::horizontal_gradient(painter, rect, 16.0, left, right);
 }
 
 fn fade(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
     let tint = color.map_or(Color32::from_rgb(22, 36, 57), |color| {
         backdrop(Some(color)).0
     });
-    for step in 0..32 {
-        let fraction = step as f32 / 31.0;
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + rect.width() * step as f32 / 32.0, rect.top()),
-            egui::pos2(
-                rect.left() + rect.width() * (step + 1) as f32 / 32.0,
-                rect.bottom(),
-            ),
-        );
-        let alpha = ((1.0 - fraction).powf(0.6) * 245.0).round() as u8;
-        painter
-            .with_clip_rect(painter.clip_rect().intersect(strip))
-            .rect_filled(
-                rect,
-                16.0,
-                Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), alpha),
-            );
-    }
+    theme::horizontal_gradient(
+        painter,
+        rect,
+        16.0,
+        Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 245),
+        Color32::TRANSPARENT,
+    );
 }
 
 fn controls(
@@ -801,6 +781,7 @@ fn controls(
     track_count: usize,
     loading: bool,
     playing: bool,
+    follow: Option<FollowView>,
 ) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -830,8 +811,14 @@ fn controls(
         let galley =
             ui.painter()
                 .layout_no_wrap(shuffle_label.into(), font, ui.visuals().text_color());
-        let width = galley.size().x + 50.0;
-        if ui.available_width() >= width {
+        let full_width = galley.size().x + 50.0;
+        let follow_room = if follow.is_some() { 46.0 } else { 0.0 };
+        let width = if ui.available_width() >= full_width + follow_room {
+            full_width
+        } else {
+            36.0
+        };
+        if ui.available_width() >= width + follow_room {
             let shuffle = ui
                 .add_enabled_ui(track_count > 1, |ui| {
                     let (rect, response) =
@@ -847,16 +834,18 @@ fn controls(
                     shuffle_icon(
                         ui.painter(),
                         egui::Rect::from_min_size(
-                            rect.min + egui::vec2(12.0, 9.0),
+                            rect.min + egui::vec2(if width == 36.0 { 9.0 } else { 12.0 }, 9.0),
                             egui::vec2(18.0, 18.0),
                         ),
                         visual.fg_stroke.color,
                     );
-                    ui.painter().galley_with_override_text_color(
-                        rect.min + egui::vec2(36.0, (36.0 - galley.size().y) * 0.5),
-                        galley,
-                        visual.fg_stroke.color,
-                    );
+                    if width == full_width {
+                        ui.painter().galley_with_override_text_color(
+                            rect.min + egui::vec2(36.0, (36.0 - galley.size().y) * 0.5),
+                            galley,
+                            visual.fg_stroke.color,
+                        );
+                    }
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -866,10 +855,59 @@ fn controls(
                     });
                     response
                 })
-                .inner;
+                .inner
+                .on_hover_text(shuffle_label);
             if shuffle.clicked() {
                 shuffle.request_focus();
                 action = Some(Action::Shuffle);
+            }
+        }
+        if let Some(follow) = follow {
+            let label = if follow.saved {
+                language.text("Убрать из библиотеки", "Remove from Your Library")
+            } else {
+                language.text("Добавить в библиотеку", "Add to Your Library")
+            };
+            let heart = ui
+                .add_enabled_ui(!follow.busy, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(36.0, 36.0), Sense::click());
+                    let visual = ui.style().interact(&response);
+                    ui.painter().rect(
+                        rect,
+                        8.0,
+                        visual.bg_fill,
+                        visual.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                    icons::paint(
+                        ui.painter(),
+                        rect.shrink(8.0),
+                        if follow.saved {
+                            Icon::HeartFilled
+                        } else {
+                            Icon::Heart
+                        },
+                        if follow.saved {
+                            theme::ACCENT
+                        } else {
+                            visual.fg_stroke.color
+                        },
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            follow.saved,
+                            label,
+                        )
+                    });
+                    response
+                })
+                .inner
+                .on_hover_text(label);
+            if heart.clicked() {
+                action = Some(Action::TogglePlaylistLike);
             }
         }
     });
@@ -883,6 +921,78 @@ fn shuffle_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_heart_is_right_of_shuffle_and_aligned_with_play_even_in_a_narrow_row() {
+        for language in [Language::Russian, Language::English] {
+            for width in [280.0, 340.0, 700.0] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                let mut tick = 0;
+                let mut action = None;
+                let mut draw = |events| {
+                    tick += 1;
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 100.0),
+                            )),
+                            time: Some(f64::from(tick) * 0.1),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            action = controls(
+                                ui,
+                                language,
+                                3,
+                                false,
+                                false,
+                                Some(FollowView {
+                                    saved: false,
+                                    busy: false,
+                                }),
+                            );
+                        },
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                draw(Vec::new());
+                let output = draw(Vec::new());
+                let mut buttons: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect) if (rect.rect.height() - 36.0).abs() < 0.5 => {
+                            Some(rect.rect)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                buttons.sort_by(|a, b| a.left().total_cmp(&b.left()));
+                assert_eq!(buttons.len(), 3, "Three controls must fit at {width}px");
+                assert_eq!(buttons[2].size(), egui::vec2(36.0, 36.0));
+                assert!((buttons[2].center().y - buttons[0].center().y).abs() < 0.5);
+                assert!((buttons[2].left() - buttons[1].right() - 10.0).abs() < 0.5);
+                assert!(buttons[2].right() <= width);
+                let point = buttons[2].center();
+                for pressed in [true, false] {
+                    draw(vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]);
+                }
+                assert_eq!(action, Some(Action::TogglePlaylistLike));
+            }
+        }
+    }
 
     #[test]
     fn playlist_description_keeps_paragraphs_literal_text_and_wraps_inside_both_gutters() {
@@ -995,6 +1105,7 @@ mod tests {
                                     loading: false,
                                     playing: false,
                                     can_edit_playlist: false,
+                                    follow: None,
                                 },
                             );
                         },
@@ -1074,6 +1185,7 @@ mod tests {
                     loading: false,
                     playing: false,
                     can_edit_playlist: false,
+                    follow: None,
                 },
             );
         });
@@ -1116,6 +1228,7 @@ mod tests {
                             loading: false,
                             playing: false,
                             can_edit_playlist: false,
+                            follow: None,
                         },
                     );
                 },
@@ -1145,7 +1258,7 @@ mod tests {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 380.0))),
                         time: Some(f64::from(tick) * 0.1), events, ..Default::default()
                     }, |ui| {
-                        let view = AlbumView { language: Language::English, title: "A long playlist title that still must not cover its edit control", artists: &[], creator: None, image_url: None, subtitle: "", track_count: 2, loading: false, playing: false, can_edit_playlist: can_edit };
+                        let view = AlbumView { language: Language::English, title: "A long playlist title that still must not cover its edit control", artists: &[], creator: None, image_url: None, subtitle: "", track_count: 2, loading: false, playing: false, can_edit_playlist: can_edit, follow: None };
                         action = if playlist { playlist_header(ui, &mut covers, view) } else { album_header(ui, &mut covers, view) };
                     });
                     output.textures_delta.clear();
@@ -1238,6 +1351,7 @@ mod tests {
                                     loading: false,
                                     playing: false,
                                     can_edit_playlist: false,
+                                    follow: None,
                                 },
                             );
                         }
@@ -1248,10 +1362,19 @@ mod tests {
                     .shapes
                     .iter()
                     .find_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(rect)
-                            if rect.rect.width() > 600.0 && rect.rect.height() > 220.0 =>
+                        egui::Shape::Mesh(mesh)
+                            if mesh.calc_bounds().width() > 600.0
+                                && mesh.calc_bounds().height() > 220.0
+                                && mesh.vertices.len() < 100 =>
                         {
-                            Some(rect.fill)
+                            Some(
+                                mesh.vertices
+                                    .iter()
+                                    .filter(|v| v.color.a() == 255)
+                                    .max_by_key(|v| v.color.r().max(v.color.g()).max(v.color.b()))
+                                    .unwrap()
+                                    .color,
+                            )
                         }
                         _ => None,
                     })
@@ -1542,6 +1665,7 @@ mod tests {
                                 loading: false,
                                 playing: false,
                                 can_edit_playlist: false,
+                                follow: None,
                             },
                         );
                     },

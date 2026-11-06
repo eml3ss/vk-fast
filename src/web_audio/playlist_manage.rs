@@ -89,7 +89,7 @@ impl WebAudioClient {
         )
     }
 
-    fn playlist_manage_metadata(
+    pub(super) fn playlist_manage_metadata(
         &self,
         expected_owner: i64,
         target: &AlbumRef,
@@ -338,7 +338,7 @@ fn native_bool(value: Option<&Value>) -> Option<bool> {
     }
 }
 
-fn mutation_succeeded(value: &Value) -> Result<(), WebAudioError> {
+pub(super) fn mutation_succeeded(value: &Value) -> Result<(), WebAudioError> {
     if native_bool(Some(value)) == Some(true) || native_bool(value.get("success")) == Some(true) {
         Ok(())
     } else {

@@ -8,6 +8,66 @@ pub const PRIMARY: Color32 = Color32::from_rgb(34, 77, 139);
 pub const SELECTED: Color32 = Color32::from_rgb(27, 44, 67);
 pub const SCROLL_HANDLE: Color32 = Color32::from_rgb(57, 65, 77);
 
+/// One interpolated surface with a rounded, antialiased perimeter. Vertex
+/// colors avoid the seams produced by clipping separate solid-color strips.
+pub fn horizontal_gradient(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: f32,
+    left: Color32,
+    right: Color32,
+) {
+    if !rect.is_positive() {
+        return;
+    }
+    let feather = 0.5 / painter.ctx().pixels_per_point();
+    let radius = radius
+        .min(rect.width().min(rect.height()) * 0.5)
+        .max(feather);
+    let color_at = |x: f32| {
+        let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let a = left.to_array();
+        let b = right.to_array();
+        let channels = std::array::from_fn::<_, 4, _>(|i| {
+            egui::lerp(f32::from(a[i])..=f32::from(b[i]), fraction).round() as u8
+        });
+        Color32::from_rgba_premultiplied(channels[0], channels[1], channels[2], channels[3])
+    };
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.center(), color_at(rect.center().x));
+    for (center, start) in [
+        (
+            egui::pos2(rect.right() - radius, rect.top() + radius),
+            -90.0_f32,
+        ),
+        (
+            egui::pos2(rect.right() - radius, rect.bottom() - radius),
+            0.0,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.bottom() - radius),
+            90.0,
+        ),
+        (egui::pos2(rect.left() + radius, rect.top() + radius), 180.0),
+    ] {
+        for step in 0..=8 {
+            let angle = (start + step as f32 * 90.0 / 8.0).to_radians();
+            let normal = egui::vec2(angle.cos(), angle.sin());
+            let inner = center + normal * (radius - feather);
+            mesh.colored_vertex(inner, color_at(inner.x));
+            mesh.colored_vertex(center + normal * (radius + feather), Color32::TRANSPARENT);
+        }
+    }
+    let count = (mesh.vertices.len() - 1) as u32 / 2;
+    for index in 0..count {
+        let a = 1 + index * 2;
+        let b = 1 + ((index + 1) % count) * 2;
+        mesh.add_triangle(0, a, b);
+        mesh.add_triangle(a, a + 1, b);
+        mesh.add_triangle(b, a + 1, b + 1);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
 pub fn semibold() -> FontFamily {
     FontFamily::Name("Inter Semibold".into())
 }

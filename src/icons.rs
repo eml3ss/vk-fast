@@ -382,10 +382,10 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Settings => {
             let gear_stroke = Stroke::new(1.8, color);
-            let mut outline = Vec::with_capacity(33);
-            for tooth in 0..8 {
-                let center_angle = tooth as f32 * 45.0 - 90.0;
-                for (offset, radius) in [(-12.0, 7.2), (-11.0, 9.5), (11.0, 9.5), (12.0, 7.2)] {
+            let mut outline = Vec::with_capacity(25);
+            for tooth in 0..6 {
+                let center_angle = tooth as f32 * 60.0 - 90.0;
+                for (offset, radius) in [(-19.0, 7.5), (-14.0, 9.3), (14.0, 9.3), (19.0, 7.5)] {
                     let angle = (center_angle + offset).to_radians();
                     outline.push(point(
                         12.0 + radius * angle.cos(),
@@ -394,7 +394,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 }
             }
             outline.push(outline[0]);
-            rounded_stroke(painter, outline, gear_stroke, 0.9 * scale);
+            rounded_stroke(painter, outline, gear_stroke, 1.5 * scale);
             painter.circle_stroke(point(12.0, 12.0), 3.0 * scale, gear_stroke);
         }
         Icon::Interface => {
@@ -1347,7 +1347,13 @@ mod tests {
                 .map(|point| point.distance(rect.center()) * 24.0 / size)
                 .collect();
             assert!(radii.iter().any(|radius| *radius > 9.0));
-            assert!(radii.iter().any(|radius| *radius < 7.3));
+            assert!(radii.iter().any(|radius| *radius < 7.8));
+            let teeth = radii
+                .iter()
+                .zip(radii.iter().cycle().skip(1))
+                .filter(|(a, b)| **a <= 8.8 && **b > 8.8)
+                .count();
+            assert_eq!(teeth, 6, "Gear should keep just six broad, rounded teeth");
             assert!(
                 !output
                     .shapes

@@ -34,9 +34,11 @@ use crate::{
 #[path = "web_audio/audio_upload.rs"]
 mod audio_upload;
 mod owner_page;
+mod playlist_follow;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
 pub use owner_page::OwnerPage;
+pub use playlist_follow::PlaylistFollowChange;
 pub use playlist_manage::{
     PLAYLIST_DESCRIPTION_MAX_CHARS, PlaylistCoverChange, PlaylistEditDetails, PlaylistEditUpdate,
 };
@@ -211,6 +213,8 @@ pub struct PlaylistCreator {
 #[derive(Clone)]
 pub struct UserPlaylist {
     pub album: AlbumRef,
+    /// Server-provided source of a followed copy; never guessed from its title.
+    pub original: Option<AlbumRef>,
     pub subtitle: String,
     pub track_count: Option<usize>,
     /// Native edit permission, never inferred from a followed copy's local ID.
@@ -282,6 +286,7 @@ struct State {
     cursor: Option<Cursor>,
     streams: HashMap<(i64, i64), StreamInfo>,
     mix: Option<MixSession>,
+    followed_playlists: playlist_follow::FollowState,
 }
 
 // Per-track URL hashes are credentials for the private reload endpoint.
@@ -1959,6 +1964,7 @@ impl WebAudioClient {
     ) -> Result<Vec<UserPlaylist>, WebAudioError> {
         const MAX_PLAYLISTS: usize = 10_000;
         let generation = self.home_owner(expected_owner, canceled)?;
+        let revision = self.playlist_follow_revision(expected_owner, generation, canceled)?;
         let mut playlists = Vec::new();
         let mut seen = HashSet::new();
         let mut offset = 0;
@@ -1989,6 +1995,13 @@ impl WebAudioClient {
                 return Err(WebAudioError::Pagination);
             }
             let Some(next_offset) = next_offset else {
+                self.cache_followed_playlists(
+                    expected_owner,
+                    generation,
+                    revision,
+                    &playlists,
+                    canceled,
+                )?;
                 return Ok(playlists);
             };
             offset = next_offset;
@@ -3069,6 +3082,7 @@ fn parse_user_playlists(value: &Value) -> Result<UserPlaylistPage, WebAudioError
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok());
         items.push(UserPlaylist {
+            original: playlist_follow::original_reference(row, &album)?,
             album,
             subtitle,
             track_count,

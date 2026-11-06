@@ -25,6 +25,19 @@ pub(super) struct State {
     autoplay: Option<PlayRequest>,
     mix_notice: Option<Instant>,
     track_notice: Option<Instant>,
+    follow: Option<FollowRequest>,
+    refresh_followed: bool,
+}
+
+struct FollowRequest {
+    owner: i64,
+    canceled: Arc<AtomicBool>,
+    receiver: Receiver<Result<crate::web_audio::PlaylistFollowChange, WebAudioError>>,
+}
+impl Drop for FollowRequest {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+    }
 }
 
 struct Form {
@@ -155,6 +168,148 @@ impl State {
 }
 
 impl MusicApp {
+    pub(super) fn playlist_follow_view(&self, target: &AlbumRef) -> Option<detail_ui::FollowView> {
+        if self.can_edit_playlist(target) {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        let saved = session
+            .music
+            .as_ref()?
+            .playlist_followed(session.profile.id, target)?;
+        if !saved && target.owner_id == session.profile.id {
+            return None;
+        }
+        Some(detail_ui::FollowView {
+            saved,
+            busy: self.playlist_controls.follow.is_some(),
+        })
+    }
+
+    pub(super) fn toggle_playlist_follow(&mut self, ctx: &egui::Context, target: AlbumRef) {
+        let Some(view) = self.playlist_follow_view(&target).filter(|view| !view.busy) else {
+            return;
+        };
+        let Some(session) = &self.session else { return };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let repaint = self.repaint_target.with_context(ctx);
+        self.workers.retain(|worker| !worker.is_finished());
+        match thread::Builder::new()
+            .name("vk-playlist-follow".into())
+            .spawn(move || {
+                let result =
+                    client.set_playlist_follow(owner, &target, !view.saved, &worker_cancel);
+                let _ = sender.send(result);
+                repaint.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.playlist_controls.follow = Some(FollowRequest {
+                    owner,
+                    canceled,
+                    receiver,
+                });
+            }
+            Err(_) => self.track_menu_error = Some(WebAudioError::Network),
+        }
+    }
+
+    fn poll_playlist_follow(&mut self, ctx: &egui::Context) {
+        let result = self.playlist_controls.follow.as_ref().and_then(|request| {
+            match request.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(WebAudioError::Network)),
+            }
+        });
+        if let Some(result) = result {
+            let request = self.playlist_controls.follow.take().unwrap();
+            if !request.canceled.load(Ordering::Acquire)
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.profile.id == request.owner)
+            {
+                match result {
+                    Ok(change) => {
+                        if let Some(removed) = change.removed {
+                            self.playlist_items
+                                .retain(|item| key(&item.reference) != removed);
+                            self.playlist_controls.pins.retain(|pin| *pin != removed);
+                            let _ = write_pins(request.owner, &self.playlist_controls.pins);
+                            self.repoint_unfollowed_playlist(removed, &change.original);
+                        }
+                        if let Some(saved) = change.saved
+                            && !self
+                                .playlist_items
+                                .iter()
+                                .any(|item| key(&item.reference) == key(&saved))
+                        {
+                            self.playlist_items.push(playlist_ui::PlaylistItem {
+                                reference: saved,
+                                subtitle: String::new(),
+                                can_edit: false,
+                                pinned: false,
+                            });
+                            self.remember_playlist_order();
+                            self.sync_playlist_pins();
+                        }
+                        self.playlist_controls.refresh_followed = true;
+                    }
+                    Err(WebAudioError::Canceled) => {}
+                    Err(error) => self.track_menu_error = Some(error),
+                }
+                ctx.request_repaint();
+            }
+        }
+        if self.playlist_controls.refresh_followed
+            && self.playlist_request.is_none()
+            && self.playlist_ready()
+        {
+            self.playlist_controls.refresh_followed = false;
+            self.load_playlists(ctx, true);
+        }
+    }
+
+    fn repoint_unfollowed_playlist(&mut self, removed: Key, original: &AlbumRef) {
+        if key(original) == removed {
+            return;
+        }
+        let old = MusicPage::Playlist(AlbumRef {
+            owner_id: removed.0,
+            id: removed.1,
+            ..original.clone()
+        });
+        let replacement = MusicPage::Playlist(original.clone());
+        if let Some(old_key) = old.detail_key() {
+            if let Some(mut data) = self.details.remove(&old_key) {
+                if let DetailPage::Playlist(page) = Arc::make_mut(&mut data) {
+                    page.album = original.clone();
+                }
+                self.details.insert(replacement.detail_key().unwrap(), data);
+            }
+            if self.page.detail_key().as_ref() == Some(&old_key) {
+                self.page = replacement.clone();
+                self.detail_request = None;
+            }
+            for location in self
+                .back_history
+                .iter_mut()
+                .chain(self.forward_history.iter_mut())
+            {
+                if location.page.detail_key().as_ref() == Some(&old_key) {
+                    location.page = replacement.clone();
+                }
+            }
+        }
+    }
+
     pub(super) fn playlist_mix_unavailable(&mut self, ctx: &egui::Context) {
         self.playlist_controls.mix_notice = Some(Instant::now() + Duration::from_secs(3));
         ctx.request_repaint();
@@ -725,6 +880,7 @@ impl MusicApp {
     }
 
     pub(super) fn poll_playlist_actions(&mut self, ctx: &egui::Context) {
+        self.poll_playlist_follow(ctx);
         self.poll_playlist_manage(ctx);
         if let Some(receiver) = &self.playlist_controls.picker {
             let result = match receiver.try_recv() {

@@ -103,6 +103,65 @@ fn ids(app: &MusicApp) -> Vec<i64> {
 }
 
 #[test]
+fn unfollowing_an_open_saved_copy_keeps_its_tracks_visible_and_refreshes_after_an_old_fetch() {
+    let ctx = egui::Context::default();
+    let mut app = search_test_app(&ctx);
+    let saved = reference(77);
+    let original = AlbumRef {
+        owner_id: -99,
+        id: 10,
+        ..saved.clone()
+    };
+    app.page = MusicPage::Playlist(saved.clone());
+    let old_key = app.page.detail_key().unwrap();
+    app.details
+        .insert(old_key.clone(), detail(saved.clone(), false));
+    let playing = page(1, &[99]).items.remove(0);
+    app.playing = Some(playing.clone());
+    app.play_queue = Some(vec![playing.clone()]);
+    app.resume_position = Some(19.5);
+    app.playlist_items = vec![playlist_ui::PlaylistItem {
+        can_edit: false,
+        ..item(77)
+    }];
+    let (_fetch_sender, fetch_receiver) = mpsc::sync_channel(1);
+    app.playlist_request = Some(PlaylistRequest {
+        owner: 42,
+        canceled: Arc::new(AtomicBool::new(false)),
+        receiver: fetch_receiver,
+    });
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender
+        .send(Ok(crate::web_audio::PlaylistFollowChange {
+            original: original.clone(),
+            saved: None,
+            removed: Some((42, 77)),
+        }))
+        .ok()
+        .unwrap();
+    app.playlist_controls.follow = Some(FollowRequest {
+        owner: 42,
+        canceled: Arc::new(AtomicBool::new(false)),
+        receiver,
+    });
+    app.poll_playlist_actions(&ctx);
+    assert!(app.page == MusicPage::Playlist(original.clone()));
+    assert!(!app.details.contains_key(&old_key));
+    let new_key = app.page.detail_key().unwrap();
+    let DetailPage::Playlist(data) = app.details[&new_key].as_ref() else {
+        panic!("Playlist stays open")
+    };
+    assert_eq!(data.album, original);
+    assert_eq!(data.tracks[0].key(), playing.key());
+    assert!(app.playlist_items.is_empty());
+    assert!(app.playlist_controls.refresh_followed && app.playlist_request.is_some());
+    assert!(app.playlist_controls.follow.is_none() && app.workers.is_empty());
+    assert_eq!(app.playing.as_ref().unwrap().key(), playing.key());
+    assert_eq!(app.play_queue.as_ref().unwrap()[0].key(), playing.key());
+    assert_eq!(app.resume_position, Some(19.5));
+}
+
+#[test]
 fn playlist_radio_has_its_own_source_and_only_accepts_matching_continuations() {
     let ctx = egui::Context::default();
     let mut app = search_test_app(&ctx);

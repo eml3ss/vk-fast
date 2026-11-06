@@ -164,25 +164,13 @@ fn cell_width(width: f32, columns: usize) -> f32 {
 }
 
 fn gradient(painter: &egui::Painter, rect: egui::Rect) {
-    // Each strip paints the same rounded silhouette. Its corners keep egui's
-    // anti-aliasing, and no gradient image or external asset is necessary.
-    for step in 0..32 {
-        let fraction = step as f32 / 31.0;
-        let channel = |left: u8, right: u8| {
-            (f32::from(left) + (f32::from(right) - f32::from(left)) * fraction).round() as u8
-        };
-        let color = Color32::from_rgb(channel(26, 22), channel(51, 29), channel(84, 42));
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + rect.width() * step as f32 / 32.0, rect.top()),
-            egui::pos2(
-                rect.left() + rect.width() * (step + 1) as f32 / 32.0,
-                rect.bottom(),
-            ),
-        );
-        painter
-            .with_clip_rect(painter.clip_rect().intersect(strip))
-            .rect_filled(rect, 16.0, color);
-    }
+    theme::horizontal_gradient(
+        painter,
+        rect,
+        16.0,
+        Color32::from_rgb(26, 51, 84),
+        Color32::from_rgb(22, 29, 42),
+    );
     painter.rect_stroke(
         rect,
         16.0,
