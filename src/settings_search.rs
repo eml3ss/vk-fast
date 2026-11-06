@@ -22,6 +22,8 @@ pub enum Setting {
     CacheClear,
     CacheStatus,
     About,
+    #[cfg(any(windows, test))]
+    Updates,
 }
 
 pub struct Query {
@@ -82,6 +84,10 @@ impl Query {
             }
             Setting::About => {
                 "о приложении приложение описание версия лицензия about application version license gpl vk fast"
+            }
+            #[cfg(any(windows, test))]
+            Setting::Updates => {
+                "о приложении обновление обновления автоматически проверить новая версия windows github ota update updates automatically automatic check download version release"
             }
         };
         self.words.iter().all(|word| keywords.contains(word))

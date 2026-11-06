@@ -24,6 +24,7 @@ const DEFAULT_NORMALIZE_VOLUME: bool = false;
 const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
 const DEFAULT_LOGGING_ENABLED: bool = false;
 const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
+const DEFAULT_AUTO_UPDATES: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -53,6 +54,8 @@ struct Preferences {
     logging_enabled: bool,
     #[serde(deserialize_with = "deserialize_discord_rpc_enabled")]
     discord_rpc_enabled: bool,
+    #[serde(deserialize_with = "deserialize_auto_updates")]
+    auto_updates: bool,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -72,6 +75,7 @@ impl Default for Preferences {
             minimize_to_tray: DEFAULT_MINIMIZE_TO_TRAY,
             logging_enabled: DEFAULT_LOGGING_ENABLED,
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
+            auto_updates: DEFAULT_AUTO_UPDATES,
             extra: serde_json::Map::new(),
         }
     }
@@ -183,6 +187,14 @@ fn deserialize_discord_rpc_enabled<'de, D: serde::Deserializer<'de>>(
 
 fn valid_volume(volume: f32) -> bool {
     volume.is_finite() && (0.0..=1.0).contains(&volume)
+}
+
+fn deserialize_auto_updates<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(DEFAULT_AUTO_UPDATES))
 }
 
 fn invalid() -> io::Error {
@@ -406,6 +418,7 @@ fn load_at(path: &Path) -> io::Result<Option<f32>> {
             || json.get("minimize_to_tray").is_some()
             || json.get("logging_enabled").is_some()
             || json.get("discord_rpc_enabled").is_some()
+            || json.get("auto_updates").is_some()
             || json.get("shuffle").is_some()
             || json.get("repeat").is_some() =>
         {
@@ -658,6 +671,21 @@ pub fn save_discord_rpc_enabled(enabled: bool) -> io::Result<()> {
     save_discord_rpc_at(&preferences_path()?, enabled)
 }
 
+#[cfg(any(windows, test))]
+pub fn load_auto_updates() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_AUTO_UPDATES, |preferences| preferences.auto_updates)
+}
+
+#[cfg(any(windows, test))]
+pub fn save_auto_updates(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.auto_updates = enabled
+    })
+}
+
 /// Explicit startup migration. Loaders never create, move, or remove files.
 pub fn migrate_legacy() -> io::Result<()> {
     let destination = preferences_path()?;
@@ -691,6 +719,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn automatic_updates_default_on_and_explicit_opt_out_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [
+            r#"{}"#,
+            r#"{"volume":0.2}"#,
+            r#"{"auto_updates":"invalid"}"#,
+        ] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(preferences.auto_updates);
+        }
+        update_at(&path, |preferences| preferences.auto_updates = false).unwrap();
+        save_at(&path, 0.375).unwrap();
+        save_playback_modes_at(&path, true, RepeatMode::All).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(!restored.auto_updates);
+        assert_eq!(restored.volume, 0.375);
+        assert!(restored.shuffle);
     }
 
     #[test]

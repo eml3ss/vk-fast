@@ -20,7 +20,7 @@
 
 ## Распространение
 
-GitHub Release 0.1.0 содержит ровно четыре загруженных файла: Linux AppImage, Linux tar.gz, Windows portable.zip и NSIS-установщик. Дополнительные архивы исходников к релизу не прикладываются. Исходники VK Fast, локальные патчи библиотек, Cargo.lock и рецепты сборки находятся в теге `v0.1.0` этого репозитория.
+GitHub Release 0.1.0 содержит Linux AppImage/tar.gz и Windows portable.zip/NSIS; выпуск 0.1.1 обновляет Windows portable.zip и NSIS, добавляя OTA. Дополнительные архивы исходников к релизам не прикладываются. Исходники VK Fast, локальные патчи библиотек, Cargo.lock и рецепты сборки находятся в соответствующем теге этого репозитория (`v0.1.0`, `v0.1.1`).
 
 - Rust-компоненты: [Windows-уведомления](third-party/windows/Rust-notices.txt), [Linux-уведомления](third-party/linux/Rust-notices.txt). Версии закреплены в Cargo.lock; исходники этих версий доступны на crates.io по ссылкам из уведомлений.
 - FFmpeg 9.0.2: [исходный код](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz), [Windows-рецепт](../scripts/build-ffmpeg-windows.sh), [Linux-рецепт](../scripts/build-ffmpeg-linux.sh), [исходные уведомления](third-party/windows/decoder/ffmpeg). SHA-256 исходного архива закреплён в рецептах.

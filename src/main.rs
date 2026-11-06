@@ -61,6 +61,8 @@ mod theme;
 mod titlebar;
 mod track_menu;
 mod ui_fonts;
+#[cfg(any(windows, test))]
+mod updater;
 mod vk;
 mod web_audio;
 mod web_login_state;
@@ -73,6 +75,26 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if args.first().is_some_and(|arg| arg == "--apply-update") {
+        if args.len() != 2 {
+            std::process::exit(2);
+        }
+        if let Err(error) = updater::install::run_helper(std::path::Path::new(&args[1])) {
+            updater::install::report_error(std::path::Path::new(&args[1]), error);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    #[cfg(windows)]
+    let update_stage = if args.iter().any(|arg| arg == "--update-complete") {
+        if args.len() != 2 || args[0] != "--update-complete" {
+            std::process::exit(2);
+        }
+        Some(std::path::PathBuf::from(&args[1]))
+    } else {
+        None
+    };
     #[cfg(windows)]
     if args.iter().any(|arg| arg == "--print-data-paths") {
         let config =
@@ -323,6 +345,11 @@ fn main() -> eframe::Result {
             }
             #[cfg(feature = "screenshot")]
             let app = app.with_screenshot(screenshot_path.clone());
+            #[cfg(windows)]
+            if let Some(stage) = &update_stage {
+                updater::install::complete_restart(stage)
+                    .map_err(|error| std::io::Error::other(error.message(language)))?;
+            }
             Ok(app)
         }),
     );

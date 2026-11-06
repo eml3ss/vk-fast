@@ -40,6 +40,9 @@ mod tray_app;
 mod unavailable_library_tests;
 #[path = "unavailable_playback.rs"]
 mod unavailable_playback;
+#[cfg(any(windows, test))]
+#[path = "update_app.rs"]
+mod update_app;
 
 use crate::{
     audio_cache::{AudioCache, CacheKey, CacheStats},
@@ -1040,6 +1043,8 @@ pub struct MusicApp {
     discord_rpc: discord_rpc_app::State,
     discord_rpc_enabled: bool,
     discord_rpc_save_failed: bool,
+    #[cfg(any(windows, test))]
+    updater: update_app::State,
     playing: Option<Track>,
     playback_pending: Option<Receiver<Result<ResolvedTrack, UiError>>>,
     playback_cancel: Option<Arc<AtomicBool>>,
@@ -1350,6 +1355,12 @@ impl MusicApp {
             discord_rpc: discord_rpc_app::State::default(),
             discord_rpc_enabled: preferences::load_discord_rpc_enabled(),
             discord_rpc_save_failed: false,
+            #[cfg(any(windows, test))]
+            updater: if cfg!(test) {
+                update_app::State::default()
+            } else {
+                update_app::State::new(preferences::load_auto_updates())
+            },
             playing: None,
             playback_pending: None,
             playback_cancel: None,
@@ -3746,7 +3757,11 @@ impl MusicApp {
                 } else {
                     0.0
                 };
-            let available = (ui.available_width() - 96.0 - caption_room).max(80.0);
+            #[cfg(any(windows, test))]
+            let update_width = self.updater.notification_width();
+            #[cfg(not(any(windows, test)))]
+            let update_width = 0.0;
+            let available = (ui.available_width() - 96.0 - caption_room - update_width).max(80.0);
             let search_width = if self.settings_open {
                 available
             } else {
@@ -3800,6 +3815,8 @@ impl MusicApp {
                         self.open_settings(ui.ctx());
                     }
                 }
+                #[cfg(any(windows, test))]
+                self.updater.notification_button(ui, language);
             });
         });
     }
@@ -7458,7 +7475,11 @@ impl MusicApp {
                 Setting::CacheClear,
                 Setting::CacheStatus,
             ],
-            SettingsSection::About => &[Setting::About],
+            SettingsSection::About => &[
+                Setting::About,
+                #[cfg(any(windows, test))]
+                Setting::Updates,
+            ],
         };
         fields.iter().any(|field| query.matches(*field))
     }
@@ -7805,28 +7826,34 @@ impl MusicApp {
                 }
             }
             SettingsSection::About => {
-                ui.horizontal(|ui| {
-                    crate::app_icon::show(ui, 56.0);
+                if query.matches(Setting::About) {
+                    ui.horizontal(|ui| {
+                        crate::app_icon::show(ui, 56.0);
+                        ui.label(
+                            RichText::new("VK")
+                                .size(28.0)
+                                .family(theme::semibold())
+                                .color(ACCENT),
+                        );
+                        ui.label(RichText::new("FAST").size(26.0).family(theme::semibold()));
+                    });
+                    ui.add_space(12.0);
                     ui.label(
-                        RichText::new("VK")
-                            .size(28.0)
-                            .family(theme::semibold())
-                            .color(ACCENT),
+                        RichText::new(format!(
+                            "{} {}",
+                            t("Версия", "Version"),
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .color(MUTED),
                     );
-                    ui.label(RichText::new("FAST").size(26.0).family(theme::semibold()));
-                });
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} {}",
-                        t("Версия", "Version"),
-                        env!("CARGO_PKG_VERSION")
-                    ))
-                    .color(MUTED),
-                );
-                ui.label(t("Музыкальный плеер для VK", "Music player for VK"));
-                ui.add_space(12.0);
-                ui.label(RichText::new("GPL-3.0-only").small().color(MUTED));
+                    ui.label(t("Музыкальный плеер для VK", "Music player for VK"));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("GPL-3.0-only").small().color(MUTED));
+                }
+                #[cfg(any(windows, test))]
+                if query.matches(Setting::Updates) {
+                    self.updater.settings(ui, language, &self.repaint_target);
+                }
             }
         }
     }
@@ -7961,6 +7988,14 @@ impl MusicApp {
     }
 
     fn render_overlays_and_shortcuts(&mut self, ui: &mut egui::Ui) {
+        #[cfg(any(windows, test))]
+        {
+            self.updater
+                .dialog(ui.ctx(), self.language, &self.repaint_target);
+            if self.updater.open {
+                return;
+            }
+        }
         if !self.render_track_unavailable_notice(ui.ctx()) && !self.playlist_mix_notice(ui.ctx()) {
             let menu_error = self.track_menu_error.is_some();
             if let Some(error) = self.track_menu_error.as_ref().or(self.like_error.as_ref()) {
@@ -8070,6 +8105,15 @@ impl eframe::App for MusicApp {
 
 impl MusicApp {
     pub(super) fn background_tick(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
+        #[cfg(any(windows, test))]
+        {
+            if self.updater.tick(&self.repaint_target) {
+                self.request_quit(ctx);
+            }
+            if let Some(delay) = self.updater.next_check_in() {
+                ctx.request_repaint_after(delay);
+            }
+        }
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
         self.poll_system_media(ctx, frame);
@@ -8625,6 +8669,8 @@ mod tests {
             discord_rpc: discord_rpc_app::State::default(),
             discord_rpc_enabled: false,
             discord_rpc_save_failed: false,
+            #[cfg(any(windows, test))]
+            updater: update_app::State::default(),
             playing: None,
             playback_pending: None,
             playback_cancel: None,
