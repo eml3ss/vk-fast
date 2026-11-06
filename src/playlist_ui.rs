@@ -1,18 +1,21 @@
 //! Sidebar playlist presentation. The application owns loading, navigation and
 //! playback; this module returns intents without touching account data.
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense};
+use std::hash::{Hash, Hasher};
 
 use crate::{
     cover_art::CoverCache,
     i18n::Language,
     icons::{self, Icon},
-    model::AlbumRef,
+    model::{AlbumRef, ArtistRef},
     theme,
+    web_audio::{CollectionKind, FollowedArtist},
 };
 
 #[derive(Clone)]
 pub struct PlaylistItem {
     pub reference: AlbumRef,
+    pub kind: CollectionKind,
     pub subtitle: String,
     pub can_edit: bool,
     pub pinned: bool,
@@ -21,6 +24,9 @@ pub struct PlaylistItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Open(AlbumRef),
+    OpenAlbum(AlbumRef),
+    OpenArtist(ArtistRef),
+    UnfollowArtist(ArtistRef),
     Refresh,
     Create,
     Play(AlbumRef),
@@ -36,32 +42,104 @@ pub enum Action {
     },
 }
 
+#[derive(Default)]
+pub struct SearchState {
+    open: bool,
+    query: String,
+    stamp: Option<(String, u64)>,
+    items: Vec<PlaylistItem>,
+    artists: Vec<FollowedArtist>,
+    input_id: Option<egui::Id>,
+}
+
+impl SearchState {
+    fn filter(&mut self, items: &[PlaylistItem], artists: &[FollowedArtist]) {
+        let query = self.query.trim().to_lowercase();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for item in items {
+            (
+                item.reference.owner_id,
+                item.reference.id,
+                &item.reference.title,
+                &item.subtitle,
+                &item.reference.cover_url,
+                item.kind,
+                item.pinned,
+                item.can_edit,
+            )
+                .hash(&mut hasher);
+        }
+        for item in artists {
+            (&item.artist.id, &item.artist.name, &item.image_url).hash(&mut hasher);
+        }
+        let stamp = (query.clone(), hasher.finish());
+        if self.stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.items = items
+            .iter()
+            .filter(|item| {
+                item.reference.title.to_lowercase().contains(&query)
+                    || item.subtitle.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        self.artists = artists
+            .iter()
+            .filter(|item| item.artist.name.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        self.stamp = Some(stamp);
+    }
+}
+
+pub struct SidebarView<'a> {
+    pub language: Language,
+    pub items: &'a [PlaylistItem],
+    pub artists: &'a [FollowedArtist],
+    pub selected: Option<(i64, i64)>,
+    pub selected_artist: Option<&'a str>,
+    pub loading: bool,
+    pub error: Option<&'a str>,
+}
+
 pub fn show_sidebar(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
-    language: Language,
-    items: &[PlaylistItem],
-    selected: Option<(i64, i64)>,
-    loading: bool,
-    error: Option<&str>,
+    search: &mut SearchState,
+    view: SidebarView<'_>,
 ) -> Option<Action> {
+    let SidebarView {
+        language,
+        items,
+        artists,
+        selected,
+        selected_artist,
+        loading,
+        error,
+    } = view;
     let mut action = None;
+    let mut focus_search = false;
     let drag_id = ui.id().with("sidebar-playlist-drag");
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = 24.0;
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(4.0);
             icons::show(ui, Icon::Library, theme::MUTED, 16.0);
-            ui.label(
-                RichText::new(language.text("Плейлисты", "Playlists"))
-                    .family(theme::semibold())
-                    .color(theme::MUTED),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(language.text("Библиотека", "Library"))
+                        .family(theme::semibold())
+                        .color(theme::MUTED),
+                )
+                .truncate(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if header_button(
                     ui,
                     Icon::Refresh,
-                    language.text("Обновить плейлисты", "Refresh playlists"),
+                    language.text("Обновить библиотеку", "Refresh library"),
                     !loading,
                 )
                 .clicked()
@@ -78,10 +156,63 @@ pub fn show_sidebar(
                 {
                     action = Some(Action::Create);
                 }
+                if header_button(
+                    ui,
+                    Icon::Search,
+                    language.text("Поиск в библиотеке", "Search in library"),
+                    true,
+                )
+                .clicked()
+                {
+                    search.open = !search.open;
+                    if search.open {
+                        focus_search = true;
+                    } else {
+                        search.query.clear();
+                        if let Some(id) = search.input_id {
+                            ui.ctx().memory_mut(|memory| memory.surrender_focus(id));
+                        }
+                    }
+                }
             });
         });
     });
     ui.add_space(4.0);
+    if search.open {
+        egui::Frame::new()
+            .fill(theme::SURFACE)
+            .corner_radius(8)
+            .inner_margin(8)
+            .show(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 22.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    icons::show(ui, Icon::Search, theme::MUTED, 16.0);
+                    let input = ui.add(
+                        egui::TextEdit::singleline(&mut search.query)
+                            .id_salt("library-search-input")
+                            .frame(egui::Frame::NONE)
+                            .desired_width(ui.available_width())
+                            .char_limit(256)
+                            .hint_text(language.text("Поиск в библиотеке", "Search in library")),
+                    );
+                    search.input_id = Some(input.id);
+                    if focus_search {
+                        input.request_focus();
+                    }
+                });
+            });
+        ui.add_space(4.0);
+    }
+    let filtering = search.open && !search.query.trim().is_empty();
+    let query = search.query.trim().to_lowercase();
+    let (items, artists) = if filtering {
+        search.filter(items, artists);
+        ui.ctx().data_mut(|data| data.remove::<DragMemory>(drag_id));
+        (search.items.as_slice(), search.artists.as_slice())
+    } else {
+        (items, artists)
+    };
     if let Some(error) = error {
         ui.add(
             egui::Label::new(
@@ -94,13 +225,19 @@ pub fn show_sidebar(
         );
         ui.add_space(4.0);
     }
-    if items.is_empty() {
+    if items.is_empty() && artists.is_empty() {
         ui.ctx().data_mut(|data| data.remove::<DragMemory>(drag_id));
-        if loading {
+        if filtering {
+            ui.label(
+                RichText::new(language.text("Ничего не найдено", "No results"))
+                    .small()
+                    .color(theme::MUTED),
+            );
+        } else if loading {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(14.0));
                 ui.label(
-                    RichText::new(language.text("Загружаем плейлисты…", "Loading playlists…"))
+                    RichText::new(language.text("Загружаем библиотеку…", "Loading library…"))
                         .small()
                         .color(theme::MUTED),
                 );
@@ -108,7 +245,7 @@ pub fn show_sidebar(
         } else if error.is_none() {
             ui.add(
                 egui::Label::new(
-                    RichText::new(language.text("Плейлистов пока нет", "No playlists yet"))
+                    RichText::new(language.text("Библиотека пока пуста", "Your library is empty"))
                         .small()
                         .color(theme::MUTED),
                 )
@@ -141,12 +278,12 @@ pub fn show_sidebar(
         theme::scroll_rows(
             ui,
             egui::ScrollArea::vertical()
-                .id_salt("sidebar-playlists")
+                .id_salt(("sidebar-playlists", &query))
                 .max_height(height)
                 .min_scrolled_height(0.0)
                 .auto_shrink([false, false]),
             48.0,
-            items.len(),
+            items.len() + artists.len(),
             |ui, range| {
                 if let Some(intent) = playlist_rows(
                     ui,
@@ -155,8 +292,24 @@ pub fn show_sidebar(
                         language,
                         items,
                         selected,
-                        drag_id,
+                        drag_id: if filtering {
+                            drag_id.with(("query", &query))
+                        } else {
+                            drag_id
+                        },
+                        allow_reorder: !filtering,
                     },
+                    range.clone(),
+                ) {
+                    action = Some(intent);
+                }
+                if let Some(intent) = artist_rows(
+                    ui,
+                    covers,
+                    language,
+                    artists,
+                    items.len(),
+                    selected_artist,
                     range,
                 ) {
                     action = Some(intent);
@@ -191,6 +344,7 @@ struct RowView<'a> {
     items: &'a [PlaylistItem],
     selected: Option<PlaylistKey>,
     drag_id: egui::Id,
+    allow_reorder: bool,
 }
 
 #[derive(Default)]
@@ -338,7 +492,11 @@ fn playlist_rows(
         let response = ui.interact(
             rect,
             view.drag_id.with(("playlist-row", key)),
-            Sense::click_and_drag(),
+            if view.allow_reorder {
+                Sense::click_and_drag()
+            } else {
+                Sense::click()
+            },
         );
         if response.drag_started_by(egui::PointerButton::Primary)
             && !escape
@@ -392,7 +550,11 @@ fn playlist_rows(
         });
         if !was_dragging && !dragging && response.clicked() {
             response.request_focus();
-            action = Some(Action::Open(item.reference.clone()));
+            action = Some(if item.kind == CollectionKind::Album {
+                Action::OpenAlbum(item.reference.clone())
+            } else {
+                Action::Open(item.reference.clone())
+            });
         }
         if !was_dragging
             && !dragging
@@ -614,6 +776,14 @@ fn header_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> e
     .inner
 }
 
+struct Entry<'a> {
+    id: egui::Id,
+    title: &'a str,
+    subtitle: &'a str,
+    image: Option<&'a str>,
+    artist: bool,
+}
+
 fn paint_playlist_row(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
@@ -622,11 +792,41 @@ fn paint_playlist_row(
     rect: egui::Rect,
     state: RowPaint,
 ) {
-    let title = if item.reference.title.is_empty() {
-        language.text("Плейлист", "Playlist")
-    } else {
-        &item.reference.title
+    let kind = match item.kind {
+        CollectionKind::Playlist => language.text("Плейлист", "Playlist"),
+        CollectionKind::Album => language.text("Альбом", "Album"),
     };
+    let subtitle = if item.subtitle.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind} · {}", item.subtitle)
+    };
+    paint_entry(
+        ui,
+        covers,
+        rect,
+        state,
+        Entry {
+            id: ui.id().with((item.reference.owner_id, item.reference.id)),
+            title: if item.reference.title.is_empty() {
+                kind
+            } else {
+                &item.reference.title
+            },
+            subtitle: &subtitle,
+            image: item.reference.cover_url.as_deref(),
+            artist: false,
+        },
+    );
+}
+
+fn paint_entry(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    rect: egui::Rect,
+    state: RowPaint,
+    entry: Entry<'_>,
+) {
     if state.selected || state.hovered || state.focused || state.ghost {
         ui.painter().rect_filled(
             rect,
@@ -638,51 +838,134 @@ fn paint_playlist_row(
             },
         );
     }
-    if ui.is_rect_visible(rect) {
-        let art =
-            egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 8.0), egui::vec2(32.0, 32.0));
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let art = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 8.0), egui::vec2(32.0, 32.0));
+    if entry.artist && entry.image.is_none() {
+        ui.painter()
+            .circle_filled(art.center(), 16.0, theme::SELECTED);
+        icons::paint(ui.painter(), art.shrink(7.0), Icon::Account, theme::MUTED);
+    } else {
         let mut image = ui.new_child(
             egui::UiBuilder::new()
-                .id_salt(("playlist-art", item.reference.owner_id, item.reference.id))
+                .id(entry.id.with("cover"))
                 .max_rect(art)
                 .layout(Layout::left_to_right(Align::Center)),
         );
         image.set_clip_rect(ui.clip_rect().intersect(art));
-        covers.show(&mut image, item.reference.cover_url.as_deref(), 32.0);
-        let text = egui::Rect::from_min_max(
-            rect.min + egui::vec2(44.0, 6.0),
-            rect.max - egui::vec2(6.0, 6.0),
+        covers.show_rounded(
+            &mut image,
+            entry.image,
+            32.0,
+            if entry.artist { 16 } else { 6 },
         );
-        let title_color = if state.selected {
+    }
+    let text = egui::Rect::from_min_max(
+        rect.min + egui::vec2(44.0, 6.0),
+        rect.max - egui::vec2(6.0, 6.0),
+    );
+    paint_line(
+        ui,
+        egui::Rect::from_min_max(text.min, egui::pos2(text.right(), rect.center().y)),
+        entry.title,
+        FontId::new(14.0, theme::semibold()),
+        if state.selected {
             theme::ACCENT
         } else {
             ui.visuals().text_color()
-        };
-        if item.subtitle.is_empty() {
-            paint_line(
-                ui,
-                text,
-                title,
-                FontId::new(14.0, theme::semibold()),
-                title_color,
-            );
-        } else {
-            paint_line(
-                ui,
-                egui::Rect::from_min_max(text.min, egui::pos2(text.right(), rect.center().y)),
-                title,
-                FontId::new(14.0, theme::semibold()),
-                title_color,
-            );
-            paint_line(
-                ui,
-                egui::Rect::from_min_max(egui::pos2(text.left(), rect.center().y + 2.0), text.max),
-                &item.subtitle,
-                egui::TextStyle::Small.resolve(ui.style()),
-                theme::MUTED,
-            );
+        },
+    );
+    paint_line(
+        ui,
+        egui::Rect::from_min_max(egui::pos2(text.left(), rect.center().y + 2.0), text.max),
+        entry.subtitle,
+        egui::TextStyle::Small.resolve(ui.style()),
+        theme::MUTED,
+    );
+}
+
+fn artist_rows(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    language: Language,
+    artists: &[FollowedArtist],
+    offset: usize,
+    selected: Option<&str>,
+    range: std::ops::Range<usize>,
+) -> Option<Action> {
+    let origin_y = ui.max_rect().top() - range.start as f32 * ROW_STRIDE;
+    let mut action = None;
+    for (index, item) in artists
+        .iter()
+        .enumerate()
+        .take(range.end.saturating_sub(offset))
+        .skip(range.start.saturating_sub(offset))
+    {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(
+                ui.max_rect().left(),
+                origin_y + (index + offset) as f32 * ROW_STRIDE,
+            ),
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+        );
+        let response = ui.interact(
+            rect,
+            ui.id().with(("library-artist", &item.artist.id)),
+            Sense::click(),
+        );
+        paint_entry(
+            ui,
+            covers,
+            rect,
+            RowPaint {
+                selected: selected == Some(item.artist.id.as_str()),
+                hovered: response.hovered(),
+                focused: response.has_focus(),
+                ghost: false,
+            },
+            Entry {
+                id: response.id,
+                title: &item.artist.name,
+                subtitle: language.text("Исполнитель", "Artist"),
+                image: item.image_url.as_deref(),
+                artist: true,
+            },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                ui.is_enabled(),
+                selected == Some(item.artist.id.as_str()),
+                &item.artist.name,
+            )
+        });
+        if response.clicked() {
+            action = Some(Action::OpenArtist(item.artist.clone()));
         }
+        if let Some(popup) = egui::Popup::context_menu(&response).show(|ui| {
+            ui.set_width(230.0);
+            if menu_row(
+                ui,
+                Icon::RemoveFromLibrary,
+                language.text("Отписаться", "Unfollow"),
+                true,
+            )
+            .clicked()
+            {
+                ui.close();
+                return Some(Action::UnfollowArtist(item.artist.clone()));
+            }
+            None
+        }) && let Some(intent) = popup.inner
+        {
+            action = Some(intent);
+        }
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(&item.artist.name);
     }
+    action
 }
 
 fn paint_line(ui: &egui::Ui, rect: egui::Rect, label: &str, font: FontId, color: Color32) {
@@ -705,8 +988,143 @@ fn paint_line(ui: &egui::Ui, rect: egui::Rect, label: &str, font: FontId, color:
 mod tests {
     use super::*;
 
+    #[test]
+    fn library_search_toggles_filters_collections_and_artists_and_restores_every_row_when_hidden() {
+        struct Harness {
+            ctx: egui::Context,
+            covers: CoverCache,
+            search: SearchState,
+            language: Language,
+            items: Vec<PlaylistItem>,
+            artists: Vec<FollowedArtist>,
+            tick: u32,
+        }
+        impl Harness {
+            fn draw(&mut self, events: Vec<egui::Event>) -> (egui::FullOutput, Option<Action>) {
+                self.tick += 1;
+                let mut action = None;
+                let mut output = self.ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(232.0, 400.0),
+                        )),
+                        time: Some(f64::from(self.tick) * 0.1),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        action = show_sidebar(
+                            ui,
+                            &mut self.covers,
+                            &mut self.search,
+                            SidebarView {
+                                language: self.language,
+                                items: &self.items,
+                                artists: &self.artists,
+                                selected: None,
+                                selected_artist: None,
+                                loading: false,
+                                error: None,
+                            },
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                (output, action)
+            }
+            fn click(&mut self, point: egui::Pos2) -> (egui::FullOutput, Option<Action>) {
+                self.draw(vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.draw(vec![egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }])
+            }
+        }
+        for language in [Language::Russian, Language::English] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut album = item(7);
+            album.reference.title = "Saved release".into();
+            album.kind = CollectionKind::Album;
+            album.subtitle = "Creator".into();
+            let mut h = Harness {
+                ctx,
+                covers: CoverCache::new(),
+                search: SearchState::default(),
+                language,
+                items: vec![item(1), item(2), album.clone()],
+                artists: vec![FollowedArtist {
+                    artist: ArtistRef {
+                        id: "subscribed".into(),
+                        name: "Subscribed".into(),
+                    },
+                    image_url: None,
+                }],
+                tick: 0,
+            };
+            h.draw(Vec::new());
+            let (initial, _) = h.draw(Vec::new());
+            let caption = language.text("Поиск в библиотеке", "Search in library");
+            assert!(text_rect(&initial, caption).is_none());
+            assert!(text_rect(&initial, language.text("Библиотека", "Library")).is_some());
+            assert!(
+                text_rect(
+                    &initial,
+                    language.text("Альбом · Creator", "Album · Creator")
+                )
+                .is_some()
+            );
+            let search_button = initial
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Circle(circle)
+                        if circle.center.y < 35.0 && (3.0..6.0).contains(&circle.radius) =>
+                    {
+                        Some(circle.center)
+                    }
+                    _ => None,
+                })
+                .expect("Library search icon");
+            let (opened, _) = h.click(search_button);
+            assert!(h.search.open && text_rect(&opened, caption).is_some());
+            assert!(opened.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.fill == theme::SURFACE && rect.rect.width() > 200.0 && (rect.rect.height() - 38.0).abs() < 0.5)));
+            let (filtered, _) = h.draw(vec![egui::Event::Text("Subscribed".into())]);
+            assert_eq!(h.search.query, "Subscribed");
+            assert!(text_rect(&filtered, "Saved release").is_none());
+            assert!(text_rect(&filtered, "Subscribed").is_some());
+            h.search.query = "Saved".into();
+            let (filtered_album, _) = h.draw(Vec::new());
+            assert!(
+                text_rect(&filtered_album, "Saved release").unwrap().top() < 130.0,
+                "Filtered rows must appear immediately at the start of the list"
+            );
+            let (closed, _) = h.click(search_button);
+            assert!(!h.search.open && h.search.query.is_empty());
+            assert!(text_rect(&closed, caption).is_none());
+            assert!(text_rect(&closed, "Saved release").is_some());
+            assert!(!h.ctx.text_edit_focused());
+            let point = text_rect(&closed, "Saved release").unwrap().center();
+            let (_, action) = h.click(point);
+            assert_eq!(action, Some(Action::OpenAlbum(album.reference)));
+        }
+    }
+
     fn item(id: i64) -> PlaylistItem {
         PlaylistItem {
+            kind: CollectionKind::Playlist,
             reference: AlbumRef {
                 id,
                 owner_id: -42,
@@ -750,11 +1168,16 @@ mod tests {
                 action = show_sidebar(
                     ui,
                     covers,
-                    language,
-                    view.items,
-                    view.selected,
-                    view.loading,
-                    view.error,
+                    &mut SearchState::default(),
+                    SidebarView {
+                        language,
+                        items: view.items,
+                        artists: &[],
+                        selected: view.selected,
+                        selected_artist: None,
+                        loading: view.loading,
+                        error: view.error,
+                    },
                 );
             },
         );
@@ -810,11 +1233,16 @@ mod tests {
                     action = show_sidebar(
                         ui,
                         &mut self.covers,
-                        self.language,
-                        &self.items,
-                        None,
-                        false,
-                        None,
+                        &mut SearchState::default(),
+                        SidebarView {
+                            language: self.language,
+                            items: &self.items,
+                            artists: &[],
+                            selected: None,
+                            selected_artist: None,
+                            loading: false,
+                            error: None,
+                        },
                     );
                 },
             );
@@ -1317,14 +1745,14 @@ mod tests {
             assert!(
                 text_rect(
                     &loading,
-                    language.text("Загружаем плейлисты…", "Loading playlists…")
+                    language.text("Загружаем библиотеку…", "Loading library…")
                 )
                 .is_some()
             );
             assert!(
                 text_rect(
                     &loading,
-                    language.text("Плейлистов пока нет", "No playlists yet")
+                    language.text("Библиотека пока пуста", "Your library is empty")
                 )
                 .is_none()
             );
@@ -1344,7 +1772,7 @@ mod tests {
             assert!(
                 text_rect(
                     &empty,
-                    language.text("Плейлистов пока нет", "No playlists yet")
+                    language.text("Библиотека пока пуста", "Your library is empty")
                 )
                 .is_some()
             );
@@ -1365,7 +1793,7 @@ mod tests {
             assert!(
                 text_rect(
                     &error,
-                    language.text("Плейлистов пока нет", "No playlists yet")
+                    language.text("Библиотека пока пуста", "Your library is empty")
                 )
                 .is_none()
             );

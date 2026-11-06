@@ -20,6 +20,8 @@ mod audio_upload_app;
 mod current_settings_tests;
 #[path = "discord_rpc_app.rs"]
 mod discord_rpc_app;
+#[path = "library_app.rs"]
+mod library_app;
 #[cfg(test)]
 #[path = "library_membership_tests.rs"]
 mod library_membership_tests;
@@ -1011,6 +1013,7 @@ pub struct MusicApp {
     playlist_create_form: Option<PlaylistCreateForm>,
     playlist_create_request: Option<PlaylistCreateRequest>,
     playlist_controls: playlist_actions::State,
+    library_browser: library_app::State,
     audio_upload: audio_upload_app::State,
     track_menu_error: Option<WebAudioError>,
     track_menu_notice: Option<(String, Instant)>,
@@ -1323,6 +1326,7 @@ impl MusicApp {
             playlist_create_form: None,
             playlist_create_request: None,
             playlist_controls: playlist_actions::State::default(),
+            library_browser: library_app::State::default(),
             audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
@@ -1617,6 +1621,7 @@ impl MusicApp {
         self.playlist_create_form = None;
         self.playlist_create_request = None;
         self.playlist_controls = playlist_actions::State::default();
+        self.library_browser = library_app::State::default();
         self.track_menu_error = None;
         self.track_menu_notice = None;
         self.playlist_request = None;
@@ -4321,8 +4326,9 @@ impl MusicApp {
                 self.playlist_items = playlists
                     .into_iter()
                     .map(|playlist| playlist_ui::PlaylistItem {
+                        kind: playlist.kind,
                         reference: playlist.album,
-                        subtitle: playlist.subtitle,
+                        subtitle: playlist.byline,
                         can_edit: playlist.can_add_tracks,
                         pinned: false,
                     })
@@ -4471,8 +4477,9 @@ impl MusicApp {
                 self.playlist_items.insert(
                     0,
                     playlist_ui::PlaylistItem {
+                        kind: playlist.kind,
                         reference: reference.clone(),
-                        subtitle: playlist.subtitle,
+                        subtitle: playlist.byline,
                         can_edit: playlist.can_add_tracks,
                         pinned: false,
                     },
@@ -5431,10 +5438,6 @@ impl MusicApp {
         let data = stored.as_deref();
         let can_edit_playlist =
             matches!(&page, MusicPage::Playlist(reference) if self.can_edit_playlist(reference));
-        let follow = match &page {
-            MusicPage::Playlist(reference) => self.playlist_follow_view(reference),
-            _ => None,
-        };
         let tracks = data.map_or(&[][..], DetailPage::tracks);
         let active = matches!(
             self.player.snapshot().state,
@@ -5494,6 +5497,12 @@ impl MusicApp {
             ),
             _ => return,
         };
+        let follow = album
+            .as_ref()
+            .and_then(|album| self.playlist_follow_view(album));
+        let artist_follow = artist
+            .as_ref()
+            .and_then(|artist| self.artist_follow_view(artist));
         let mut action = None;
         let mut track_action = None;
         theme::scroll_area(
@@ -5513,6 +5522,7 @@ impl MusicApp {
                             track_count: tracks.len(),
                             loading,
                             playing,
+                            follow: artist_follow,
                         },
                     );
                 } else if let Some(album) = &album {
@@ -5667,9 +5677,11 @@ impl MusicApp {
         }
         match action {
             Some(detail_ui::Action::ReloadReleases) => self.ensure_detail(&ctx, true),
-            Some(detail_ui::Action::TogglePlaylistLike) => {
-                if let MusicPage::Playlist(reference) = page {
-                    self.toggle_playlist_follow(&ctx, reference);
+            Some(detail_ui::Action::ToggleLibraryLike) => {
+                if let Some(artist) = &artist {
+                    self.toggle_artist_follow(&ctx, artist.clone());
+                } else if let Some(album) = &album {
+                    self.toggle_playlist_follow(&ctx, album.clone());
                 }
             }
             Some(detail_ui::Action::EditPlaylist) => {
@@ -5942,7 +5954,11 @@ impl MusicApp {
             language.text("Главная", "Home"),
             !matches!(
                 self.page,
-                MusicPage::Library | MusicPage::Search(_) | MusicPage::Playlist(_)
+                MusicPage::Library
+                    | MusicPage::Search(_)
+                    | MusicPage::Playlist(_)
+                    | MusicPage::Album(_)
+                    | MusicPage::Artist(_)
             ),
         )
         .clicked()
@@ -5987,23 +6003,36 @@ impl MusicApp {
             egui::Stroke::new(1.0, Color32::from_rgb(57, 65, 77)),
         );
         ui.add_space(0.0);
-        let selected = if let MusicPage::Playlist(playlist) = &self.page {
-            Some((playlist.owner_id, playlist.id))
-        } else {
-            None
-        };
+        let selected =
+            if let MusicPage::Playlist(playlist) | MusicPage::Album(playlist) = &self.page {
+                Some((playlist.owner_id, playlist.id))
+            } else {
+                None
+            };
         let error = self
             .playlist_error
             .as_ref()
+            .or(self.library_browser.error.as_ref())
             .map(|error| error.localized(language));
+        let library_loading = self.playlist_request.is_some()
+            || !self.playlists_requested
+            || self.library_browser.loading();
         if let Some(action) = playlist_ui::show_sidebar(
             ui,
             &mut self.covers,
-            language,
-            &self.playlist_items,
-            selected,
-            self.playlist_request.is_some() || !self.playlists_requested,
-            error.as_deref(),
+            &mut self.library_browser.sidebar,
+            playlist_ui::SidebarView {
+                language,
+                items: &self.playlist_items,
+                artists: &self.library_browser.artists,
+                selected,
+                selected_artist: match &self.page {
+                    MusicPage::Artist(artist) => Some(&artist.id),
+                    _ => None,
+                },
+                loading: library_loading,
+                error: error.as_deref(),
+            },
         ) {
             self.playlist_sidebar_action(ui.ctx(), action);
         }
@@ -8243,6 +8272,7 @@ impl MusicApp {
         self.poll_profile_cleanup();
         self.poll_home(ctx);
         self.poll_playlists(ctx);
+        self.poll_library_artists(ctx);
         if !self.playlists_requested && self.playlist_ready() {
             self.load_playlists(ctx, false);
         }
@@ -8360,6 +8390,7 @@ impl Drop for MusicApp {
         self.playlist_create_form = None;
         self.playlist_create_request = None;
         self.playlist_controls = playlist_actions::State::default();
+        self.library_browser = library_app::State::default();
         self.audio_upload = audio_upload_app::State::default();
         self.search.cancel_requests();
         self.mix_request = None;
@@ -8749,6 +8780,7 @@ mod tests {
             playlist_create_form: None,
             playlist_create_request: None,
             playlist_controls: playlist_actions::State::default(),
+            library_browser: library_app::State::fixture(),
             audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
@@ -11880,6 +11912,7 @@ mod tests {
         assert!(old_cancel.load(Ordering::Acquire));
         assert!(old_sender.send(Ok(Vec::new())).is_err());
         assert_eq!(app.playlist_items[0].reference, created.album);
+        assert_eq!(app.playlist_items[0].subtitle, created.byline);
         assert_eq!(app.editable_playlists[0], created.album);
         assert!(matches!(&app.page, MusicPage::Playlist(reference) if *reference == created.album));
         assert_eq!(app.playing.as_ref().unwrap().key(), track.key());
@@ -11921,7 +11954,7 @@ mod tests {
         let mut tick = 0;
         account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
         let output = account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
-        let header = account_ui_text_rect(&output, "Playlists").unwrap();
+        let header = account_ui_text_rect(&output, "Library").unwrap();
         account_ui_click(
             &ctx,
             &mut app,
@@ -11965,6 +11998,8 @@ mod tests {
 
     pub(super) fn search_test_playlist(id: i64) -> crate::web_audio::UserPlaylist {
         crate::web_audio::UserPlaylist {
+            kind: crate::web_audio::CollectionKind::Playlist,
+            byline: String::new(),
             original: None,
             album: AlbumRef {
                 owner_id: -42,
@@ -13169,6 +13204,7 @@ mod tests {
             })),
         );
         app.playlist_items = vec![playlist_ui::PlaylistItem {
+            kind: crate::web_audio::CollectionKind::Playlist,
             reference: reference.clone(),
             subtitle: "Personal selection".into(),
             can_edit: false,
@@ -13186,7 +13222,7 @@ mod tests {
             output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         }
         let library = account_ui_text_rect(&output, "My music").unwrap();
-        let playlists = account_ui_text_rect(&output, "Playlists").unwrap();
+        let playlists = account_ui_text_rect(&output, "Library").unwrap();
         let divider = account_ui_shapes(&output)
             .into_iter()
             .find_map(|shape| match shape {
@@ -13290,7 +13326,7 @@ mod tests {
         assert_eq!(app.library.tracks[0].id, 99);
         app.reset();
         let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
-        assert!(account_ui_text_rect(&output, "Playlists").is_none());
+        assert!(account_ui_text_rect(&output, "Library").is_none());
         assert!(account_ui_text_rect(&output, "Road playlist").is_none());
     }
 
@@ -13307,6 +13343,8 @@ mod tests {
         };
         let response = || {
             vec![crate::web_audio::UserPlaylist {
+                kind: crate::web_audio::CollectionKind::Playlist,
+                byline: String::new(),
                 original: None,
                 album: reference.clone(),
                 subtitle: "Selection".into(),

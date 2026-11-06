@@ -17,6 +17,8 @@ fn page(id: i64, offset: usize, items: &[i64]) -> OwnerPage {
         playlists: items
             .iter()
             .map(|item| UserPlaylist {
+                kind: crate::web_audio::CollectionKind::Playlist,
+                byline: String::new(),
                 original: None,
                 album: AlbumRef {
                     owner_id: id,

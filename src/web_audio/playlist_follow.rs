@@ -476,4 +476,30 @@ mod tests {
         assert_eq!(calls, ["audio.getPlaylistById"]);
         assert!(change.removed.is_none());
     }
+
+    #[test]
+    fn official_albums_use_following_even_when_vk_reports_an_edit_permission() {
+        let client = client();
+        let original = reference();
+        let change = client
+            .set_playlist_follow_request(
+                42,
+                &original,
+                true,
+                &AtomicBool::new(false),
+                |_, method, _| {
+                    if method == "audio.getPlaylistById" {
+                        let mut value = metadata(&original, true);
+                        value["type"] = json!(1);
+                        Ok(value)
+                    } else {
+                        assert_eq!(method, "audio.followPlaylist");
+                        Ok(json!({"owner_id":42,"playlist_id":77}))
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(key(&change.saved.unwrap()), (42, 77));
+        assert_eq!(client.playlist_followed(42, &original), Some(true));
+    }
 }

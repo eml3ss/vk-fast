@@ -18,6 +18,7 @@ pub struct ArtistView<'a> {
     pub track_count: usize,
     pub loading: bool,
     pub playing: bool,
+    pub follow: Option<FollowView>,
 }
 
 pub struct AlbumView<'a> {
@@ -48,7 +49,7 @@ pub enum Action {
     OpenArtist(ArtistRef),
     OpenCreator(crate::web_audio::PlaylistCreator),
     EditPlaylist,
-    TogglePlaylistLike,
+    ToggleLibraryLike,
     ReloadReleases,
 }
 
@@ -229,7 +230,7 @@ pub fn artist_header(
         view.track_count,
         view.loading,
         view.playing,
-        None,
+        view.follow,
     )
 }
 
@@ -410,7 +411,7 @@ fn collection_header(
         view.track_count,
         view.loading,
         view.playing,
-        if playlist && !view.can_edit_playlist {
+        if !playlist || !view.can_edit_playlist {
             view.follow
         } else {
             None
@@ -907,7 +908,7 @@ fn controls(
                 .inner
                 .on_hover_text(label);
             if heart.clicked() {
-                action = Some(Action::TogglePlaylistLike);
+                action = Some(Action::ToggleLibraryLike);
             }
         }
     });
@@ -989,7 +990,7 @@ mod tests {
                         },
                     ]);
                 }
-                assert_eq!(action, Some(Action::TogglePlaylistLike));
+                assert_eq!(action, Some(Action::ToggleLibraryLike));
             }
         }
     }
@@ -1328,6 +1329,7 @@ mod tests {
                                 ui,
                                 &mut covers,
                                 ArtistView {
+                                    follow: None,
                                     language: Language::English,
                                     name: "Artist",
                                     image_url: Some(url),
@@ -1641,6 +1643,7 @@ mod tests {
                             ui,
                             &mut covers,
                             ArtistView {
+                                follow: None,
                                 language,
                                 name: "An artist with a very long displayed name "
                                     .repeat(4)

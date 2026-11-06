@@ -322,6 +322,8 @@ mod tests {
             unavailable: false,
             playlists: (0..count)
                 .map(|index| UserPlaylist {
+                    kind: crate::web_audio::CollectionKind::Playlist,
+                    byline: String::new(),
                     original: None,
                     album: AlbumRef {
                         owner_id: -71,

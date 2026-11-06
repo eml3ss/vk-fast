@@ -31,6 +31,8 @@ pub(super) struct State {
 
 struct FollowRequest {
     owner: i64,
+    kind: crate::web_audio::CollectionKind,
+    byline: String,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Result<crate::web_audio::PlaylistFollowChange, WebAudioError>>,
 }
@@ -195,6 +197,29 @@ impl MusicApp {
             return;
         };
         let owner = session.profile.id;
+        let kind = if matches!(self.page, MusicPage::Album(_) | MusicPage::TrackAlbum(_, _)) {
+            crate::web_audio::CollectionKind::Album
+        } else {
+            crate::web_audio::CollectionKind::Playlist
+        };
+        let byline = self
+            .page
+            .detail_key()
+            .and_then(|key| self.details.get(&key))
+            .and_then(|page| match page.as_ref() {
+                DetailPage::Album(page) => Some(
+                    page.artists
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                DetailPage::Playlist(page) => {
+                    page.creator.as_ref().map(|creator| creator.name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -212,6 +237,8 @@ impl MusicApp {
                 self.workers.push(worker);
                 self.playlist_controls.follow = Some(FollowRequest {
                     owner,
+                    kind,
+                    byline,
                     canceled,
                     receiver,
                 });
@@ -252,8 +279,9 @@ impl MusicApp {
                                 .any(|item| key(&item.reference) == key(&saved))
                         {
                             self.playlist_items.push(playlist_ui::PlaylistItem {
+                                kind: request.kind,
                                 reference: saved,
-                                subtitle: String::new(),
+                                subtitle: request.byline.clone(),
                                 can_edit: false,
                                 pinned: false,
                             });
@@ -281,15 +309,26 @@ impl MusicApp {
         if key(original) == removed {
             return;
         }
-        let old = MusicPage::Playlist(AlbumRef {
-            owner_id: removed.0,
-            id: removed.1,
-            ..original.clone()
-        });
-        let replacement = MusicPage::Playlist(original.clone());
-        if let Some(old_key) = old.detail_key() {
+        for is_album in [false, true] {
+            let route = |reference| {
+                if is_album {
+                    MusicPage::Album(reference)
+                } else {
+                    MusicPage::Playlist(reference)
+                }
+            };
+            let old_key = route(AlbumRef {
+                owner_id: removed.0,
+                id: removed.1,
+                ..original.clone()
+            })
+            .detail_key()
+            .unwrap();
+            let replacement = route(original.clone());
             if let Some(mut data) = self.details.remove(&old_key) {
-                if let DetailPage::Playlist(page) = Arc::make_mut(&mut data) {
+                if let DetailPage::Playlist(page) | DetailPage::Album(page) =
+                    Arc::make_mut(&mut data)
+                {
                     page.album = original.clone();
                 }
                 self.details.insert(replacement.detail_key().unwrap(), data);
@@ -307,6 +346,17 @@ impl MusicApp {
                     location.page = replacement.clone();
                 }
             }
+        }
+    }
+
+    fn sidebar_collection_page(&self, reference: AlbumRef) -> MusicPage {
+        if self.playlist_items.iter().any(|item| {
+            key(&item.reference) == key(&reference)
+                && item.kind == crate::web_audio::CollectionKind::Album
+        }) {
+            MusicPage::Album(reference)
+        } else {
+            MusicPage::Playlist(reference)
         }
     }
 
@@ -445,7 +495,24 @@ impl MusicApp {
             playlist_ui::Action::Open(reference) => {
                 self.navigate_music(ctx, MusicPage::Playlist(reference))
             }
-            playlist_ui::Action::Refresh => self.load_playlists(ctx, true),
+            playlist_ui::Action::OpenAlbum(reference) => {
+                self.navigate_music(ctx, MusicPage::Album(reference))
+            }
+            playlist_ui::Action::OpenArtist(artist) => {
+                self.navigate_music(ctx, MusicPage::Artist(artist))
+            }
+            playlist_ui::Action::UnfollowArtist(artist) => {
+                if self
+                    .artist_follow_view(&artist)
+                    .is_some_and(|view| view.saved)
+                {
+                    self.toggle_artist_follow(ctx, artist);
+                }
+            }
+            playlist_ui::Action::Refresh => {
+                self.load_playlists(ctx, true);
+                self.load_library_artists(ctx, true);
+            }
             playlist_ui::Action::Create => {
                 self.playlist_create_form = Some(PlaylistCreateForm {
                     name: String::new(),
@@ -572,7 +639,10 @@ impl MusicApp {
 
     fn play_sidebar_playlist(&mut self, ctx: &egui::Context, reference: AlbumRef, shuffle: bool) {
         self.cancel_delayed_advance();
-        let page_key = MusicPage::Playlist(reference.clone()).detail_key().unwrap();
+        let page_key = self
+            .sidebar_collection_page(reference.clone())
+            .detail_key()
+            .unwrap();
         if let Some(data) = self.details.get(&page_key) {
             let tracks = data.tracks().to_vec();
             self.start_sidebar_playlist(ctx, reference, tracks, shuffle);
@@ -638,7 +708,9 @@ impl MusicApp {
         self.start_queue_from(
             ctx,
             tracks,
-            MusicPage::Playlist(reference).detail_key().unwrap(),
+            self.sidebar_collection_page(reference)
+                .detail_key()
+                .unwrap(),
         );
     }
 

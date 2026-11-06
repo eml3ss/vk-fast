@@ -741,6 +741,8 @@ mod tests {
 
     fn playlist(id: i64) -> UserPlaylist {
         UserPlaylist {
+            kind: crate::web_audio::CollectionKind::Playlist,
+            byline: String::new(),
             original: None,
             album: AlbumRef {
                 owner_id: -42,

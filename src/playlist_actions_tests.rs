@@ -11,6 +11,7 @@ fn reference(id: i64) -> AlbumRef {
 
 fn item(id: i64) -> playlist_ui::PlaylistItem {
     playlist_ui::PlaylistItem {
+        kind: crate::web_audio::CollectionKind::Playlist,
         reference: reference(id),
         subtitle: String::new(),
         can_edit: true,
@@ -103,6 +104,27 @@ fn ids(app: &MusicApp) -> Vec<i64> {
 }
 
 #[test]
+fn saved_albums_open_as_albums_and_keep_the_album_queue_identity() {
+    let ctx = egui::Context::default();
+    let mut app = search_test_app(&ctx);
+    let reference = reference(77);
+    app.playlist_items = vec![playlist_ui::PlaylistItem {
+        kind: crate::web_audio::CollectionKind::Album,
+        ..item(77)
+    }];
+    let route = MusicPage::Album(reference.clone());
+    app.details
+        .insert(route.detail_key().unwrap(), detail(reference.clone(), true));
+    app.playlist_sidebar_action(&ctx, playlist_ui::Action::OpenAlbum(reference.clone()));
+    assert!(app.page == route);
+    assert!(matches!(
+        app.details[&route.detail_key().unwrap()].as_ref(),
+        DetailPage::Album(_)
+    ));
+    assert!(app.workers.is_empty());
+}
+
+#[test]
 fn unfollowing_an_open_saved_copy_keeps_its_tracks_visible_and_refreshes_after_an_old_fetch() {
     let ctx = egui::Context::default();
     let mut app = search_test_app(&ctx);
@@ -140,6 +162,8 @@ fn unfollowing_an_open_saved_copy_keeps_its_tracks_visible_and_refreshes_after_a
         .ok()
         .unwrap();
     app.playlist_controls.follow = Some(FollowRequest {
+        kind: crate::web_audio::CollectionKind::Playlist,
+        byline: String::new(),
         owner: 42,
         canceled: Arc::new(AtomicBool::new(false)),
         receiver,

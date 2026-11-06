@@ -31,12 +31,14 @@ use crate::{
     web_session::SessionCookie,
 };
 
+mod artist_follow;
 #[path = "web_audio/audio_upload.rs"]
 mod audio_upload;
 mod owner_page;
 mod playlist_follow;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
+pub use artist_follow::FollowedArtist;
 pub use owner_page::OwnerPage;
 pub use playlist_follow::PlaylistFollowChange;
 pub use playlist_manage::{
@@ -213,12 +215,42 @@ pub struct PlaylistCreator {
 #[derive(Clone)]
 pub struct UserPlaylist {
     pub album: AlbumRef,
+    pub kind: CollectionKind,
+    pub byline: String,
     /// Server-provided source of a followed copy; never guessed from its title.
     pub original: Option<AlbumRef>,
     pub subtitle: String,
     pub track_count: Option<usize>,
     /// Native edit permission, never inferred from a followed copy's local ID.
     pub can_add_tracks: bool,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
+pub enum CollectionKind {
+    #[default]
+    Playlist,
+    Album,
+}
+
+fn collection_kind(value: &Value) -> CollectionKind {
+    let album = value
+        .get("is_album")
+        .is_some_and(|value| value.as_bool() == Some(true) || value.as_u64() == Some(1))
+        || value.get("type").is_some_and(|value| {
+            value.as_u64() == Some(1)
+                || value
+                    .as_str()
+                    .is_some_and(|kind| matches!(kind, "album" | "single" | "ep"))
+        })
+        || value
+            .get("album_type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "main" | "album" | "single" | "ep"));
+    if album {
+        CollectionKind::Album
+    } else {
+        CollectionKind::Playlist
+    }
 }
 
 /// Optional release statistics from VK's own playlist metadata. Missing values
@@ -287,6 +319,7 @@ struct State {
     streams: HashMap<(i64, i64), StreamInfo>,
     mix: Option<MixSession>,
     followed_playlists: playlist_follow::FollowState,
+    followed_artists: artist_follow::FollowState,
 }
 
 // Per-track URL hashes are credentials for the private reload endpoint.
@@ -1980,6 +2013,7 @@ impl WebAudioClient {
                     ("owner_id", expected_owner.to_string()),
                     ("count", "100".into()),
                     ("offset", offset.to_string()),
+                    ("extended", "1".into()),
                 ],
                 canceled,
             )?;
@@ -2040,7 +2074,7 @@ impl WebAudioClient {
         )?;
         let mut page = parse_album_page(&value, reference)?;
         let source = value.get("playlist").unwrap_or(&value);
-        if page.creator.is_none() && source.get("type").and_then(Value::as_str) != Some("album") {
+        if page.creator.is_none() && collection_kind(source) == CollectionKind::Playlist {
             page.creator = self.playlist_creator(expected_owner, generation, &value, canceled)?;
         }
         let mut offset = 0;
@@ -3082,6 +3116,21 @@ fn parse_user_playlists(value: &Value) -> Result<UserPlaylistPage, WebAudioError
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok());
         items.push(UserPlaylist {
+            kind: collection_kind(row),
+            byline: if collection_kind(row) == CollectionKind::Album {
+                artists_from_object(row)
+                    .into_iter()
+                    .map(|artist| artist.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                playlist_creator_id(row)
+                    .and_then(|owner| {
+                        playlist_creator_from_lookup(row, owner)
+                            .or_else(|| playlist_creator_from_lookup(value, owner))
+                    })
+                    .map_or_else(String::new, |creator| creator.name)
+            },
             original: playlist_follow::original_reference(row, &album)?,
             album,
             subtitle,
@@ -3100,7 +3149,8 @@ fn playlist_can_add_tracks(value: &Value) -> bool {
     let enabled = |value: Option<&Value>| {
         value.is_some_and(|value| value == &Value::Bool(true) || value.as_u64() == Some(1))
     };
-    value.get("id").and_then(number).is_some_and(|id| id > 0)
+    collection_kind(value) == CollectionKind::Playlist
+        && value.get("id").and_then(number).is_some_and(|id| id > 0)
         && value
             .get("owner_id")
             .and_then(number)
@@ -6553,6 +6603,23 @@ mod playlist_tests {
         );
         assert_eq!(followed.subtitle, "Saved & followed");
         assert_eq!(followed.track_count, Some(0));
+    }
+
+    #[test]
+    fn library_collection_types_and_creators_come_from_vk_metadata() {
+        let value = serde_json::json!({"count":3,"items":[
+            {"id":1,"owner_id":-20,"title":"Release","type":1,"permissions":{"edit":true},"main_artists":[{"id":"first","name":"First"},{"id":"second","name":"Second"}]},
+            {"id":2,"owner_id":42,"title":"Mine","type":0,"album_type":0,"permissions":{"edit":true}},
+            {"id":3,"owner_id":42,"title":"Saved copy","original":{"playlist_id":7,"owner_id":-99}}
+        ],"profiles":[{"id":42,"first_name":"Current","last_name":"User"}],"groups":[{"id":99,"name":"Publisher"}]});
+        let page = parse_user_playlists(&value).unwrap();
+        assert_eq!(page.items[0].kind, CollectionKind::Album);
+        assert_eq!(page.items[0].byline, "First, Second");
+        assert!(!page.items[0].can_add_tracks);
+        assert_eq!(page.items[1].kind, CollectionKind::Playlist);
+        assert_eq!(page.items[1].byline, "Current User");
+        assert!(page.items[1].can_add_tracks);
+        assert_eq!(page.items[2].byline, "Publisher");
     }
 
     #[test]
