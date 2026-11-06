@@ -9,7 +9,7 @@ export function installAuthBridge({window, document, location, getComputedStyle,
   const ids = new WeakMap(); let nextId=0, revision=0, signature='', formSignature='', pending=0, pendingSignature='', attempt=0;
   const id = node => { if (!node) return 0; if (!ids.has(node)) ids.set(node,++nextId); return ids.get(node); };
   const visible = el => {
-    if(!el || !el.isConnected || !el.getClientRects().length)return false;
+    if(!el || !el.isConnected)return false;
     // VK keeps autofill username inputs inside a hidden wrapper on password
     // screens. CSS can give those inputs a box; they are not another login step.
     for(let node=el;node;node=node.parentElement) {
@@ -17,12 +17,13 @@ export function installAuthBridge({window, document, location, getComputedStyle,
       if(node.hidden || node.inert || node.getAttribute('hidden')!==null || node.getAttribute('aria-hidden')==='true'
         || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || style.opacity==='0')return false;
     }
-    const rect=el.getBoundingClientRect();
-    // Hidden WebKit windows can report a 0×0 viewport and zero-width block
-    // widgets. Semantic visibility still applies before the first native show.
+    // A hidden native webview can have no viewport or layout boxes yet.
     if(window.innerWidth===0 || window.innerHeight===0)return true;
-    return rect.width>0 && rect.height>0 && rect.right>0 && rect.bottom>0
-      && (!window.innerWidth || rect.left<window.innerWidth) && (!window.innerHeight || rect.top<window.innerHeight);
+    if(!el.getClientRects().length)return false;
+    const rect=el.getBoundingClientRect();
+    // Native fields drive the real desktop form without pointer hit-testing.
+    // Its rendered controls can sit outside the small hidden browser viewport.
+    return rect.width>0 && rect.height>0 && rect.right>0 && rect.bottom>0;
   };
   const all = (selector,scope=document) => Array.from(scope.querySelectorAll(selector)).filter(visible);
   const text = el => (el?.getAttribute('aria-label') || el?.innerText || el?.textContent || '').replace(/\s+/g,' ').trim();

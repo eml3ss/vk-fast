@@ -173,4 +173,44 @@ function command(f,action,value=''){const s=f.api.snapshot();return {document:s.
  const hidden=new f.Element('div',{hidden:''});widget.parentElement=hidden;
  assert.notEqual(f.api.snapshot().step,'captcha','An explicitly hidden widget remains hidden even before first show');
 }
+{
+  for (const type of ['tel', 'password']) {
+    const f = fixture(type === 'password' ? 'id.vk.ru' : 'vk.ru', '/');
+    f.viewport(340, 400);
+    const entry = new f.Element('button', {'data-testid': 'enter-another-way'}, 'Other sign-in options');
+    entry.rect = {width: 270, height: 40, left: 440, top: 460, right: 710, bottom: 500};
+    f.set([entry]);
+    assert.equal(f.api.snapshot().step, 'entry', 'A hidden desktop layout can place VK controls outside the small webview');
+    assert.equal(f.api.perform(command(f, 'entry')), true);
+    const form = new f.Element('form');
+    const field = new f.Input({type, name: type === 'password' ? 'password' : 'login'});
+    const submit = new f.Element('button', {type: 'submit'}, 'Continue');
+    field.form = form;
+    submit.form = form;
+    field.rect = {width: 270, height: 40, left: 440, top: 520, right: 710, bottom: 560};
+    submit.rect = {width: 270, height: 40, left: 440, top: 580, right: 710, bottom: 620};
+    f.set([form, field, submit]);
+    assert.equal(f.api.snapshot().step, type === 'password' ? 'password' : 'identifier');
+    const value = type === 'password' ? 'synthetic-offscreen-password' : '+1234567890';
+    assert.equal(f.api.perform(command(f, 'submit', value)), true);
+    f.flush();
+    assert.equal(f.values.get(field), value);
+    assert.equal(submit.clicks, 1);
+    field.style = {display: 'none'};
+    assert.equal(f.api.snapshot().step, 'loading', 'CSS-hidden controls must stay excluded');
+  }
+}
+{
+  const f = fixture('id.vk.ru', '/auth');
+  const widget = new f.Element('div', {'data-test-id': 'captcha-widget'});
+  widget.getClientRects = () => [];
+  f.set([widget]);
+  f.viewport(0, 0);
+  assert.equal(f.api.snapshot().step, 'captcha', 'A hidden webview may not have any layout rectangles yet');
+  f.viewport(340, 400);
+  assert.equal(f.api.snapshot().step, 'loading', 'A real non-rendered element remains excluded');
+  f.viewport(0, 0);
+  widget.parentElement = new f.Element('div', {'aria-hidden': 'true'});
+  assert.equal(f.api.snapshot().step, 'loading');
+}
 console.log('Offline login bridge contracts passed.');
