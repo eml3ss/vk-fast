@@ -345,6 +345,7 @@ struct PlaylistDrag {
     from: usize,
     to: usize,
     grab_y: f32,
+    pointer: egui::Pos2,
 }
 
 struct RowView<'a> {
@@ -439,7 +440,11 @@ fn playlist_rows(
         egui::pos2(left, ui.clip_rect().top()),
         egui::pos2(left + width, ui.clip_rect().bottom()),
     ));
-    let pointer = ui.input(|input| input.pointer.interact_pos());
+    let pointer = ui
+        .input(|input| input.pointer.interact_pos())
+        .or_else(|| memory.active.as_ref().map(|drag| drag.pointer));
+    let inside_column =
+        pointer.is_some_and(|point| point.x >= clip.left() - 8.0 && point.x <= clip.right() + 8.0);
     let (released, held) = ui.input(|input| {
         (
             input.pointer.button_released(egui::PointerButton::Primary),
@@ -458,6 +463,7 @@ fn playlist_rows(
         {
             drag.from = from;
             if let Some(pointer) = pointer {
+                drag.pointer = pointer;
                 let top = drag_top(pointer.y, drag.grab_y, clip);
                 let target_y = top + drag.grab_y;
                 update_drag_target(drag, view.items, target_y, origin_y);
@@ -477,7 +483,7 @@ fn playlist_rows(
         && let Some(drag) = memory.active.take()
         && released
         && !escape
-        && pointer.is_some_and(|point| clip.expand2(egui::vec2(8.0, 20.0)).contains(point))
+        && inside_column
     {
         action = reorder_intent(view.items, &drag);
         if action.is_some() {
@@ -522,6 +528,7 @@ fn playlist_rows(
                 from: index,
                 to: index,
                 grab_y,
+                pointer: pointer.unwrap_or(rect.center()),
             };
             if let Some(pointer) = pointer {
                 let top = drag_top(pointer.y, drag.grab_y, clip);
@@ -621,7 +628,7 @@ fn playlist_rows(
         );
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let edge = 32.0_f32.min(clip.height() * 0.25);
-        if edge > 0.0 && clip.expand2(egui::vec2(0.0, edge)).contains(pointer) {
+        if edge > 0.0 && inside_column {
             let speed = if pointer.y < clip.top() + edge {
                 ((clip.top() + edge - pointer.y) / edge).clamp(0.0, 1.0) * 360.0
             } else if pointer.y > clip.bottom() - edge {
@@ -1469,6 +1476,90 @@ mod tests {
             "Virtualization discarded the drag ghost"
         );
         assert!(matches!(h.frame(primary(edge, false)).1,
+            Some(Action::Reorder { playlist, before: Some(before) }) if playlist.id == 1 && before.id > 10
+        ));
+    }
+
+    #[test]
+    fn vertical_outside_drops_commit_the_clamped_order_after_pointer_leaves_the_window() {
+        for (source, pointer_y, before) in [(6, -400.0, Some(item(1).reference)), (1, 1000.0, None)]
+        {
+            let mut h = MenuHarness::new(Language::English);
+            h.items = (1..=6).map(item).collect();
+            let initial = warm_drag_list(&mut h);
+            let from = text_rect(&initial, &format!("Playlist {source}"))
+                .unwrap()
+                .center();
+            let destination = text_rect(
+                &initial,
+                if pointer_y < 0.0 {
+                    "Playlist 1"
+                } else {
+                    "Playlist 6"
+                },
+            )
+            .unwrap()
+            .center();
+            let outside = egui::pos2(from.x, pointer_y);
+            h.frame(primary(from, true));
+            assert!(
+                h.frame(vec![egui::Event::PointerMoved(outside)])
+                    .1
+                    .is_none()
+            );
+            assert!(h.frame(vec![egui::Event::PointerGone]).1.is_none());
+            let (held, action) = h.frame(Vec::new());
+            assert!(action.is_none());
+            assert!(
+                text_rect(&held, &format!("Playlist {source}")).is_some(),
+                "The last pointer position must keep the clamped card visible"
+            );
+            assert_eq!(
+                h.frame(primary(outside, false)).1,
+                Some(Action::Reorder {
+                    playlist: item(source).reference,
+                    before
+                })
+            );
+            let moved = h.items.remove(source as usize - 1);
+            let target = if pointer_y < 0.0 { 0 } else { h.items.len() };
+            h.items.insert(target, moved);
+            for _ in 0..3 {
+                assert!(h.frame(Vec::new()).1.is_none());
+            }
+            let final_frame = h.frame(Vec::new()).0;
+            let actual = text_rect(&final_frame, &format!("Playlist {source}"))
+                .unwrap()
+                .center();
+            assert!(
+                (actual.y - destination.y).abs() < 1.0,
+                "The dropped item returned to its old position"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_beyond_the_window_keeps_scrolling_with_the_last_pointer_position() {
+        let mut h = MenuHarness::new(Language::English);
+        h.items = (1..=40).map(item).collect();
+        let initial = warm_drag_list(&mut h);
+        let from = text_rect(&initial, "Playlist 1").unwrap().center();
+        let outside = egui::pos2(from.x, 1000.0);
+        h.frame(primary(from, true));
+        h.frame(vec![egui::Event::PointerMoved(outside)]);
+        h.frame(vec![egui::Event::PointerGone]);
+        let mut output = h.frame(Vec::new()).0;
+        for _ in 0..18 {
+            let frame = h.frame(Vec::new());
+            assert!(frame.1.is_none());
+            output = frame.0;
+        }
+        assert!(
+            text_rect(&output, "Playlist 2").is_none(),
+            "Outside dragging did not continue autoscrolling"
+        );
+        assert!(text_rect(&output, "Playlist 1").is_some());
+        assert!(matches!(h.frame(primary(outside, false)).1,
             Some(Action::Reorder { playlist, before: Some(before) }) if playlist.id == 1 && before.id > 10
         ));
     }
