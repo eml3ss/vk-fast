@@ -335,7 +335,11 @@ mod platform {
         os::windows::named_pipe::{DuplexPipeStream, PipeListener, PipeListenerOptions, pipe_mode},
     };
     use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+        os::windows::fs::{MetadataExt, OpenOptionsExt},
+    };
 
     type Stream = DuplexPipeStream<pipe_mode::Bytes>;
     type Listener = PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>;
@@ -343,6 +347,7 @@ mod platform {
 
     pub struct Control {
         _listener: Arc<Listener>,
+        _exclusion: File,
         address: Address,
     }
 
@@ -397,21 +402,52 @@ mod platform {
     }
 
     pub fn acquire(address: &Address, grant: &impl Fn(u32)) -> io::Result<Acquisition> {
+        let name = format!(
+            "vk-fast-instance-{:x}.lock",
+            Sha256::digest(address.as_bytes())
+        );
+        let exclusion = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(3) // Read/write sharing, with deletion excluded while held.
+            .custom_flags(0x00200000) // FILE_FLAG_OPEN_REPARSE_POINT.
+            .open(std::env::temp_dir().join(name))?;
+        let metadata = exclusion.metadata()?;
+        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(invalid("Invalid instance lock"));
+        }
+        let mut owned = false;
         let deadline = Instant::now() + CONNECT_BUDGET;
         loop {
-            // Interprocess sets FILE_FLAG_FIRST_PIPE_INSTANCE for initial
-            // creation. The kernel is the lock; a crashed process leaves none.
-            // Contract: https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createnamedpipea
-            match PipeListenerOptions::new()
-                .path(address.as_str())
-                .create_duplex::<pipe_mode::Bytes>()
-            {
+            if !owned {
+                match exclusion.try_lock() {
+                    Ok(()) => owned = true,
+                    Err(std::fs::TryLockError::WouldBlock) => {}
+                    Err(std::fs::TryLockError::Error(error)) => return Err(error),
+                }
+            }
+            // Hold ownership across pipe reconnections. The OS releases both
+            // the pipe and the file lock if the primary process crashes.
+            let listener = if owned {
+                PipeListenerOptions::new()
+                    .path(address.as_str())
+                    .create_duplex::<pipe_mode::Bytes>()
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Another instance owns activation",
+                ))
+            };
+            match listener {
                 Ok(listener) => {
                     let listener = Arc::new(listener);
                     let accept = listener.clone();
                     return primary(
                         Control {
                             _listener: listener,
+                            _exclusion: exclusion,
                             address: address.clone(),
                         },
                         move |activation, stopping| {

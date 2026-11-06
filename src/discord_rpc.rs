@@ -845,6 +845,7 @@ pub(crate) fn test_activity(snapshot: Snapshot) -> Option<Value> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const APP_ID: &str = "1565752977157922916";
 
     fn snapshot(title: &str, position: f64, state: State) -> Snapshot {

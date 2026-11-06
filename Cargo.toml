@@ -1,6 +1,6 @@
 [package]
 name = "vk-fast"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95"
 description = "VK Fast: experimental VK Music desktop client built with Rust and egui"
@@ -39,6 +39,7 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
 skrifa = "=0.44.0"
+sys-locale = "0.3.2"
 
 [build-dependencies]
 tauri-build = { version = "2", default-features = false }

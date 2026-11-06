@@ -82,6 +82,7 @@ fn likes_do_not_spread_to_same_title_versions_or_other_owners_and_survive_reload
     app.search.results = Some(Arc::new(crate::web_audio::SearchResults {
         tracks,
         artists: Vec::new(),
+        artist_images: HashMap::new(),
         albums: Vec::new(),
         playlists: Vec::new(),
         has_more: false,

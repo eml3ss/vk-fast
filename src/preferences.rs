@@ -67,7 +67,7 @@ impl Default for Preferences {
             repeat: RepeatMode::Off,
             volume: DEFAULT_VOLUME,
             cache_limit_mb: DEFAULT_CACHE_MB,
-            language: "ru".into(),
+            language: String::new(),
             compact_seek_bar: DEFAULT_COMPACT_SEEK_BAR,
             system_titlebar: DEFAULT_SYSTEM_TITLEBAR,
             double_click_to_play: DEFAULT_DOUBLE_CLICK_TO_PLAY,
@@ -127,13 +127,12 @@ fn deserialize_language<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(language_code(
-        value
-            .as_str()
-            .and_then(Language::from_code)
-            .unwrap_or_default(),
-    )
-    .to_owned())
+    Ok(value
+        .as_str()
+        .and_then(Language::from_code)
+        .map(language_code)
+        .unwrap_or_default()
+        .to_owned())
 }
 
 fn deserialize_compact_seek_bar<'de, D: serde::Deserializer<'de>>(
@@ -573,7 +572,7 @@ pub fn load_language() -> Language {
         .ok()
         .and_then(|path| load_preferences_at(&path).ok().flatten())
         .and_then(|preferences| Language::from_code(&preferences.language))
-        .unwrap_or_default()
+        .unwrap_or_else(Language::system)
 }
 
 pub fn save_language(language: Language) -> io::Result<()> {
@@ -1165,7 +1164,7 @@ mod tests {
             let preferences = load_preferences_at(&path).unwrap().unwrap();
             assert_eq!(preferences.volume, 0.375);
             assert_eq!(preferences.cache_limit_mb, 384);
-            assert_eq!(preferences.language, "ru");
+            assert!(preferences.language.is_empty());
             save_language_at(&path, Language::English).unwrap();
             save_at(&path, 0.625).unwrap();
             save_cache_at(&path, 512).unwrap();
@@ -1176,7 +1175,13 @@ mod tests {
             assert_eq!(preferences.extra["future_setting"]["enabled"], true);
         }
         fs::write(&path, r#"{"volume":0.5,"cache_limit_mb":256}"#).unwrap();
-        assert_eq!(load_preferences_at(&path).unwrap().unwrap().language, "ru");
+        assert!(
+            load_preferences_at(&path)
+                .unwrap()
+                .unwrap()
+                .language
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1510,7 +1515,7 @@ mod tests {
         let preferences = load_preferences_at(&config).unwrap().unwrap();
         assert_eq!(preferences.volume, 0.25);
         assert_eq!(preferences.cache_limit_mb, 384);
-        assert_eq!(preferences.language, "ru");
+        assert!(preferences.language.is_empty());
         assert!(!legacy.exists());
     }
 

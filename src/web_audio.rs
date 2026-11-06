@@ -155,6 +155,7 @@ pub struct MixPage {
 pub struct SearchResults {
     pub tracks: Vec<Track>,
     pub artists: Vec<ArtistRef>,
+    pub artist_images: HashMap<String, String>,
     pub albums: Vec<AlbumRef>,
     pub playlists: Vec<UserPlaylist>,
     pub has_more: bool,
@@ -1364,7 +1365,7 @@ impl WebAudioClient {
                     ("offset", "0".into()),
                 ],
             )?;
-            page.artists = parse_search_artists(&artists)?;
+            (page.artists, page.artist_images) = parse_search_artists(&artists)?;
             let albums = request(
                 generation,
                 "audio.searchAlbums",
@@ -2767,6 +2768,7 @@ fn parse_search_tracks(value: &Value, offset: usize) -> Result<ParsedSearch, Web
         SearchResults {
             tracks,
             artists: Vec::new(),
+            artist_images: HashMap::new(),
             albums: Vec::new(),
             playlists: Vec::new(),
             has_more,
@@ -2776,15 +2778,27 @@ fn parse_search_tracks(value: &Value, offset: usize) -> Result<ParsedSearch, Web
     ))
 }
 
-fn parse_search_artists(value: &Value) -> Result<Vec<ArtistRef>, WebAudioError> {
+fn parse_search_artists(
+    value: &Value,
+) -> Result<(Vec<ArtistRef>, HashMap<String, String>), WebAudioError> {
     let rows = value["items"].as_array().ok_or(WebAudioError::Format)?;
     if rows.len() > 100 {
         return Err(WebAudioError::TooLarge);
     }
-    Ok(artists_from_object(&serde_json::json!({"artists": rows}))
+    let artists: Vec<_> = artists_from_object(&serde_json::json!({"artists": rows}))
         .into_iter()
         .take(12)
-        .collect())
+        .collect();
+    let mut images = HashMap::new();
+    for row in rows {
+        if let Some(id) = row.get("id").and_then(search_id)
+            && artists.iter().any(|artist| artist.id == id)
+            && let Some(image) = artist_image(row)
+        {
+            images.entry(id).or_insert(image);
+        }
+    }
+    Ok((artists, images))
 }
 
 fn parse_search_albums(value: &Value) -> Result<Vec<AlbumRef>, WebAudioError> {
@@ -8576,8 +8590,23 @@ mod search_tests {
     }
 
     #[test]
+    fn search_artist_photos_are_available_without_opening_artist_pages() {
+        let (artists, images) = parse_search_artists(&json!({"items":[
+            {"id":"first","name":"First","photo":[{"width":100,"url":"https://images.example.test/small.jpg"},{"width":600,"url":"https://images.example.test/artist.jpg"},{"width":1200,"url":"http://localhost/private"}]},
+            {"id":"second","name":"Second"},
+            {"id":"first","name":"Duplicate","photo":[{"width":600,"url":"https://images.example.test/duplicate.jpg"}]}
+        ]})).unwrap();
+        assert_eq!(artists.len(), 2);
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            images.get("first").map(String::as_str),
+            Some("https://images.example.test/artist.jpg")
+        );
+    }
+
+    #[test]
     fn search_metadata_preserves_canonical_artist_album_identity_and_server_order() {
-        let artists = parse_search_artists(&json!({"items":[{"id":"duo","name":"A & B"},{"id":"solo","name":"Other"},{"id":"duo","name":"A & B"}]})).unwrap();
+        let (artists, _) = parse_search_artists(&json!({"items":[{"id":"duo","name":"A & B"},{"id":"solo","name":"Other"},{"id":"duo","name":"A & B"}]})).unwrap();
         assert_eq!(artists.len(), 2);
         assert_eq!(artists[0].name, "A & B");
         let albums = parse_search_albums(&json!({"items":[{"id":3,"owner_id":-42,"title":"Official","access_key":"synthetic"},{"id":3,"owner_id":-42,"title":"Duplicate"}]})).unwrap();

@@ -1,6 +1,7 @@
 //! Search presentation only. Queries and canonical results are supplied by VK;
 //! the application owns requests, keyboard selection, navigation and playback.
 use eframe::egui::{self, Align, Color32, Layout, Response, RichText, Sense};
+use std::collections::HashMap;
 
 use crate::{
     cover_art::CoverCache,
@@ -248,8 +249,9 @@ pub fn results_metadata(
     language: Language,
     artists: &[ArtistRef],
     albums: &[AlbumRef],
+    artist_images: &HashMap<String, String>,
 ) -> Option<Action> {
-    results_metadata_sections(ui, covers, language, artists, albums, true)
+    results_metadata_sections(ui, covers, language, artists, albums, true, artist_images)
 }
 
 /// Category tabs already name their content; combined results keep section
@@ -261,6 +263,7 @@ pub fn results_metadata_sections(
     artists: &[ArtistRef],
     albums: &[AlbumRef],
     show_headings: bool,
+    artist_images: &HashMap<String, String>,
 ) -> Option<Action> {
     let mut action = None;
     let columns = ((ui.available_width() + 12.0) / 230.0)
@@ -284,20 +287,30 @@ pub fn results_metadata_sections(
                         );
                         ui.painter()
                             .circle_filled(art.center(), 22.0, theme::SELECTED);
-                        let initials: String = artist
-                            .name
-                            .split_whitespace()
-                            .filter_map(|word| word.chars().next())
-                            .take(2)
-                            .flat_map(char::to_uppercase)
-                            .collect();
-                        ui.painter().text(
-                            art.center(),
-                            egui::Align2::CENTER_CENTER,
-                            initials,
-                            egui::FontId::new(16.0, theme::semibold()),
-                            theme::MUTED,
-                        );
+                        if let Some(url) = artist_images.get(&artist.id) {
+                            let mut image = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .id_salt("search-artist-art")
+                                    .max_rect(art)
+                                    .layout(Layout::top_down(Align::Min)),
+                            );
+                            covers.show_rounded(&mut image, Some(url), 44.0, 22);
+                        } else {
+                            let initials: String = artist
+                                .name
+                                .split_whitespace()
+                                .filter_map(|word| word.chars().next())
+                                .take(2)
+                                .flat_map(char::to_uppercase)
+                                .collect();
+                            ui.painter().text(
+                                art.center(),
+                                egui::Align2::CENTER_CENTER,
+                                initials,
+                                egui::FontId::new(16.0, theme::semibold()),
+                                theme::MUTED,
+                            );
+                        }
                         caption(
                             ui,
                             rect,
@@ -911,6 +924,42 @@ mod tests {
     }
 
     #[test]
+    fn search_artist_card_paints_cached_photo_instead_of_initials() {
+        for headings in [false, true] {
+            let context = egui::Context::default();
+            theme::install(&context);
+            let mut covers = CoverCache::new();
+            let url = "https://images.example.test/artist.jpg";
+            covers.seed_image_for_test(
+                &context,
+                url,
+                44.0,
+                egui::ColorImage::filled([96, 96], Color32::BLUE),
+            );
+            let artist = ArtistRef {
+                id: "canonical".into(),
+                name: "Artist Name".into(),
+            };
+            let images = HashMap::from([(artist.id.clone(), url.into())]);
+            let output = frame(&context, 800.0, 1, Vec::new(), |ui| {
+                results_metadata_sections(
+                    ui,
+                    &mut covers,
+                    Language::English,
+                    std::slice::from_ref(&artist),
+                    &[],
+                    headings,
+                    &images,
+                );
+            });
+            assert!(output.shapes.iter().any(
+                |shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.brush.is_some())
+            ));
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "AN")));
+        }
+    }
+
+    #[test]
     fn category_metadata_starts_at_the_cursor_without_repeating_the_tab_heading() {
         let artist = ArtistRef {
             id: "canonical-artist".into(),
@@ -949,6 +998,7 @@ mod tests {
                         artists,
                         albums,
                         false,
+                        &HashMap::new(),
                     );
                 });
                 for tick in 2..4 {
@@ -961,6 +1011,7 @@ mod tests {
                             artists,
                             albums,
                             false,
+                            &HashMap::new(),
                         );
                     });
                 }
@@ -1000,6 +1051,7 @@ mod tests {
                         artists,
                         albums,
                         false,
+                        &HashMap::new(),
                     );
                 });
                 frame(&context, 600.0, 5, pointer(point, false), |ui| {
@@ -1010,6 +1062,7 @@ mod tests {
                         artists,
                         albums,
                         false,
+                        &HashMap::new(),
                     );
                 });
                 let expected = if artist_tab {
@@ -1050,6 +1103,7 @@ mod tests {
                     Language::English,
                     std::slice::from_ref(&artist),
                     std::slice::from_ref(&album),
+                    &HashMap::new(),
                 );
             });
             for tick in 2..4 {
@@ -1060,6 +1114,7 @@ mod tests {
                         Language::English,
                         std::slice::from_ref(&artist),
                         std::slice::from_ref(&album),
+                        &HashMap::new(),
                     );
                 });
             }
@@ -1071,6 +1126,7 @@ mod tests {
                     Language::English,
                     std::slice::from_ref(&artist),
                     std::slice::from_ref(&album),
+                    &HashMap::new(),
                 );
             });
             frame(&context, 600.0, 5, pointer(point, false), |ui| {
@@ -1080,6 +1136,7 @@ mod tests {
                     Language::English,
                     std::slice::from_ref(&artist),
                     std::slice::from_ref(&album),
+                    &HashMap::new(),
                 );
             });
             assert_eq!(action, Some(expected));
@@ -1116,7 +1173,14 @@ mod tests {
                     None,
                     None,
                 );
-                results_metadata(ui, &mut covers, Language::Russian, &artists, &albums);
+                results_metadata(
+                    ui,
+                    &mut covers,
+                    Language::Russian,
+                    &artists,
+                    &albums,
+                    &HashMap::new(),
+                );
             });
             for tick in 2..4 {
                 output = frame(&context, width, tick, vec![], |ui| {
@@ -1129,7 +1193,14 @@ mod tests {
                         None,
                         None,
                     );
-                    results_metadata(ui, &mut covers, Language::Russian, &artists, &albums);
+                    results_metadata(
+                        ui,
+                        &mut covers,
+                        Language::Russian,
+                        &artists,
+                        &albums,
+                        &HashMap::new(),
+                    );
                 });
             }
             let queries_shown = output.shapes.iter().filter(|shape| matches!(&shape.shape,

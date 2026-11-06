@@ -28,6 +28,53 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 #[test]
+fn mp3_replaygain_is_available_before_the_first_decoded_sample() {
+    fn size(value: usize) -> [u8; 4] {
+        [
+            ((value >> 21) & 127) as u8,
+            ((value >> 14) & 127) as u8,
+            ((value >> 7) & 127) as u8,
+            (value & 127) as u8,
+        ]
+    }
+    let mut frames = Vec::new();
+    for (key, value) in [
+        ("REPLAYGAIN_TRACK_GAIN", "-10.0 dB"),
+        ("REPLAYGAIN_TRACK_PEAK", "0.98"),
+    ] {
+        let mut body = vec![3];
+        body.extend_from_slice(key.as_bytes());
+        body.push(0);
+        body.extend_from_slice(value.as_bytes());
+        frames.extend_from_slice(b"TXXX");
+        frames.extend_from_slice(&size(body.len()));
+        frames.extend_from_slice(&[0, 0]);
+        frames.extend(body);
+    }
+    let mut input = b"ID3\x04\x00\x00".to_vec();
+    input.extend_from_slice(&size(frames.len()));
+    input.extend(frames);
+    input.extend(std::fs::read(fixture("tone.mp3")).unwrap());
+    let mut decoder = Pipeline::new(
+        Box::new(Cursor::new(input)),
+        0.0,
+        0.0,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    assert_eq!(
+        decoder.loudness,
+        Some(Loudness {
+            gain_db: -10.0,
+            reference_lufs: -18.0,
+            peak: Some(0.98)
+        })
+    );
+    let mut first = [0_u8; 8];
+    assert_eq!(decoder.read(&mut first).unwrap(), first.len());
+}
+
+#[test]
 fn mp3_native_decode_resamples_and_seeks_on_the_same_stereo_timeline() {
     let all = decode(Box::new(File::open(fixture("tone.mp3")).unwrap()), 0.0, 0.0);
     assert!(
@@ -105,6 +152,7 @@ impl Drop for Server {
     }
 }
 fn reply(stream: &mut TcpStream, files: &HashMap<String, Vec<u8>>) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut request = Vec::new();
     let mut b = [0; 1];

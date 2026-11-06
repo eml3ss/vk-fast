@@ -668,6 +668,53 @@ impl AudioCache {
             && range_end(&segments(&path)?, 0) >= end)
             .then_some(end))
     }
+
+    pub(crate) fn normalization_gain(
+        &self,
+        key: &CacheKey,
+        target: f32,
+    ) -> io::Result<Option<f32>> {
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(key.name()?).join(".loudness");
+        let Some(metadata) = private_file(&path)? else {
+            return Ok(None);
+        };
+        if metadata.len() != 12 {
+            return Ok(None);
+        }
+        let mut bytes = [0_u8; 12];
+        File::open(path)?.read_exact(&mut bytes)?;
+        if &bytes[..4] != b"LG01" || bytes[4..8] != target.to_le_bytes() {
+            return Ok(None);
+        }
+        let gain = f32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        Ok((gain.is_finite() && gain > 0.0 && gain <= 16.0).then_some(gain))
+    }
+
+    pub(crate) fn save_normalization_gain(
+        &self,
+        key: &CacheKey,
+        target: f32,
+        gain: f32,
+        revision: u64,
+    ) -> io::Result<()> {
+        if !target.is_finite() || !gain.is_finite() || gain <= 0.0 || gain > 16.0 {
+            return Err(invalid());
+        }
+        let state = self.0.state.lock().map_err(|_| locked())?;
+        if state.limit == 0 || state.revision != revision {
+            return Err(invalid());
+        }
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(key.name()?);
+        private_dir(&path, false)?;
+        let mut bytes = [0_u8; 12];
+        bytes[..4].copy_from_slice(b"LG01");
+        bytes[4..8].copy_from_slice(&target.to_le_bytes());
+        bytes[8..].copy_from_slice(&gain.to_le_bytes());
+        atomic_write(&path.join(".loudness"), &bytes)
+    }
 }
 
 #[cfg(test)]

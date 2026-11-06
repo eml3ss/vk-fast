@@ -81,6 +81,40 @@ struct Core {
     progressive: Mutex<Option<Progressive>>,
 }
 
+pub(super) struct CacheGain<'a> {
+    profile: &'a Profile,
+    cache: Option<&'a CacheBinding>,
+    revision: Option<u64>,
+}
+
+impl<'a> CacheGain<'a> {
+    pub(super) fn new(profile: &'a Profile, cache: Option<&'a CacheBinding>) -> Self {
+        let revision = cache
+            .and_then(|cache| cache.cache.policy().ok())
+            .map(|(_, revision)| revision);
+        Self {
+            profile,
+            cache,
+            revision,
+        }
+    }
+}
+
+impl Drop for CacheGain<'_> {
+    fn drop(&mut self) {
+        if let (Some(cache), Some(revision)) = (self.cache, self.revision)
+            && self.profile.core.final_gain.load(Ordering::Acquire)
+        {
+            let _ = cache.cache.save_normalization_gain(
+                &cache.key,
+                TARGET_LUFS as f32,
+                self.profile.gain(),
+                revision,
+            );
+        }
+    }
+}
+
 pub(super) struct Profile {
     core: Arc<Core>,
     enabled: Arc<AtomicBool>,
@@ -109,6 +143,50 @@ impl Profile {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    pub(super) fn prepared_gain(&self) -> Option<f32> {
+        self.core
+            .final_gain
+            .load(Ordering::Acquire)
+            .then(|| self.gain())
+    }
+
+    pub(super) fn apply_metadata(&self, metadata: crate::media_decoder::Loudness) {
+        let gain_db = metadata.gain_db + TARGET_LUFS as f32 - metadata.reference_lufs;
+        let mut gain = 10.0_f32.powf(gain_db / 20.0);
+        if let Some(peak) = metadata.peak.filter(|peak| peak.is_finite() && *peak > 0.0) {
+            gain = gain.min(CEILING / peak);
+        }
+        if !gain.is_finite() || gain <= 0.0 {
+            return;
+        }
+        let Ok(mut progressive) = self.core.progressive.lock() else {
+            return;
+        };
+        self.core
+            .gain
+            .store(gain.clamp(MIN_GAIN, MAX_GAIN).to_bits(), Ordering::Relaxed);
+        self.core.final_gain.store(true, Ordering::Release);
+        *progressive = None;
+    }
+
+    pub(super) fn load_cache(&self, cache: &CacheBinding) {
+        if self.core.final_gain.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(Some(gain)) = cache
+            .cache
+            .normalization_gain(&cache.key, TARGET_LUFS as f32)
+            && let Ok(mut progressive) = self.core.progressive.lock()
+            && !self.core.final_gain.load(Ordering::Acquire)
+        {
+            self.core
+                .gain
+                .store(gain.clamp(MIN_GAIN, MAX_GAIN).to_bits(), Ordering::Relaxed);
+            self.core.final_gain.store(true, Ordering::Release);
+            *progressive = None;
+        }
+    }
+
     /// Duplicated cache/decoder ranges and backward seeks do not count twice.
     pub(super) fn feed(&self, frame: u64, bytes: &[u8]) {
         if !self.enabled() || self.core.final_gain.load(Ordering::Acquire) {
@@ -128,8 +206,8 @@ impl Profile {
         if frame == 0 && state.origin > 0 {
             *state = Progressive {
                 meter: Measurement::new(),
-                origin: 0,
-                next: 0,
+                origin: frame,
+                next: frame,
             };
         }
         if frame > state.next {
@@ -168,7 +246,7 @@ impl Profile {
     }
 
     /// A completed raw cache permits whole-track measurement, including a
-    /// prefix skipped by a resume/seek. This never blocks starting playback.
+    /// prefix skipped by a resume/seek. It prepares metadata for later playback.
     pub(super) fn scan_cache(&self, cache: &CacheBinding, control: Arc<Control>) {
         if !self.enabled() || self.core.final_gain.load(Ordering::Acquire) {
             return;
@@ -191,6 +269,7 @@ impl Profile {
         let enabled = self.enabled.clone();
         let canceled = self.canceled.clone();
         let source = control.source.load(Ordering::Acquire);
+        let cache_revision = cache.cache.policy().ok().map(|(_, revision)| revision);
         *worker = thread::Builder::new()
             .name("vk-loudness-analysis".into())
             .spawn(move || {
@@ -199,6 +278,7 @@ impl Profile {
                 while frame < end {
                     if canceled.load(Ordering::Acquire)
                         || !enabled.load(Ordering::Relaxed)
+                        || core.final_gain.load(Ordering::Acquire)
                         || control.source.load(Ordering::Acquire) != source
                     {
                         return;
@@ -220,11 +300,23 @@ impl Profile {
                     && control.source.load(Ordering::Acquire) == source
                     && let Ok(mut progressive) = core.progressive.lock()
                 {
+                    if core.final_gain.load(Ordering::Acquire) {
+                        return;
+                    }
                     if let Some(gain) = meter.gain() {
                         core.gain.store(gain.to_bits(), Ordering::Relaxed);
                     }
                     core.final_gain.store(true, Ordering::Release);
                     *progressive = None;
+                    if let Some(revision) = cache_revision {
+                        let gain = f32::from_bits(core.gain.load(Ordering::Relaxed));
+                        let _ = cache.cache.save_normalization_gain(
+                            &cache.key,
+                            TARGET_LUFS as f32,
+                            gain,
+                            revision,
+                        );
+                    }
                 }
             })
             .ok();
@@ -411,6 +503,81 @@ mod tests {
     }
 
     #[test]
+    fn file_metadata_normalizes_the_first_frames_without_waiting_for_analysis() {
+        let profile = Profile::new(Arc::new(AtomicBool::new(true)));
+        profile.apply_metadata(crate::media_decoder::Loudness {
+            gain_db: -10.0,
+            reference_lufs: -18.0,
+            peak: Some(1.0),
+        });
+        assert!(profile.prepared_gain().is_some());
+        assert!(profile.core.progressive.lock().unwrap().is_none());
+        let samples = tone(0.6, 1);
+        let pcm = Pcm {
+            loudness: Some(profile.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&pcm, &bytes(&samples), false);
+        let mut output = vec![9.0; 960];
+        let mut expected = samples[..output.len()].to_vec();
+        OutputNormalizer::new(SAMPLE_RATE).process(&mut expected, 2, true, profile.gain(), 1.0);
+        let _producer_lock = pcm.window.lock().unwrap();
+        render_normalized(&mut output, &pcm, &mut OutputNormalizer::new(SAMPLE_RATE));
+        assert_eq!(output, expected);
+        assert!(pcm.started.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn missing_metadata_does_not_delay_or_change_a_running_track_when_analysis_finishes() {
+        let profile = Profile::new(Arc::new(AtomicBool::new(true)));
+        let samples = tone(0.6, 3);
+        let raw = bytes(&samples);
+        let pcm = Pcm {
+            loudness: Some(profile.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&pcm, &raw, false);
+        let mut normalizer = OutputNormalizer::new(SAMPLE_RATE);
+        let mut output = vec![9.0; 960];
+        render_normalized(&mut output, &pcm, &mut normalizer);
+        assert_eq!(output, samples[..960]);
+        assert!(pcm.started.load(Ordering::Acquire));
+        profile.feed(0, &raw);
+        profile.finish_stream(3 * u64::from(SAMPLE_RATE));
+        assert!(profile.prepared_gain().is_some_and(|gain| gain < 0.8));
+        render_normalized(&mut output, &pcm, &mut normalizer);
+        assert_eq!(
+            output,
+            samples[960..1920],
+            "Background analysis changed the active track"
+        );
+        let next = Pcm {
+            loudness: Some(profile.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&next, &raw, false);
+        let mut expected = samples[..960].to_vec();
+        OutputNormalizer::new(SAMPLE_RATE).process(&mut expected, 2, true, profile.gain(), 1.0);
+        render_normalized(&mut output, &next, &mut OutputNormalizer::new(SAMPLE_RATE));
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn tracks_at_different_levels_reach_the_same_perceived_loudness() {
         let mut output_levels = Vec::new();
         for amplitude in [0.08, 0.6, 1.2] {
@@ -450,6 +617,7 @@ mod tests {
             .core
             .gain
             .store(0.3_f32.to_bits(), Ordering::Relaxed);
+        profile.core.final_gain.store(true, Ordering::Release);
         let pcm = Pcm {
             loudness: Some(profile),
             ..Pcm::new(
@@ -498,6 +666,7 @@ mod tests {
         let samples = tone(0.08, 1);
         let raw = bytes(&samples);
         profile.feed(0, &raw);
+        profile.finish_stream(u64::from(SAMPLE_RATE));
         let pcm = Pcm {
             loudness: Some(profile),
             ..Pcm::new(
@@ -608,6 +777,58 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn prepared_gain_survives_restart_and_stale_analysis_cannot_restore_cleared_cache() {
+        let directory = Directory::new();
+        let root = directory.0.join("audio");
+        let cache = AudioCache::test_at(root.clone(), 8 * 1024 * 1024).unwrap();
+        let key = CacheKey {
+            account_id: 42,
+            owner_id: -7,
+            track_id: 1,
+            duration: 3,
+        };
+        cache.write_range(&key, 0, &bytes(&tone(0.6, 1))).unwrap();
+        let binding = CacheBinding {
+            cache: cache.clone(),
+            key,
+        };
+        let profile = Profile::new(Arc::new(AtomicBool::new(true)));
+        profile.apply_metadata(crate::media_decoder::Loudness {
+            gain_db: -10.0,
+            reference_lufs: -18.0,
+            peak: Some(1.0),
+        });
+        drop(CacheGain::new(&profile, Some(&binding)));
+        let restored = Profile::new(Arc::new(AtomicBool::new(true)));
+        let restarted = AudioCache::test_at(root, 8 * 1024 * 1024).unwrap();
+        restored.load_cache(&CacheBinding {
+            cache: restarted,
+            key,
+        });
+        assert_eq!(restored.prepared_gain(), profile.prepared_gain());
+        assert!(cache.normalization_gain(&key, -18.0).unwrap().is_none());
+        let other = CacheKey {
+            account_id: 43,
+            ..key
+        };
+        assert!(
+            cache
+                .normalization_gain(&other, TARGET_LUFS as f32)
+                .unwrap()
+                .is_none()
+        );
+        let stale = CacheGain::new(&profile, Some(&binding));
+        cache.clear().unwrap();
+        drop(stale);
+        assert!(
+            cache
+                .normalization_gain(&key, TARGET_LUFS as f32)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

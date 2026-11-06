@@ -3,7 +3,7 @@
 use std::{
     io::{self, Cursor, Read},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -18,9 +18,11 @@ use symphonia::core::{
 use zeroize::Zeroizing;
 mod convert;
 mod hls;
+mod loudness;
 mod net;
 mod source;
 mod transport;
+pub use loudness::Loudness;
 use net::{canceled, invalid};
 
 #[derive(Clone, Default)]
@@ -39,6 +41,7 @@ impl Cancellation {
 pub struct Stream {
     pub reader: Box<dyn Read + Send>,
     pub cancellation: Cancellation,
+    pub loudness: Arc<OnceLock<Option<Loudness>>>,
 }
 
 pub fn open(url: &str, offset: f64) -> io::Result<Stream> {
@@ -49,14 +52,17 @@ pub fn open(url: &str, offset: f64) -> io::Result<Stream> {
         return Err(invalid());
     }
     let cancellation = Cancellation::default();
+    let loudness = Arc::new(OnceLock::new());
     Ok(Stream {
         reader: Box::new(Lazy {
             url: Zeroizing::new(url.into()),
             offset,
             canceled: cancellation.0.clone(),
             pipeline: None,
+            loudness: loudness.clone(),
         }),
         cancellation,
+        loudness,
     })
 }
 struct Lazy {
@@ -64,6 +70,7 @@ struct Lazy {
     offset: f64,
     canceled: Arc<AtomicBool>,
     pipeline: Option<Pipeline>,
+    loudness: Arc<OnceLock<Option<Loudness>>>,
 }
 impl Read for Lazy {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
@@ -75,14 +82,15 @@ impl Read for Lazy {
         }
         if self.pipeline.is_none() {
             let (source, origin) = source::open(&self.url, self.offset, self.canceled.clone())?;
-            self.pipeline = Some(Pipeline::new(
-                source,
-                origin,
-                self.offset,
-                self.canceled.clone(),
-            )?);
+            let pipeline = Pipeline::new(source, origin, self.offset, self.canceled.clone())?;
+            self.pipeline = Some(pipeline);
         }
-        self.pipeline.as_mut().ok_or_else(invalid)?.read(out)
+        let pipeline = self.pipeline.as_mut().ok_or_else(invalid)?;
+        let result = pipeline.read(out);
+        if result.is_ok() {
+            let _ = self.loudness.set(pipeline.loudness);
+        }
+        result
     }
 }
 
@@ -99,6 +107,7 @@ struct Pipeline {
     canceled: Arc<AtomicBool>,
     eof: bool,
     failures: usize,
+    loudness: Option<Loudness>,
 }
 impl Pipeline {
     fn new(
@@ -124,6 +133,7 @@ impl Pipeline {
             .map_err(map_error)?;
         let id = track.id;
         let time_base = track.time_base;
+        let loudness = read_loudness(format.as_mut(), id);
         if seekable && offset > 2.0 {
             format
                 .seek(
@@ -148,6 +158,7 @@ impl Pipeline {
             canceled,
             eof: false,
             failures: 0,
+            loudness,
         })
     }
     fn chunk(&mut self) -> io::Result<bool> {
@@ -159,6 +170,9 @@ impl Pipeline {
                 return Ok(false);
             }
             let packet = self.format.next_packet().map_err(map_error)?;
+            if self.loudness.is_none() {
+                self.loudness = read_loudness(self.format.as_mut(), self.track);
+            }
             let Some(packet) = packet else {
                 self.eof = true;
                 let tail = self
@@ -267,6 +281,21 @@ impl Read for Pipeline {
         }
     }
 }
+fn read_loudness(format: &mut dyn FormatReader, track: u32) -> Option<Loudness> {
+    let mut result = None;
+    let mut metadata = format.metadata();
+    loop {
+        result = metadata
+            .current()
+            .and_then(|revision| loudness::from_metadata(revision, u64::from(track)))
+            .or(result);
+        if metadata.pop().is_none() {
+            break;
+        }
+    }
+    result
+}
+
 fn map_error(error: DecodeError) -> io::Error {
     if let DecodeError::Unsupported(reason) | DecodeError::DecodeError(reason) = &error {
         crate::diagnostics::event("decoder", reason);

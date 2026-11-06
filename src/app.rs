@@ -221,6 +221,44 @@ fn save_discord_preference(enabled: bool) -> bool {
     }
 }
 
+fn track_double_click(ui: &egui::Ui, response: &egui::Response, eligible: bool) -> bool {
+    if !ui.input(|input| input.pointer.button_clicked(egui::PointerButton::Primary)) {
+        return false;
+    }
+    let state_id = egui::Id::new("track-row-click-pair");
+    let now = ui.input(|input| input.time);
+    let limits = ui.ctx().options(|options| {
+        (
+            options.input_options.max_double_click_delay,
+            options.input_options.max_click_dist,
+        )
+    });
+    ui.ctx().data_mut(|data| {
+        let previous = data.get_temp::<(egui::Id, egui::Pos2, f64)>(state_id);
+        if !eligible {
+            if previous.is_some_and(|(id, _, _)| id == response.id) {
+                data.remove::<(egui::Id, egui::Pos2, f64)>(state_id);
+            }
+            return false;
+        }
+        let Some(position) = response.interact_pointer_pos() else {
+            return false;
+        };
+        let paired = previous.is_some_and(|(id, point, at)| {
+            id == response.id
+                && now >= at
+                && now - at < limits.0
+                && point.distance(position) < limits.1
+        });
+        if paired {
+            data.remove::<(egui::Id, egui::Pos2, f64)>(state_id);
+        } else {
+            data.insert_temp(state_id, (response.id, position, now));
+        }
+        paired
+    })
+}
+
 fn release_pointer_focus(response: &egui::Response) {
     if response
         .ctx
@@ -3655,6 +3693,7 @@ impl MusicApp {
                             Arc::new(crate::web_audio::SearchResults {
                                 tracks: Vec::new(),
                                 artists: Vec::new(),
+                                artist_images: HashMap::new(),
                                 albums: Vec::new(),
                                 playlists: Vec::new(),
                                 has_more: false,
@@ -4081,6 +4120,7 @@ impl MusicApp {
                     language,
                     &results.artists,
                     &results.albums,
+                    &results.artist_images,
                 );
                 action = search_ui::playlist_results(
                     ui,
@@ -4143,6 +4183,7 @@ impl MusicApp {
                     artists,
                     albums,
                     false,
+                    &results.artist_images,
                 );
                 if artists.is_empty() && albums.is_empty() {
                     theme::inset_heading(ui, |ui| {
@@ -6658,8 +6699,13 @@ impl MusicApp {
             .playing
             .as_ref()
             .is_some_and(|current| current.key() == track.key());
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.0), Sense::click());
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.0), Sense::hover());
+        let response = ui.interact(
+            rect,
+            ui.id().with(("track-row", track.key(), index)),
+            Sense::click(),
+        );
         let row_hovered = ui.is_enabled()
             && response.contains_pointer()
             && ui.input(|input| {
@@ -6774,15 +6820,16 @@ impl MusicApp {
         }
         release_pointer_focus(&response);
         ui.advance_cursor_after_rect(rect);
-        if action.is_none()
+        let row_clicked = action.is_none()
             && !heart_contains_pointer
             && !index_contains_pointer
-            && if self.double_click_to_play {
-                response.double_clicked()
-            } else {
-                response.clicked()
-            }
-        {
+            && response.clicked_by(egui::PointerButton::Primary);
+        let play = if self.double_click_to_play {
+            track_double_click(ui, &response, row_clicked)
+        } else {
+            row_clicked
+        };
+        if play {
             action = Some(TrackAction::Play(track.key()));
         }
         action
@@ -11837,6 +11884,43 @@ mod tests {
     }
 
     #[test]
+    fn rapid_double_clicks_on_different_tracks_do_not_depend_on_global_triple_click_counts() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.demo = true;
+        app.double_click_to_play = true;
+        let mut tracks = page(3, &[71, 72, 73]).items;
+        for track in &mut tracks {
+            track.title = format!("Track {}", track.id);
+        }
+        app.library.tracks = tracks.clone();
+        let size = egui::vec2(1040.0, 720.0);
+        let mut tick = 0;
+        account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
+        let output = account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
+        let positions: Vec<_> = tracks
+            .iter()
+            .map(|track| {
+                account_ui_text_rect(&output, &track.title)
+                    .unwrap()
+                    .center()
+            })
+            .collect();
+        let mut previous = None;
+        for (track, position) in tracks.iter().zip(positions) {
+            account_ui_click(&ctx, &mut app, size, &mut tick, position);
+            assert_eq!(
+                app.selected, previous,
+                "The first click must only begin a pair for this exact row"
+            );
+            account_ui_click(&ctx, &mut app, size, &mut tick, position);
+            assert_eq!(app.selected, Some(track.key()));
+            previous = Some(track.key());
+        }
+        assert!(app.playback_pending.is_none() && app.workers.is_empty());
+    }
+
+    #[test]
     fn double_click_preference_is_an_interface_switch_and_settings_search_finds_it() {
         for language in [Language::Russian, Language::English] {
             let ctx = egui::Context::default();
@@ -12027,6 +12111,7 @@ mod tests {
         crate::web_audio::SearchResults {
             tracks: page(ids.len(), ids).items,
             artists: Vec::new(),
+            artist_images: HashMap::new(),
             albums: Vec::new(),
             playlists: Vec::new(),
             has_more: true,

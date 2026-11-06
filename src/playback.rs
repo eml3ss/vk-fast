@@ -474,6 +474,7 @@ struct Pcm {
     started: AtomicBool,
     volume: Arc<AtomicU32>,
     loudness: Option<Arc<normalization::Profile>>,
+    normalization_gain: AtomicU32,
 }
 impl Pcm {
     fn new(channels: u16, sample_rate: u32, volume: Arc<AtomicU32>, paused: bool) -> Self {
@@ -511,6 +512,7 @@ impl Pcm {
             started: AtomicBool::new(false),
             volume,
             loudness: None,
+            normalization_gain: AtomicU32::new(0),
         }
     }
     fn is_primed(&self) -> bool {
@@ -650,11 +652,21 @@ fn render_normalized(
         return;
     }
     if let Some(profile) = &pcm.loudness {
+        let enabled = profile.enabled();
+        let mut gain = pcm.normalization_gain.load(Ordering::Relaxed);
+        if gain == 0 {
+            gain = profile.prepared_gain().unwrap_or(1.0).to_bits();
+            // Background analysis prepares the next play. One track keeps the
+            // coefficient chosen before its first audible sample.
+            if enabled && frames > 0 {
+                pcm.normalization_gain.store(gain, Ordering::Relaxed);
+            }
+        }
         normalizer.process(
             &mut output[..frames * pcm.channels],
             pcm.channels,
-            profile.enabled(),
-            profile.gain(),
+            enabled,
+            f32::from_bits(gain),
             volume,
         );
     }
@@ -926,6 +938,7 @@ fn pump_mode(
     decoder: DecoderFactory,
 ) -> Result<(), PlaybackError> {
     let first_frame = frame;
+    let _gain = normalization::CacheGain::new(&source.loudness, cache);
     let mut writer = CacheWriter::new(cache);
     writer.revision = revision;
     loop {
@@ -955,6 +968,7 @@ fn pump_mode(
             if let Some(end) = cache.complete()
                 && frame >= end
             {
+                source.loudness.finish_stream(end);
                 if let Some(eof_frame) = eof_frame {
                     eof_frame.store(end, Ordering::Release);
                 }
@@ -977,6 +991,8 @@ fn pump_mode(
         control.decoder_starts.fetch_add(1, Ordering::Relaxed);
         *decoder_slot.lock().map_err(|_| PlaybackError::Worker)? = Some(stream.cancellation);
         let mut input = stream.reader;
+        let loudness = stream.loudness;
+        let mut metadata_applied = false;
         if canceled.load(Ordering::Relaxed) {
             let _ = finish_decoder(decoder_slot, canceled, true);
             return Ok(());
@@ -998,6 +1014,12 @@ fn pump_mode(
                     return Err(PlaybackError::Decoder);
                 }
             };
+            if !metadata_applied && let Some(metadata) = loudness.get() {
+                if let Some(metadata) = metadata {
+                    source.loudness.apply_metadata(*metadata);
+                }
+                metadata_applied = true;
+            }
             let available = carry + n;
             let complete = available / FRAME_BYTES * FRAME_BYTES;
             let frames = (complete / FRAME_BYTES) as u64;
@@ -1239,6 +1261,7 @@ fn pump_from_prefetch(
         // independently of whether the entire track is ready for offline reuse.
         let end = prefetch.eof.load(Ordering::Acquire);
         if (end > 0 && frame >= end) || cache.complete().is_some_and(|end| frame >= end) {
+            source.loudness.finish_stream(frame);
             return Ok(());
         }
         let policy_changed = !cache
@@ -1526,6 +1549,9 @@ fn start(
         loudness: Some(source.loudness.clone()),
         ..Pcm::new(CHANNELS, SAMPLE_RATE, volume, paused)
     });
+    if let Some(cache) = &cache {
+        source.loudness.load_cache(cache);
+    }
     source.loudness.feed(frame, &bytes);
     if let Some(cache) = &cache {
         source.loudness.scan_cache(cache, control.clone());
@@ -1746,6 +1772,10 @@ fn controller(
                     && let Some(running) = &running
                 {
                     source.loudness.analyze_window(&running.pcm, running.offset);
+                    running
+                        .pcm
+                        .normalization_gain
+                        .store(source.loudness.gain().to_bits(), Ordering::Relaxed);
                     if let Some(cache) = &running.cache {
                         source.loudness.scan_cache(cache, control.clone());
                     }
@@ -2635,6 +2665,7 @@ mod tests {
                 cancellation: cancellation.clone(),
             }),
             cancellation,
+            loudness: Default::default(),
         })
     }
     fn synthetic_decoder(_url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {
