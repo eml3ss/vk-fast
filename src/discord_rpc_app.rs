@@ -308,11 +308,7 @@ impl MusicApp {
                     .collect::<Vec<_>>()
                     .join(", ")
             },
-            album: track
-                .album
-                .as_ref()
-                .map(|album| album.title.clone())
-                .filter(|title| !title.is_empty()),
+            album: track.display_album_title().map(str::to_owned),
             cover_url: track
                 .cover_url
                 .as_deref()
@@ -607,6 +603,51 @@ mod tests {
         let (paused, _paused) = Player::test_paused(180, 12.0);
         app.player = paused;
         assert!(app.discord_rpc_snapshot().is_none());
+    }
+
+    #[test]
+    fn single_placeholder_uses_the_same_release_title_in_presence_and_system_media() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        let mut track = page(1, &[7]).items.remove(0);
+        track.title = "Сингл (Slowed)".into();
+        track.subtitle = Some("Slowed".into());
+        track.album = Some(AlbumRef {
+            owner_id: -5,
+            id: 9,
+            title: "Unnamed".into(),
+            access_key: None,
+            cover_url: None,
+        });
+        app.playing = Some(track);
+        let (player, _commands) = Player::test_playing(180, 42.5);
+        app.player = player;
+        for (source, expected) in [
+            ("Unnamed", "Сингл"),
+            (" unnamed ", "Сингл"),
+            ("UNNAMED", "Сингл"),
+            ("Official single", "Official single"),
+            ("Unnamed Stories", "Unnamed Stories"),
+        ] {
+            app.playing.as_mut().unwrap().album.as_mut().unwrap().title = source.into();
+            let snapshot = app.discord_rpc_snapshot().unwrap();
+            assert_eq!(snapshot.album.as_deref(), Some(expected));
+            assert_eq!(
+                app.system_media_snapshot().track.unwrap().album.as_deref(),
+                Some(expected)
+            );
+            let payload = crate::discord_rpc::test_activity(snapshot).unwrap();
+            assert_eq!(payload["assets"]["large_text"], expected);
+            assert_eq!(
+                app.playing.as_ref().unwrap().album.as_ref().unwrap().title,
+                source
+            );
+        }
+        app.playing.as_mut().unwrap().album = None;
+        assert!(app.discord_rpc_snapshot().unwrap().album.is_none());
+        assert!(app.system_media_snapshot().track.unwrap().album.is_none());
+        assert!(app.workers.is_empty() && app.discord_rpc.service.is_none());
     }
 
     #[test]

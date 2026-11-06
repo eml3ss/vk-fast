@@ -150,11 +150,7 @@ impl MusicApp {
                     id,
                     title: track.display_title().into_owned(),
                     artist,
-                    album: track
-                        .album
-                        .as_ref()
-                        .map(|album| album.title.clone())
-                        .filter(|title| !title.is_empty()),
+                    album: track.display_album_title().map(str::to_owned),
                     cover_url: track
                         .cover_url
                         .as_deref()

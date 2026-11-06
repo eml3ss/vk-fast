@@ -644,6 +644,18 @@ impl Track {
         }
     }
 
+    /// VK can label a single's release "Unnamed". Keep the underlying release
+    /// identity and use the unversioned song title only for its presentation.
+    pub fn display_album_title(&self) -> Option<&str> {
+        let title = self.album.as_ref()?.title.trim();
+        let title = if title.eq_ignore_ascii_case("unnamed") {
+            self.title_parts().0.trim()
+        } else {
+            title
+        };
+        (!title.is_empty()).then_some(title)
+    }
+
     pub fn duration_label(&self) -> String {
         format!("{}:{:02}", self.duration / 60, self.duration % 60)
     }
