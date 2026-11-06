@@ -328,7 +328,7 @@ impl State {
 
     pub fn settings(&mut self, ui: &mut egui::Ui, language: Language, target: &RepaintTarget) {
         ui.add_space(16.0);
-        ui.label(RichText::new(language.text("Обновления Windows", "Windows updates")).strong());
+        ui.label(RichText::new(language.text("Обновления", "Updates")).strong());
         if theme::switch(
             ui,
             &mut self.automatic,

@@ -12,6 +12,9 @@ use std::{
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Sense};
 use zeroize::Zeroize;
 
+#[path = "audio_upload_app.rs"]
+mod audio_upload_app;
+
 #[cfg(test)]
 #[path = "current_settings_tests.rs"]
 mod current_settings_tests;
@@ -999,6 +1002,7 @@ pub struct MusicApp {
     playlist_create_form: Option<PlaylistCreateForm>,
     playlist_create_request: Option<PlaylistCreateRequest>,
     playlist_controls: playlist_actions::State,
+    audio_upload: audio_upload_app::State,
     track_menu_error: Option<WebAudioError>,
     track_menu_notice: Option<(String, Instant)>,
     playlist_request: Option<PlaylistRequest>,
@@ -1310,6 +1314,7 @@ impl MusicApp {
             playlist_create_form: None,
             playlist_create_request: None,
             playlist_controls: playlist_actions::State::default(),
+            audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
             playlist_request: None,
@@ -1570,6 +1575,7 @@ impl MusicApp {
     }
 
     fn reset(&mut self) {
+        self.audio_upload = audio_upload_app::State::default();
         self.native_login_ui.clear();
         if let Some(control) = self.web_login.take() {
             control.cancel();
@@ -5976,7 +5982,8 @@ impl MusicApp {
             {
                 self.go_back(&ctx);
             }
-            let title_width = (ui.available_width() - 140.0).max(80.0);
+            let title_width =
+                (ui.available_width() - if is_library { 92.0 } else { 44.0 }).max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(title_width, 36.0),
                 Layout::left_to_right(Align::Center),
@@ -6035,7 +6042,7 @@ impl MusicApp {
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(
+                if icons::compact_button(
                     ui,
                     Icon::Refresh,
                     t("Обновить", "Refresh"),
@@ -6043,6 +6050,7 @@ impl MusicApp {
                         && self.pending.is_none()
                         && self.home_request.is_none()
                         && self.page != MusicPage::Recent,
+                    false,
                 )
                 .clicked()
                 {
@@ -6052,6 +6060,21 @@ impl MusicApp {
                     } else {
                         self.load_page(&ctx, true);
                     }
+                }
+                if is_library
+                    && icons::compact_button(
+                        ui,
+                        Icon::Plus,
+                        t("Загрузить свой трек", "Upload your track"),
+                        self.session
+                            .as_ref()
+                            .is_some_and(|session| session.music.is_some())
+                            && !self.demo,
+                        false,
+                    )
+                    .clicked()
+                {
+                    self.open_audio_upload();
                 }
             });
         });
@@ -7880,6 +7903,7 @@ impl MusicApp {
         if ui.ctx().current_pass_index() == 0
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
+            && !self.audio_upload.has_modal()
         {
             if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Extra1)) {
                 if self.lyrics.fullscreen {
@@ -7975,9 +7999,11 @@ impl MusicApp {
         let _ = self.qr_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
+        self.audio_upload_window(ui.ctx());
         if !self.system_titlebar
             && !self.qr_open
             && self.web_login.is_none()
+            && !self.audio_upload.has_modal()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -7988,6 +8014,9 @@ impl MusicApp {
     }
 
     fn render_overlays_and_shortcuts(&mut self, ui: &mut egui::Ui) {
+        if self.audio_upload.has_modal() {
+            return;
+        }
         #[cfg(any(windows, test))]
         {
             self.updater
@@ -8132,6 +8161,7 @@ impl MusicApp {
         self.poll_like(ctx);
         self.poll_playlist_add(ctx);
         self.poll_playlist_create(ctx);
+        self.poll_audio_upload(ctx);
         self.poll_playlist_actions(ctx);
         if self.library_refresh_due && self.pending.is_none() {
             self.library_refresh_due = false;
@@ -8238,6 +8268,7 @@ impl Drop for MusicApp {
         self.playlist_create_form = None;
         self.playlist_create_request = None;
         self.playlist_controls = playlist_actions::State::default();
+        self.audio_upload = audio_upload_app::State::default();
         self.search.cancel_requests();
         self.mix_request = None;
         if let Some(cancel) = self.playback_cancel.take() {
@@ -8626,6 +8657,7 @@ mod tests {
             playlist_create_form: None,
             playlist_create_request: None,
             playlist_controls: playlist_actions::State::default(),
+            audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
             playlist_request: None,

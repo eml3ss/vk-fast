@@ -31,6 +31,8 @@ use crate::{
     web_session::SessionCookie,
 };
 
+#[path = "web_audio/audio_upload.rs"]
+mod audio_upload;
 mod owner_page;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;

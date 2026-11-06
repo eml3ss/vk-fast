@@ -346,7 +346,7 @@ fn mutation_succeeded(value: &Value) -> Result<(), WebAudioError> {
     }
 }
 
-fn valid_upload_url(value: &str) -> bool {
+pub(super) fn valid_upload_url(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
         url.scheme() == "https"
             && url.username().is_empty()

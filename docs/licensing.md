@@ -20,13 +20,13 @@
 
 ## Распространение
 
-GitHub Release 0.1.0 содержит Linux AppImage/tar.gz и Windows portable.zip/NSIS; выпуск 0.1.1 обновляет Windows portable.zip и NSIS, добавляя OTA. Дополнительные архивы исходников к релизам не прикладываются. Исходники VK Fast, локальные патчи библиотек, Cargo.lock и рецепты сборки находятся в соответствующем теге этого репозитория (`v0.1.0`, `v0.1.1`).
+GitHub Release 0.1.0 содержит Linux AppImage/tar.gz и Windows portable.zip/NSIS; выпуск 0.1.1 добавляет OTA для Windows; 0.1.2 снова содержит четыре сборки для обеих систем. Дополнительные архивы исходников к релизам не прикладываются. Исходники VK Fast, локальные патчи библиотек, Cargo.lock и рецепты сборки находятся в соответствующем теге этого репозитория (`v0.1.0`, `v0.1.1`, `v0.1.2`).
 
 - Rust-компоненты: [Windows-уведомления](third-party/windows/Rust-notices.txt), [Linux-уведомления](third-party/linux/Rust-notices.txt). Версии закреплены в Cargo.lock; исходники этих версий доступны на crates.io по ссылкам из уведомлений.
 - FFmpeg 9.0.2: [исходный код](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz), [Windows-рецепт](../scripts/build-ffmpeg-windows.sh), [Linux-рецепт](../scripts/build-ffmpeg-linux.sh), [исходные уведомления](third-party/windows/decoder/ffmpeg). SHA-256 исходного архива закреплён в рецептах.
 - Mbed TLS 3.6.7: [выпуск с исходниками](https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-3.6.7), [лицензия](third-party/windows/decoder/mbedtls/LICENSE). Корни Mozilla и патч FFmpeg находятся в [scripts/ffmpeg-tls](../scripts/ffmpeg-tls).
 - NSIS 3.13: [исходный код](https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13-src.tar.bz2); закреплённый SHA-256 и рецепт упаковки — в [windows_installer.py](../scripts/windows_installer.py).
-- GTK, WebKit и остальные Linux-библиотеки: [точные версии и ссылки на соответствующие исходники Ubuntu](third-party/linux/Ubuntu-sources.tsv). Уведомления о них также находятся внутри Linux-пакета в `usr/share/doc/vk-fast`.
+- В Linux 0.1.2 GTK, WebKit и PipeWire используются из дистрибутива и не включаются в пакеты. Для исторической сборки 0.1.0: [точные версии и ссылки на соответствующие исходники Ubuntu](third-party/linux/Ubuntu-sources.tsv). Уведомления о них также находятся внутри Linux-пакета в `usr/share/doc/vk-fast`.
 
 При распространении сохраняйте эти уведомления и доступ к соответствующему исходному коду. Рабочий Windows-архив содержит только исполняемые файлы и пустые папки данных; локальный упаковщик может дополнительно создавать отдельный сопровождающий архив, который не загружается в GitHub Release.
 
