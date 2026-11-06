@@ -1,103 +1,52 @@
 # VK Fast
 
-<img src="assets/vk-fast-icon.png" width="80" height="80" align="right" alt="Логотип VK Fast">
+<img src="assets/vk-fast-icon.png" width="80" height="80" align="right" alt="VK Fast">
 
-Неофициальный настольный плеер VK Music для **Linux и Windows** на Rust и egui/eframe. Русский и английский интерфейс, тёмная тема и нативный вывод звука. Проект не связан с VK.
+Неофициальный плеер VK Music для **Linux и Windows** на Rust и egui. Русский и английский интерфейс, тёмная тема, PipeWire на Linux и WASAPI на Windows.
 
-Готовые сборки: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). Для Linux доступны AppImage и tar.gz (x86-64, glibc 2.39+, системные WebKitGTK 4.1/PipeWire), для Windows — portable и NSIS-установщик.
+Декодирование и обработка звука выполняются на Rust: **Symphonia**, **Rubato** и **ebur128**. [Устройство аудиотракта](docs/native-audio.md).
+
+Готовые выпуски: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). Текущая ветка разработки может отличаться от опубликованного выпуска.
 
 ## Возможности
 
-- Личная библиотека, VK Mix, недавние прослушивания и рекомендации.
-- Поиск треков, исполнителей, альбомов и плейлистов с подсказками.
-- Страницы исполнителей, релизов и владельцев плейлистов; создание и редактирование плейлистов, закрепление и изменение их порядка.
-- Добавление треков в «Мою музыку» и плейлисты, загрузка своих MP3 с названием и исполнителем, миксы по треку и плейлисту.
-- Перемотка, Shuffle, Loop, нормализация громкости и горячие клавиши.
-- Выезжающая справа очередь: добавление, воспроизведение, удаление и очистка добавленных треков.
-- Тексты из VK, Musixmatch и Genius: правая панель и полноэкранный вид, таймкоды при наличии и резервный поиск в Genius.
-- Постоянный аудиокэш до 5 ГиБ; отдельные кэши библиотеки, обложек и аватарки.
-- Сохранение входа, настроек, размера окна, истории, Shuffle, режима повтора и позиции текущего трека.
-- Системный трей и медиакнопки: MPRIS на Linux, SMTC на Windows.
-- Один экземпляр приложения: повторный запуск поднимает открытое окно, в том числе из трея.
-- Обновления Windows из GitHub Releases: уведомление, загрузка и перезапуск с сохранением данных.
-- [Discord Rich Presence](docs/discord-rpc.md): текущий трек, обложка и кнопка GitHub VK Fast; включён по умолчанию.
+- Библиотека, VK Mix, рекомендации, история и поиск музыки.
+- Страницы исполнителей, релизов, плейлистов и их владельцев.
+- Создание и редактирование плейлистов, закрепление и изменение порядка.
+- Загрузка своих MP3 с названием трека и исполнителем.
+- Очередь, Shuffle, Loop, нормализация громкости и горячие клавиши.
+- Тексты VK, Musixmatch и Genius: боковая панель и полноэкранный режим.
+- Постоянный аудиокэш до 5 ГиБ; отдельные кэши библиотеки и изображений.
+- Сохранение входа, громкости, истории, позиции трека и размеров окна.
+- Системные медиакнопки, MPRIS/SMTC, трей и Discord Rich Presence.
+- Один экземпляр приложения и обновления Windows из приложения.
 
 ## Вход
 
-Кнопка «Войти через VK» открывает нативную форму телефона, пароля и кода. Tauri работает в фоне со своим профилем; капча при необходимости открывается отдельной карточкой без рамки. Также доступен вход по QR-коду с подтверждением на телефоне. Сохранённая сессия восстанавливается при следующем запуске; профили обычных браузеров не читаются.
+«Войти через VK» открывает нативную форму. Tauri работает со своим профилем в фоне; капча показывается отдельной карточкой. Доступен QR-вход. Сохранённая сессия восстанавливается при запуске. [Подробнее](docs/tauri-login.md).
 
-Подробнее: [вход и хранение сессии](docs/tauri-login.md). Музыкальные запросы используют внутренний вебинтерфейс VK и могут потребовать обновления клиента при изменениях сервиса.
+## Сборка
 
-Источник текстов выбирается в **Настройки → Воспроизведение**. VK использует подключённый аккаунт, Musixmatch — анонимный токен или свой API-ключ, Genius работает без отдельного входа и возвращает обычный текст без таймкодов. Галочка **Fallback to Genius** включает резервный поиск, если основной источник не вернул текст. Тексты отображаются на исходном языке. Полноэкранный вид закрывается кнопкой справа сверху или `Esc`.
-
-## Что установить
-
-Для сборки нужны **Rust 1.95+**, Cargo и компилятор C. Rust-зависимости закреплены в `Cargo.lock` и загружаются Cargo автоматически.
-
-### Linux
-
-Нужны `pkg-config`, Clang/libclang, GTK 3, WebKitGTK 4.1, библиотеки X11/Wayland, OpenGL/EGL и PipeWire. Для воспроизведения должны работать PipeWire и его менеджер сессии, а `ffmpeg` должен быть доступен в `PATH`.
-
-Примеры системных пакетов:
-
-| Дистрибутив | Пакеты |
-| --- | --- |
-| Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire ffmpeg gtk3 webkit2gtk-4.1` |
-| Debian / Ubuntu | `build-essential pkg-config libclang-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev ffmpeg` |
-
-Версия Rust в репозитории дистрибутива может быть ниже требуемой; в таком случае используйте rustup. Для выбора обложки нужен `xdg-desktop-portal` с backend вашей среды. Для MPRIS нужен пользовательский D-Bus.
-
-Inter встроен в приложение; системные шрифты для других письменностей подключаются при запуске. На Linux они определяются через Fontconfig.
-
-Node.js, npm и Tauri CLI для сборки приложения не нужны. FFmpeg запускается отдельным процессом; заголовки `libavcodec` и `libavformat` не требуются.
-
-В готовые Linux-пакеты включены GTK/WebKit, клиент PipeWire и минимальный FFmpeg. Подробнее: [сборка и запуск Linux-пакетов](docs/linux.md).
-
-### Windows
-
-Установщик NSIS предлагает папку приложения и раздельный выбор хранения настроек и кэша: AppData или папка установки. Также доступна portable-сборка: распакуйте её целиком и запустите `vk-fast.exe`. Для окна входа нужен **Microsoft Edge WebView2 Runtime**. Звук выводится через WASAPI; минимальный FFmpeg включён в поставку.
-
-Кросс-сборка из Linux требует официального Rust toolchain с целью `x86_64-pc-windows-msvc`, LLVM, Python 3.11+ и `cargo-xwin`. Для первой сборки декодера также нужны Bash, curl, tar/xz/bzip2, make, patch и GCC. Готовый декодер переиспользуется при следующих сборках. [Подготовка toolchain и упаковка Windows](docs/windows.md), [состав FFmpeg](docs/windows-ffmpeg.md).
-
-## Сборка и запуск
-
-Из каталога проекта на Linux:
-
-```sh
-cargo run --release --locked
-```
-
-Оптимизированная сборка:
+Rust 1.95+ и Cargo; зависимости закреплены в Cargo.lock.
 
 ```sh
 cargo build --release --locked
-./target/release/vk-fast
+cargo run --release --locked
 ```
 
-После подготовки Windows toolchain по инструкции выше:
+Для Linux нужны pkg-config, Clang/libclang, GTK 3, WebKitGTK 4.1, X11/Wayland, OpenGL/EGL и PipeWire. Пакеты для сборки:
 
-```sh
-./scripts/build-windows.sh --output dist
-```
+| Система | Пакеты |
+| --- | --- |
+| Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire gtk3 webkit2gtk-4.1` |
+| Debian / Ubuntu | `build-essential pkg-config libclang-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
 
-Для установщика добавьте `--installer`. На Linux для запуска закреплённого компилятора NSIS нужен Wine; компилятор скачивается автоматически с проверкой SHA-256.
+Для запуска Linux-пакетов используются библиотеки дистрибутива. [Linux: запуск и упаковка](docs/linux.md).
 
-Правила работы с кодом и команды проверок находятся в [AGENTS.md](AGENTS.md).
+Windows x86-64 использует WASAPI; для входа нужен Microsoft Edge WebView2 Runtime. Настройки и кэш можно хранить в AppData или рядом с программой. [Windows: сборка, установщик и обновления](docs/windows.md).
 
-## Хранение данных
+## Данные и лицензия
 
-| Данные | Linux | Windows portable |
-| --- | --- | --- |
-| Настройки и логи | `$XDG_CONFIG_HOME/vk-fast` или `~/.config/vk-fast` | `config` рядом с `.exe` |
-| Сессия и история | `$XDG_STATE_HOME/vk-fast` или `~/.local/state/vk-fast` | `config` рядом с `.exe` |
-| Кэши | `$XDG_CACHE_HOME/vk-fast` или `~/.cache/vk-fast` | `cache` рядом с `.exe` |
+Linux использует стандартные XDG-каталоги VK Fast. Windows — выбранные при установке `config` и `cache`. Лимит аудиокэша учитывается отдельно от библиотеки и обложек.
 
-Лимит аудиокэша не включает библиотеку и изображения. Логи включаются в настройках и по умолчанию выключены. Файлы сессии и профиль webview содержат данные входа и не предназначены для публикации.
-
-После установки на Windows выбранные папки определяет `vk-fast-storage.ini` рядом с программой. В режиме AppData используются `%LOCALAPPDATA%\VK Fast\config` и `%LOCALAPPDATA%\VK Fast\cache`. Удаление приложения сохраняет пользовательские данные.
-
-## Лицензия
-
-Код VK Fast — **GPL-3.0-only**, полный текст в [LICENSE](LICENSE). Inter распространяется по [SIL OFL 1.1](assets/fonts/OFL.txt); модуль прокрутки содержит код fastframe-scroll под MIT с сохранённым уведомлением в [исходнике](src/scrolling.rs).
-
-Условия сторонних компонентов сохраняются отдельно. Windows-выпуск сопровождается отдельным архивом исходников и лицензий FFmpeg, Mbed TLS и зависимостей: [подробности лицензирования](docs/licensing.md).
+GPL-3.0-only. Лицензии используемых компонентов сохраняются: [подробнее](docs/licensing.md). Проект не связан с VK.

@@ -1,6 +1,6 @@
 //! Windows updates use the public release API, never the VK HTTP client or session.
 //! The portable payload serves both installed and portable copies; user data is
-//! deliberately outside the two-file replacement transaction.
+//! deliberately outside the executable replacement transaction.
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -24,7 +24,6 @@ const API_URL: &str = "https://api.github.com/repos/eml3ss/vk-fast/releases/late
 const MAX_METADATA: u64 = 1024 * 1024;
 const MAX_DOWNLOAD: u64 = 128 * 1024 * 1024;
 const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
-const MAX_DECODER: u64 = 64 * 1024 * 1024;
 const STAGE_PREFIX: &str = "VK-Fast-update-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,9 +252,7 @@ pub(super) struct Job {
     install_dir: PathBuf,
     version: String,
     previous_exe: String,
-    previous_decoder: String,
     executable: String,
-    decoder: String,
     english: bool,
 }
 
@@ -291,7 +288,7 @@ pub fn download(
     if canceled.load(Ordering::Acquire) {
         return Err(Error::Canceled);
     }
-    let (executable, decoder) = extract_package(&archive, &stage.path, &release.version)?;
+    let executable = extract_package(&archive, &stage.path, &release.version)?;
     fs::remove_file(archive)?;
     let current = fs::canonicalize(std::env::current_exe()?)?;
     if current.file_name().and_then(|name| name.to_str()) != Some("vk-fast.exe") {
@@ -299,19 +296,13 @@ pub fn download(
     }
     let install_dir = current.parent().ok_or(Error::Disk)?.to_path_buf();
     plain(&install_dir, true)?;
-    plain(&install_dir.join("bin"), true)?;
     let job = Job {
-        schema: 1,
+        schema: 2,
         nonce: stage_nonce(&stage.path)?,
         install_dir,
         version: release.version.to_string(),
         previous_exe: hash_file(&current, MAX_EXECUTABLE)?,
-        previous_decoder: hash_file(
-            &current.parent().ok_or(Error::Disk)?.join("bin/ffmpeg.exe"),
-            MAX_DECODER,
-        )?,
         executable,
-        decoder,
         english: false,
     };
     fs::copy(current, stage.path.join("runner.exe"))?;
@@ -355,20 +346,15 @@ fn receive_archive(
     Ok(())
 }
 
-fn extract_package(
-    archive: &Path,
-    stage: &Path,
-    version: &Version,
-) -> Result<(String, String), Error> {
+fn extract_package(archive: &Path, stage: &Path, version: &Version) -> Result<String, Error> {
     let mut archive =
         zip::ZipArchive::new(File::open(archive)?).map_err(|_| Error::InvalidPackage)?;
-    if !(2..=5).contains(&archive.len()) {
+    if !(1..=4).contains(&archive.len()) {
         return Err(Error::InvalidPackage);
     }
     let prefix = format!("VK-Fast-{version}-windows-x86_64/");
     let mut seen = HashSet::new();
     let mut exe = None;
-    let mut decoder = None;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|_| Error::InvalidPackage)?;
         let name = entry
@@ -394,7 +380,6 @@ fn extract_package(
         }
         let (destination, limit) = match relative {
             "vk-fast.exe" => ("next-vk-fast.exe", MAX_EXECUTABLE),
-            "bin/ffmpeg.exe" => ("next-ffmpeg.exe", MAX_DECODER),
             _ => return Err(Error::InvalidPackage),
         };
         let expected = entry.size();
@@ -412,16 +397,9 @@ fn extract_package(
         }
         validate_pe(&output)?;
         let digest = hash_file(&output, limit)?;
-        if relative == "vk-fast.exe" {
-            exe = Some(digest);
-        } else {
-            decoder = Some(digest);
-        }
+        exe = Some(digest);
     }
-    Ok((
-        exe.ok_or(Error::InvalidPackage)?,
-        decoder.ok_or(Error::InvalidPackage)?,
-    ))
+    exe.ok_or(Error::InvalidPackage)
 }
 
 fn validate_pe(path: &Path) -> Result<(), Error> {
@@ -529,24 +507,18 @@ fn read_job(stage: &Path) -> Result<Job, Error> {
     }
     let job: Job = serde_json::from_slice(&bytes).map_err(|_| Error::Helper)?;
     let version = Version::parse(&job.version).map_err(|_| Error::Helper)?;
-    if job.schema != 1
+    if job.schema != 2
         || job.nonce != stage_nonce(stage)?
         || !version.pre.is_empty()
         || !job.install_dir.is_absolute()
         || job.install_dir.starts_with(stage)
-        || [
-            &job.previous_exe,
-            &job.previous_decoder,
-            &job.executable,
-            &job.decoder,
-        ]
-        .iter()
-        .any(|hash| parse_hash(hash).is_none())
+        || [&job.previous_exe, &job.executable]
+            .iter()
+            .any(|hash| parse_hash(hash).is_none())
     {
         return Err(Error::Helper);
     }
     plain(&job.install_dir, true)?;
-    plain(&job.install_dir.join("bin"), true)?;
     Ok(job)
 }
 

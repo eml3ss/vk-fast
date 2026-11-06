@@ -19,8 +19,6 @@ mod catalog;
 mod client_platform;
 mod cover_art;
 mod cover_cache;
-mod decoder_binary;
-mod decoder_diagnostics;
 mod detail_ui;
 mod diagnostics;
 mod discord_rpc;
@@ -31,6 +29,7 @@ mod keybinds;
 mod library_cache;
 mod lyrics;
 mod lyrics_ui;
+mod media_decoder;
 mod model;
 mod music_session_store;
 mod owner_ui;
@@ -779,7 +778,7 @@ fn check_playback() -> Result<(), String> {
     let url = client
         .resolve(track.key())
         .map_err(|error| error.localized(language))?;
-    println!("Аудиоссылка получена. Проверяем FFmpeg и устройство вывода с нулевой громкостью.");
+    println!("Аудиоссылка получена. Проверяем декодер и устройство вывода с нулевой громкостью.");
     let mut player = Player::new();
     player.set_volume(0.0);
     player.play(url, track.duration, 0.0);
@@ -836,7 +835,7 @@ fn check_playback() -> Result<(), String> {
             && snapshot.buffered_until >= buffered - 0.005
     })?;
     if player.decoder_starts() != decoder_starts {
-        return Err("Перемотка в готовый буфер перезапустила FFmpeg.".into());
+        return Err("Перемотка в готовый буфер перезапустила декодер.".into());
     }
     player.seek(paused);
     wait_for(&player, &|snapshot| {
@@ -845,7 +844,7 @@ fn check_playback() -> Result<(), String> {
             && snapshot.buffered_until >= buffered - 0.005
     })?;
     if player.decoder_starts() != decoder_starts {
-        return Err("Возврат в готовое аудио перезапустил FFmpeg.".into());
+        return Err("Возврат в готовое аудио перезапустил декодер.".into());
     }
     player.resume();
     wait_for(&player, &|snapshot| {
@@ -860,7 +859,7 @@ fn check_playback() -> Result<(), String> {
         matches!(snapshot.state, PlaybackState::Playing) && snapshot.position > playing_seek + 0.1
     })?;
     if player.decoder_starts() != decoder_starts {
-        return Err("Перемотка во время воспроизведения перезапустила FFmpeg.".into());
+        return Err("Перемотка во время воспроизведения перезапустила декодер.".into());
     }
     let outside = (player.snapshot().buffered_until + 10.0).min(f64::from(track.duration) - 1.0);
     if outside > player.snapshot().buffered_until + 0.5 {
@@ -877,7 +876,7 @@ fn check_playback() -> Result<(), String> {
         matches!(snapshot.state, PlaybackState::Stopped)
     })?;
     println!(
-        "PipeWire выводит звук; перемотка вперёд и назад в буфере сохраняет FFmpeg. Пауза, перемотка за буфер и остановка работают."
+        "Нативный аудиовывод работает; перемотка вперёд и назад в буфере сохраняет декодер. Пауза, перемотка за буфер и остановка работают."
     );
     println!("Опустошений PCM-буфера: {}.", player.underruns());
     Ok(())
@@ -960,7 +959,7 @@ fn check_audio_cache() -> Result<(), String> {
         matches!(snapshot.state, PlaybackState::Paused) && (snapshot.position - 1.0).abs() < 0.005
     })?;
     if player.decoder_starts() != starts {
-        return Err("Возврат на старый участок дискового кэша перезапустил FFmpeg.".into());
+        return Err("Возврат на старый участок дискового кэша перезапустил декодер.".into());
     }
     player.stop();
     drop(player);
@@ -987,7 +986,7 @@ fn check_audio_cache() -> Result<(), String> {
     }
     replay.stop();
     println!(
-        "Дисковый кэш работает: возврат с 40-й на 1-ю секунду и повторное открытие кэша не запускают FFmpeg. Проверка выполнена без звука."
+        "Дисковый кэш работает: возврат с 40-й на 1-ю секунду и повторное открытие кэша не запускают декодер. Проверка выполнена без звука."
     );
     Ok(())
 }

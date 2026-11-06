@@ -10,5 +10,4 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$work/target}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 export CARGO_INCREMENTAL=0
 cargo build --release --locked
-VK_FAST_LINUX_FFMPEG_WORK="$work/ffmpeg" ./scripts/build-ffmpeg-linux.sh
 python3 scripts/package-linux.py --executable "$CARGO_TARGET_DIR/release/vk-fast" --output "$output"

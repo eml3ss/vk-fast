@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect notices from the platform dependency graph fixed in Cargo.lock."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -15,6 +16,7 @@ metadata = json.loads(subprocess.check_output([
 ], cwd=root))
 active = {node["id"] for node in metadata["resolve"]["nodes"]}
 output = []
+license_texts = {}
 for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):
     if package["id"] not in active or package["name"] == "vk-fast":
         continue
@@ -31,7 +33,15 @@ for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version
             files.add(path)
     for path in sorted(files):
         if path.is_file() and path.stat().st_size < 1024 * 1024:
-            output += ["--- " + path.name + " ---", path.read_text(errors="replace"), ""]
+            content = path.read_text(errors="replace")
+            digest = hashlib.sha256(content.encode()).hexdigest()
+            label = f"{package['name']} {package['version']} / {path.name}"
+            output += ["--- " + path.name + " ---"]
+            if digest in license_texts:
+                output += ["Identical license text is included above: " + license_texts[digest], ""]
+            else:
+                license_texts[digest] = label
+                output += [content, ""]
 destination = args.output or root / ("target/windows-third-party-licenses.txt" if "windows" in args.target else "target/linux-third-party-licenses.txt")
 destination.parent.mkdir(parents=True, exist_ok=True)
 destination.write_text("\n".join(output), encoding="utf-8")

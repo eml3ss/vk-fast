@@ -208,7 +208,7 @@ fn clicking_a_restricted_middle_track_selects_the_next_track_and_drops_the_old_s
     );
     assert!(app.playback_error.is_none());
     // Resolution can run, but this fixture has no music client or stream URL:
-    // it cannot access VK, launch FFmpeg or open an audio device.
+    // it cannot access VK, start decoding or open an audio device.
     assert!(app.playback_pending.is_some());
 }
 

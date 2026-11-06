@@ -29,7 +29,7 @@ impl Measurement {
     }
 
     fn add(&mut self, bytes: &[u8]) {
-        // FFmpeg/cache chunks are bounded. This scratch space is on a worker,
+        // Decoded/cache chunks are bounded. This scratch space is on a worker,
         // never the audio stack, and keeps each meter call frame-aligned.
         let mut samples = [0.0_f32; 8192];
         let chunk_bytes = samples.len() * size_of::<f32>();

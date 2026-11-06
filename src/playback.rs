@@ -1,5 +1,5 @@
-//! FFmpeg decodes HTTPS media into a bounded seekable PCM window. A native
-//! output callback never waits for network, pipes or a mutex.
+//! Rust media decoding feeds a bounded, seekable PCM window. The native
+//! output callback never waits for network, decoding or a mutex.
 #[path = "playback_normalization.rs"]
 mod normalization;
 pub(crate) use crate::audio_cache::completed_duration_plausible;
@@ -12,7 +12,6 @@ use std::{
     collections::VecDeque,
     io::Read,
     mem::size_of,
-    process::{Child, Command as ProcessCommand, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -32,7 +31,6 @@ const MAX_PCM_BYTES: usize = 16 * 1024 * 1024;
 pub enum PlaybackError {
     Worker,
     Device,
-    MissingFfmpeg,
     Decoder,
     InvalidUrl,
     CacheMiss,
@@ -60,25 +58,9 @@ impl PlaybackError {
                     )
                 }
             }
-            Self::MissingFfmpeg => {
-                #[cfg(windows)]
-                {
-                    language.text(
-                        "Не найден bin/ffmpeg.exe. Распакуйте архив VK Fast целиком.",
-                        "bin/ffmpeg.exe is missing. Extract the complete VK Fast archive.",
-                    )
-                }
-                #[cfg(not(windows))]
-                {
-                    language.text(
-                        "FFmpeg не найден. Установите ffmpeg и перезапустите VK Fast.",
-                        "FFmpeg was not found. Install ffmpeg and restart VK Fast.",
-                    )
-                }
-            }
             Self::Decoder => language.text(
-                "FFmpeg не смог воспроизвести этот трек. Попробуйте ещё раз или выберите другой.",
-                "FFmpeg could not play this track. Try again or choose another track.",
+                "Не удалось декодировать этот трек. Попробуйте ещё раз или выберите другой.",
+                "Could not decode this track. Try again or choose another track.",
             ),
             Self::InvalidUrl => language.text(
                 "VK не вернул подходящую HTTPS-ссылку на аудио.",
@@ -210,7 +192,7 @@ impl Player {
         )
     }
 
-    /// Creating a player does not open an audio output or start FFmpeg.
+    /// Creating a player does not open an audio output or start decoding.
     pub fn new() -> Self {
         Self::create(None)
     }
@@ -694,60 +676,6 @@ fn render_normalized(
     // No mutex, allocation, I/O, or futex wake occurs on the RT thread. A
     // bounded producer wait rechecks the atomic cursor when space becomes free.
 }
-fn ffmpeg_command(
-    url: &str,
-    offset: f64,
-    channels: u16,
-    sample_rate: u32,
-) -> std::io::Result<ProcessCommand> {
-    let mut command = crate::decoder_binary::command()?;
-    command.args([
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-protocol_whitelist",
-        "http,https,tcp,tls,crypto",
-        "-rw_timeout",
-        "15000000",
-        "-ss",
-        &format!("{offset:.9}"),
-    ]);
-    #[cfg(windows)]
-    command.args(["-tls_verify", "1"]);
-    command
-        .args([
-            "-i",
-            url,
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-ac",
-            &channels.to_string(),
-            "-ar",
-            &sample_rate.to_string(),
-            "-c:a",
-            "pcm_f32le",
-            "-f",
-            "f32le",
-            "pipe:1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(if crate::diagnostics::enabled() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    Ok(command)
-}
 #[cfg(test)]
 fn feed(mut input: impl Read, pcm: &Pcm) {
     let mut bytes = [0_u8; 16_387];
@@ -815,7 +743,7 @@ fn binding(source: &Source, cache: Option<&AudioCache>) -> Option<CacheBinding> 
         key: source.key?,
     })
 }
-// Commit sizeable contiguous writes rather than fsyncing each pipe read.
+// Commit sizeable contiguous writes rather than fsyncing each decoded block.
 // Drop flushes the tail on pause/seek/stop so played audio remains reusable.
 struct CacheWriter {
     cache: Option<CacheBinding>,
@@ -939,67 +867,25 @@ fn prefill(pcm: &Pcm, bytes: &[u8], was_started: bool) {
         );
     }
 }
-type DecoderFactory = fn(&str, f64) -> std::io::Result<Child>;
-fn decoder_error_code(code: Option<i32>) -> String {
-    code.map_or_else(
-        || "none".into(),
-        |code| {
-            let code = code as u32;
-            // Keep numeric OS/NTSTATUS errors readable through the logger's
-            // identifier filter without including private io::Error text.
-            format!("0x{:04x}_{:04x}", code >> 16, code & 0xffff)
-        },
-    )
+type DecoderFactory = fn(&str, f64) -> std::io::Result<crate::media_decoder::Stream>;
+type DecoderSlot = Arc<Mutex<Option<crate::media_decoder::Cancellation>>>;
+fn spawn_decoder(url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {
+    crate::media_decoder::open(url, offset)
 }
 fn log_decoder_io_error(stage: &str, error: &std::io::Error) {
-    // io::Error's text may contain the input URL or a private install path.
-    crate::diagnostics::event(
-        "ffmpeg",
-        &format!(
-            "{stage} kind={:?} os_error={}",
-            error.kind(),
-            decoder_error_code(error.raw_os_error())
-        ),
-    );
+    crate::diagnostics::event("decoder", &format!("{stage} kind={:?}", error.kind()));
 }
-fn spawn_decoder(url: &str, offset: f64) -> std::io::Result<Child> {
-    ffmpeg_command(url, offset, CHANNELS, SAMPLE_RATE)?.spawn()
-}
-type DecoderChild = Arc<Mutex<Option<Child>>>;
-fn finish_child(
-    child: &DecoderChild,
+fn finish_decoder(
+    slot: &DecoderSlot,
     canceled: &AtomicBool,
     force: bool,
-) -> Result<bool, PlaybackError> {
-    loop {
-        {
-            let mut guard = child.lock().map_err(|_| PlaybackError::Worker)?;
-            let Some(process) = guard.as_mut() else {
-                return Ok(true);
-            };
-            if force || canceled.load(Ordering::Relaxed) {
-                let _ = process.kill();
-            }
-            match process.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() && !force && !canceled.load(Ordering::Relaxed) {
-                        crate::diagnostics::event(
-                            "ffmpeg",
-                            &format!("exit_failed code={}", decoder_error_code(status.code())),
-                        );
-                    }
-                    guard.take();
-                    return Ok(status.success());
-                }
-                Ok(None) => (),
-                Err(error) => {
-                    log_decoder_io_error("wait_failed", &error);
-                    return Err(PlaybackError::Decoder);
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(10));
+) -> Result<(), PlaybackError> {
+    if let Some(handle) = slot.lock().map_err(|_| PlaybackError::Worker)?.take()
+        && (force || canceled.load(Ordering::Acquire))
+    {
+        handle.cancel();
     }
+    Ok(())
 }
 fn pump(
     source: &Source,
@@ -1007,7 +893,7 @@ fn pump(
     frame: u64,
     pcm: &Pcm,
     canceled: &AtomicBool,
-    child: &DecoderChild,
+    decoder_slot: &DecoderSlot,
     control: &Control,
 ) -> Result<(), PlaybackError> {
     pump_mode(
@@ -1016,7 +902,7 @@ fn pump(
         frame,
         Some(pcm),
         canceled,
-        child,
+        decoder_slot,
         control,
         None,
         None,
@@ -1032,7 +918,7 @@ fn pump_mode(
     mut frame: u64,
     pcm: Option<&Pcm>,
     canceled: &AtomicBool,
-    child: &DecoderChild,
+    decoder_slot: &DecoderSlot,
     control: &Control,
     revision: Option<u64>,
     stop_at: Option<u64>,
@@ -1084,35 +970,22 @@ fn pump_mode(
             .into_iter()
             .chain(stop_at)
             .min();
-        let mut process = decoder(url, frame_time(frame)).map_err(|error| {
-            log_decoder_io_error("spawn_failed", &error);
-            if error.kind() == std::io::ErrorKind::NotFound {
-                PlaybackError::MissingFfmpeg
-            } else {
-                PlaybackError::Decoder
-            }
+        let stream = decoder(url, frame_time(frame)).map_err(|error| {
+            log_decoder_io_error("open_failed", &error);
+            PlaybackError::Decoder
         })?;
         control.decoder_starts.fetch_add(1, Ordering::Relaxed);
-        if let Some(stderr) = process.stderr.take()
-            && crate::decoder_diagnostics::capture(stderr).is_err()
-        {
-            crate::diagnostics::event("ffmpeg", "stderr_reader_failed");
-        }
-        let Some(mut input) = process.stdout.take() else {
-            let _ = process.kill();
-            let _ = process.wait();
-            return Err(PlaybackError::Decoder);
-        };
-        *child.lock().map_err(|_| PlaybackError::Worker)? = Some(process);
+        *decoder_slot.lock().map_err(|_| PlaybackError::Worker)? = Some(stream.cancellation);
+        let mut input = stream.reader;
         if canceled.load(Ordering::Relaxed) {
-            let _ = finish_child(child, canceled, true);
+            let _ = finish_decoder(decoder_slot, canceled, true);
             return Ok(());
         }
         let mut bytes = [0_u8; 32_775];
         let mut carry = 0;
         let reached_eof = loop {
             if canceled.load(Ordering::Relaxed) {
-                let _ = finish_child(child, canceled, true);
+                let _ = finish_decoder(decoder_slot, canceled, true);
                 return Ok(());
             }
             let n = match input.read(&mut bytes[carry..32_768]) {
@@ -1120,8 +993,8 @@ fn pump_mode(
                 Ok(n) => n,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    log_decoder_io_error("stdout_read_failed", &error);
-                    let _ = finish_child(child, canceled, true);
+                    log_decoder_io_error("stream_read_failed", &error);
+                    let _ = finish_decoder(decoder_slot, canceled, true);
                     return Err(PlaybackError::Decoder);
                 }
             };
@@ -1140,11 +1013,11 @@ fn pump_mode(
                     saved &= writer.flush();
                 }
                 if !saved && revision.is_some() {
-                    let _ = finish_child(child, canceled, true);
+                    let _ = finish_decoder(decoder_slot, canceled, true);
                     return Err(PlaybackError::CacheMiss);
                 }
                 if pcm.is_some_and(|pcm| !push_pcm(&bytes[..take_bytes], pcm, canceled)) {
-                    let _ = finish_child(child, canceled, true);
+                    let _ = finish_decoder(decoder_slot, canceled, true);
                     return Ok(());
                 }
                 frame += take_frames;
@@ -1157,22 +1030,19 @@ fn pump_mode(
         };
         if reached_eof {
             if carry != 0 {
-                crate::diagnostics::event("ffmpeg", "output_incomplete_frame");
-                let _ = finish_child(child, canceled, true);
+                crate::diagnostics::event("decoder", "output_incomplete_frame");
+                let _ = finish_decoder(decoder_slot, canceled, true);
                 return Err(PlaybackError::Decoder);
             }
-            let success = finish_child(child, canceled, false)?;
+            finish_decoder(decoder_slot, canceled, false)?;
             if canceled.load(Ordering::Relaxed) {
                 return Ok(());
-            }
-            if !success {
-                return Err(PlaybackError::Decoder);
             }
             if !writer.flush() && revision.is_some() {
                 return Err(PlaybackError::CacheMiss);
             }
             if !completed_duration_plausible(frame, source.duration) {
-                crate::diagnostics::event("ffmpeg", "output_duration_incomplete");
+                crate::diagnostics::event("decoder", "output_duration_incomplete");
                 return Err(PlaybackError::Decoder);
             }
             source.loudness.finish_stream(frame);
@@ -1185,7 +1055,7 @@ fn pump_mode(
         }
         // This missing interval is filled. Continue directly from the next
         // existing PCM range instead of fetching/decoding that range again.
-        let _ = finish_child(child, canceled, true);
+        let _ = finish_decoder(decoder_slot, canceled, true);
         if !writer.flush() && revision.is_some() {
             return Err(PlaybackError::CacheMiss);
         }
@@ -1196,7 +1066,7 @@ fn pump_mode(
 struct Prefetch {
     canceled: Arc<AtomicBool>,
     disabled: AtomicBool,
-    child: DecoderChild,
+    decoder_slot: DecoderSlot,
     reader: Mutex<Option<JoinHandle<()>>>,
     result: Arc<Mutex<Option<Result<(), PlaybackError>>>>,
     changed: Arc<Condvar>,
@@ -1234,14 +1104,14 @@ impl Prefetch {
             return Ok(None);
         }
         let canceled = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(None));
+        let decoder_slot = Arc::new(Mutex::new(None));
         let result = Arc::new(Mutex::new(None));
         let changed = Arc::new(Condvar::new());
         let eof = Arc::new(AtomicU64::new(0));
         let worker_eof = eof.clone();
-        let (worker_cancel, worker_child, worker_result, worker_changed) = (
+        let (worker_cancel, worker_decoder, worker_result, worker_changed) = (
             canceled.clone(),
-            child.clone(),
+            decoder_slot.clone(),
             result.clone(),
             changed.clone(),
         );
@@ -1257,7 +1127,7 @@ impl Prefetch {
                     first_frame,
                     None,
                     &worker_cancel,
-                    &worker_child,
+                    &worker_decoder,
                     &control,
                     Some(revision),
                     None,
@@ -1279,7 +1149,7 @@ impl Prefetch {
                             0,
                             None,
                             &worker_cancel,
-                            &worker_child,
+                            &worker_decoder,
                             &control,
                             Some(revision),
                             Some(first_frame),
@@ -1306,7 +1176,7 @@ impl Prefetch {
         Ok(Some(Arc::new(Self {
             canceled,
             disabled: AtomicBool::new(false),
-            child,
+            decoder_slot,
             reader: Mutex::new(Some(reader)),
             result,
             changed,
@@ -1318,20 +1188,19 @@ impl Prefetch {
         self.disabled.store(true, Ordering::Release);
         self.canceled.store(true, Ordering::Release);
         self.changed.notify_all();
-        if let Ok(mut guard) = self.child.lock()
+        if let Ok(mut guard) = self.decoder_slot.lock()
             && let Some(process) = guard.as_mut()
         {
-            let _ = process.kill();
+            process.cancel();
         }
         let reader = self.reader.lock().ok().and_then(|mut reader| reader.take());
         if let Some(reader) = reader {
             let _ = reader.join();
         }
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut process) = guard.take()
+        if let Ok(mut guard) = self.decoder_slot.lock()
+            && let Some(process) = guard.take()
         {
-            let _ = process.kill();
-            let _ = process.wait();
+            process.cancel();
         }
     }
 }
@@ -1348,7 +1217,7 @@ fn pump_from_prefetch(
     mut frame: u64,
     pcm: &Pcm,
     canceled: &AtomicBool,
-    child: &DecoderChild,
+    decoder_slot: &DecoderSlot,
     control: &Control,
     prefetch: &Prefetch,
 ) -> Result<(), PlaybackError> {
@@ -1386,9 +1255,17 @@ fn pump_from_prefetch(
             || matches!(result, Some(Ok(())) | Some(Err(PlaybackError::CacheMiss)))
         {
             // Explicit cache changes and insufficient writes downgrade to the
-            // bounded streaming path. Reap the downloader before a new FFmpeg.
+            // bounded streaming path. Stop the downloader before a new decode stream.
             prefetch.stop();
-            return pump(source, Some(cache), frame, pcm, canceled, child, control);
+            return pump(
+                source,
+                Some(cache),
+                frame,
+                pcm,
+                canceled,
+                decoder_slot,
+                control,
+            );
         }
         if let Some(Err(error)) = result {
             return Err(error);
@@ -1400,7 +1277,7 @@ fn pump_from_prefetch(
 
 struct Pump {
     canceled: Arc<AtomicBool>,
-    child: DecoderChild,
+    decoder_slot: DecoderSlot,
     reader: Option<JoinHandle<()>>,
     error: Arc<Mutex<Option<PlaybackError>>>,
     pcm: Arc<Pcm>,
@@ -1415,10 +1292,14 @@ impl Pump {
         prefetch: Option<Arc<Prefetch>>,
     ) -> Result<Self, PlaybackError> {
         let canceled = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(None));
+        let decoder_slot = Arc::new(Mutex::new(None));
         let error = Arc::new(Mutex::new(None));
-        let (reader_canceled, reader_child, reader_error, reader_pcm) =
-            (canceled.clone(), child.clone(), error.clone(), pcm.clone());
+        let (reader_canceled, reader_decoder, reader_error, reader_pcm) = (
+            canceled.clone(),
+            decoder_slot.clone(),
+            error.clone(),
+            pcm.clone(),
+        );
         let reader = thread::Builder::new()
             .name("vk-pcm-source".into())
             .spawn(move || {
@@ -1429,7 +1310,7 @@ impl Pump {
                         frame,
                         &reader_pcm,
                         &reader_canceled,
-                        &reader_child,
+                        &reader_decoder,
                         &control,
                         prefetch,
                     ),
@@ -1439,7 +1320,7 @@ impl Pump {
                         frame,
                         &reader_pcm,
                         &reader_canceled,
-                        &reader_child,
+                        &reader_decoder,
                         &control,
                     ),
                 };
@@ -1458,7 +1339,7 @@ impl Pump {
             .map_err(|_| PlaybackError::Worker)?;
         Ok(Self {
             canceled,
-            child,
+            decoder_slot,
             reader: Some(reader),
             error,
             pcm,
@@ -1472,19 +1353,18 @@ impl Drop for Pump {
     fn drop(&mut self) {
         self.canceled.store(true, Ordering::Release);
         self.pcm.space.notify_all();
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(child) = guard.as_mut()
+        if let Ok(mut guard) = self.decoder_slot.lock()
+            && let Some(decoder_slot) = guard.as_mut()
         {
-            let _ = child.kill();
+            decoder_slot.cancel();
         }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut child) = guard.take()
+        if let Ok(mut guard) = self.decoder_slot.lock()
+            && let Some(decoder_slot) = guard.take()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            decoder_slot.cancel();
         }
     }
 }
@@ -2526,19 +2406,19 @@ mod tests {
         };
         let pcm = pcm(2);
         let control = Control::default();
-        let child = Arc::new(Mutex::new(None));
+        let decoder_slot = Arc::new(Mutex::new(None));
         pump(
             &source,
             Some(&CacheBinding { cache, key }),
             0,
             &pcm,
             &AtomicBool::new(false),
-            &child,
+            &decoder_slot,
             &control,
         )
         .unwrap();
         assert_eq!(control.decoder_starts.load(Ordering::Relaxed), 0);
-        assert!(child.lock().unwrap().is_none());
+        assert!(decoder_slot.lock().unwrap().is_none());
         assert_eq!(retained_samples(&pcm).len(), 96_000);
         assert_eq!(pcm.buffered_range(0.0, 1), (0.0, 1.0, true));
         let mut output = [0.0; 4];
@@ -2603,58 +2483,54 @@ mod tests {
         assert_eq!(output, [0.1, -0.1]);
     }
 
-    fn synthetic_decoder(_url: &str, offset: f64) -> std::io::Result<Child> {
-        ProcessCommand::new("ffmpeg")
-            .args([
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=48000:cl=stereo",
-                "-t",
-                &format!("{}", (24.0 - offset).max(0.0)),
-                "-f",
-                "f32le",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "pipe:1",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+    struct SyntheticReader {
+        remaining: usize,
+        realtime: bool,
+        cancellation: crate::media_decoder::Cancellation,
     }
-    fn realtime_synthetic_decoder(_url: &str, _offset: f64) -> std::io::Result<Child> {
-        ProcessCommand::new("ffmpeg")
-            .args([
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-re",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=48000:cl=stereo",
-                "-t",
-                "24",
-                "-f",
-                "f32le",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "pipe:1",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+    impl Read for SyntheticReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if self.cancellation.is_canceled() {
+                return Err(std::io::Error::other("Canceled test source"));
+            }
+            let count = output.len().min(self.remaining);
+            if self.realtime {
+                let deadline =
+                    std::time::Instant::now() + Duration::from_secs_f64(count as f64 / 384000.0);
+                while std::time::Instant::now() < deadline {
+                    if self.cancellation.is_canceled() {
+                        return Err(std::io::Error::other("Canceled test source"));
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+            output[..count].fill(0);
+            self.remaining -= count;
+            Ok(count)
+        }
+    }
+    fn synthetic_stream(
+        seconds: f64,
+        realtime: bool,
+    ) -> std::io::Result<crate::media_decoder::Stream> {
+        let cancellation = crate::media_decoder::Cancellation::default();
+        Ok(crate::media_decoder::Stream {
+            reader: Box::new(SyntheticReader {
+                remaining: (frame_at(seconds) as usize) * FRAME_BYTES,
+                realtime,
+                cancellation: cancellation.clone(),
+            }),
+            cancellation,
+        })
+    }
+    fn synthetic_decoder(_url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {
+        synthetic_stream((24.0 - offset).max(0.0), false)
+    }
+    fn realtime_synthetic_decoder(
+        _url: &str,
+        _offset: f64,
+    ) -> std::io::Result<crate::media_decoder::Stream> {
+        synthetic_stream(24.0, true)
     }
     fn wait_until(mut ready: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -2757,26 +2633,27 @@ mod tests {
         );
         // Tail and prefix use sequential decoders, never one per playback window.
         assert_eq!(control.decoder_starts.load(Ordering::Relaxed), 2);
-        assert!(prefetch.child.lock().unwrap().is_none());
+        assert!(prefetch.decoder_slot.lock().unwrap().is_none());
     }
 
-    fn tail_then_slow_prefix_decoder(url: &str, offset: f64) -> std::io::Result<Child> {
+    fn tail_then_slow_prefix_decoder(
+        url: &str,
+        offset: f64,
+    ) -> std::io::Result<crate::media_decoder::Stream> {
         if offset > 0.0 {
             synthetic_decoder(url, offset)
         } else {
             realtime_synthetic_decoder(url, offset)
         }
     }
-    fn tail_then_failed_prefix_decoder(url: &str, offset: f64) -> std::io::Result<Child> {
+    fn tail_then_failed_prefix_decoder(
+        url: &str,
+        offset: f64,
+    ) -> std::io::Result<crate::media_decoder::Stream> {
         if offset > 0.0 {
             synthetic_decoder(url, offset)
         } else {
-            ProcessCommand::new("ffmpeg")
-                .args(["-nostdin", "-invalid-synthetic-option"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
+            Err(std::io::Error::other("Synthetic decoding failure"))
         }
     }
 
@@ -2816,12 +2693,12 @@ mod tests {
             prefetch.stop();
             assert!(pump.failure().is_none());
             assert!(cache.complete().is_none());
-            assert!(prefetch.child.lock().unwrap().is_none());
+            assert!(prefetch.decoder_slot.lock().unwrap().is_none());
         }
     }
 
     #[test]
-    fn canceled_prefetch_reaps_its_decoder_and_never_marks_partial_audio_complete() {
+    fn canceled_prefetch_stops_native_decoding_and_never_marks_partial_audio_complete() {
         let directory = CacheDirectory::new();
         let (source, cache, control) = preload_fixture(&directory);
         let prefetch =
@@ -2832,7 +2709,7 @@ mod tests {
         let stopped = std::time::Instant::now();
         prefetch.stop();
         assert!(stopped.elapsed() < Duration::from_secs(2));
-        assert!(prefetch.child.lock().unwrap().is_none());
+        assert!(prefetch.decoder_slot.lock().unwrap().is_none());
         assert!(prefetch.reader.lock().unwrap().is_none());
         assert!(cache.complete().is_none());
         assert_eq!(prefetch.eof.load(Ordering::Acquire), 0);
@@ -2881,7 +2758,7 @@ mod tests {
         let prefetch = Arc::new(Prefetch {
             canceled: Arc::new(AtomicBool::new(false)),
             disabled: AtomicBool::new(false),
-            child: Arc::new(Mutex::new(None)),
+            decoder_slot: Arc::new(Mutex::new(None)),
             reader: Mutex::new(None),
             result: Arc::new(Mutex::new(Some(Ok(())))),
             changed: Arc::new(Condvar::new()),
@@ -2905,31 +2782,11 @@ mod tests {
         assert_eq!(control.decoder_starts.load(Ordering::Relaxed), 0);
     }
 
-    fn short_synthetic_decoder(_url: &str, _offset: f64) -> std::io::Result<Child> {
-        ProcessCommand::new("ffmpeg")
-            .args([
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=48000:cl=stereo",
-                "-t",
-                "1",
-                "-f",
-                "f32le",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "pipe:1",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+    fn short_synthetic_decoder(
+        _url: &str,
+        _offset: f64,
+    ) -> std::io::Result<crate::media_decoder::Stream> {
+        synthetic_stream(1.0, false)
     }
     #[test]
     fn premature_successful_eof_keeps_partial_audio_without_poisoning_full_cache() {
@@ -2997,20 +2854,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_limit_protocols_and_never_include_cookies() {
-        let command =
-            ffmpeg_command("https://example.com/test.m3u8?synthetic=1", 12.5, 2, 48_000).unwrap();
-        let args: Vec<_> = command
-            .get_args()
-            .map(|v| v.to_string_lossy().into_owned())
-            .collect();
-        assert!(args.windows(2).any(|p| p == ["-ss", "12.500000000"]));
-        assert!(
-            args.windows(2)
-                .any(|p| p == ["-protocol_whitelist", "http,https,tcp,tls,crypto"])
-        );
-        assert!(args.windows(2).any(|p| p == ["-f", "f32le"]));
-        assert!(!args.iter().any(|a| a.contains("Cookie") || a == "-headers"));
+    fn playback_url_and_seek_limits_are_enforced() {
         assert!(!valid_url("file:///etc/passwd"));
         assert!(!valid_url("https://user:password@example.com/a"));
         assert!(!valid_url("https://example.com:8443/a"));

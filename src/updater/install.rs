@@ -148,7 +148,6 @@ pub fn complete_restart(stage: &Path) -> Result<(), Error> {
     if executable != job.install_dir.join("vk-fast.exe")
         || job.version != env!("CARGO_PKG_VERSION")
         || hash_file(&executable, MAX_EXECUTABLE)? != job.executable
-        || hash_file(&job.install_dir.join("bin/ffmpeg.exe"), MAX_DECODER)? != job.decoder
     {
         return Err(Error::Integrity);
     }
@@ -390,17 +389,11 @@ fn apply(
     restart: impl FnOnce(&Job) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let exe = job.install_dir.join("vk-fast.exe");
-    let decoder = job.install_dir.join("bin/ffmpeg.exe");
     plain(&job.install_dir, true)?;
-    plain(&job.install_dir.join("bin"), true)?;
-    if hash_file(&exe, MAX_EXECUTABLE)? != job.previous_exe
-        || hash_file(&decoder, MAX_DECODER)? != job.previous_decoder
-    {
+    if hash_file(&exe, MAX_EXECUTABLE)? != job.previous_exe {
         return Err(Error::Changed);
     }
-    if hash_file(&stage.join("next-vk-fast.exe"), MAX_EXECUTABLE)? != job.executable
-        || hash_file(&stage.join("next-ffmpeg.exe"), MAX_DECODER)? != job.decoder
-    {
+    if hash_file(&stage.join("next-vk-fast.exe"), MAX_EXECUTABLE)? != job.executable {
         return Err(Error::Integrity);
     }
     let mut executable = Replacement::stage(
@@ -410,28 +403,18 @@ fn apply(
         &job.previous_exe,
         &job.nonce,
     )?;
-    let mut audio = Replacement::stage(
-        &stage.join("next-ffmpeg.exe"),
-        decoder,
-        &job.decoder,
-        &job.previous_decoder,
-        &job.nonce,
-    )?;
     let result = (|| {
-        audio.replace()?;
         executable.replace()?;
         restart(job)
     })();
     if let Err(error) = result {
         let restored_exe = executable.rollback();
-        let restored_audio = audio.rollback();
-        if restored_exe.is_err() || restored_audio.is_err() {
+        if restored_exe.is_err() {
             return Err(Error::Rollback);
         }
         return Err(error);
     }
     let _ = fs::remove_file(executable.backup.clone());
-    let _ = fs::remove_file(audio.backup.clone());
     Ok(())
 }
 

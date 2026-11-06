@@ -69,14 +69,14 @@ def require_x64(path):
         raise SystemExit(f"Expected Windows x86-64: {path}")
 
 
-def build(destination, executable, decoder, version):
-    for path in [executable, decoder]:
+def build(destination, executable, version):
+    for path in [executable]:
         require_x64(path)
     command, env, encode, license_path, source = compiler()
     defines = {
         "OUTPUT_FILE": encode(destination), "APP_EXE": encode(executable),
-        "FFMPEG_EXE": encode(decoder), "APP_ICON": encode(ROOT / "assets/vk-fast-icon.ico"),
-        "APP_VERSION": version, "APP_SIZE_KB": str((executable.stat().st_size + decoder.stat().st_size) // 1024 + 256),
+        "APP_ICON": encode(ROOT / "assets/vk-fast-icon.ico"),
+        "APP_VERSION": version, "APP_SIZE_KB": str(executable.stat().st_size // 1024 + 256),
     }
     if any(any(character in value for character in ['"', '\n', '\r', '$']) for value in defines.values()):
         raise SystemExit("Unsupported character in NSIS compiler input")

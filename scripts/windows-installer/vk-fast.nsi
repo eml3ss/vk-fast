@@ -310,8 +310,6 @@ Section "VK Fast" MainSection
   SetOutPath "$INSTDIR"
   SetOverwrite on
   File /oname=vk-fast.exe "${APP_EXE}"
-  SetOutPath "$INSTDIR\bin"
-  File /oname=ffmpeg.exe "${FFMPEG_EXE}"
   SetOutPath "$INSTDIR"
   ClearErrors
   GetTempFileName $StorageTemporary "$INSTDIR"
@@ -363,7 +361,6 @@ Section "Uninstall"
   Call un.RequireClosed
   SetOutPath "$TEMP"
   Delete "$INSTDIR\vk-fast.exe"
-  Delete "$INSTDIR\bin\ffmpeg.exe"
   RMDir "$INSTDIR\bin"
   Delete "$INSTDIR\${STORAGE_FILE}"
   Delete "$INSTDIR\Uninstall.exe"

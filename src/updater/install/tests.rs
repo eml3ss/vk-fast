@@ -21,7 +21,7 @@ impl Fixture {
         }
         for (path, bytes) in [
             ("vk-fast.exe", pe("old application")),
-            ("bin/ffmpeg.exe", pe("old decoder")),
+            ("bin/user-tool.exe", pe("user tool")),
             ("config/session.json", b"synthetic private login".to_vec()),
             ("config/preferences.json", b"synthetic preferences".to_vec()),
             ("cache/audio.bin", b"synthetic audio cache".to_vec()),
@@ -34,16 +34,13 @@ impl Fixture {
             fs::write(install_dir.join(path), bytes).unwrap();
         }
         fs::write(stage.path.join("next-vk-fast.exe"), pe("new application")).unwrap();
-        fs::write(stage.path.join("next-ffmpeg.exe"), pe("new decoder")).unwrap();
         let job = Job {
-            schema: 1,
+            schema: 2,
             nonce: stage_nonce(&stage.path).unwrap(),
             version: "0.1.2".into(),
             english: false,
             previous_exe: hash_file(&install_dir.join("vk-fast.exe"), MAX_EXECUTABLE).unwrap(),
-            previous_decoder: hash_file(&install_dir.join("bin/ffmpeg.exe"), MAX_DECODER).unwrap(),
             executable: hash_file(&stage.path.join("next-vk-fast.exe"), MAX_EXECUTABLE).unwrap(),
-            decoder: hash_file(&stage.path.join("next-ffmpeg.exe"), MAX_DECODER).unwrap(),
             install_dir,
         };
         write_job(&stage.path, &job).unwrap();
@@ -61,6 +58,7 @@ impl Fixture {
             "cache/audio.bin",
             "vk-fast-storage.ini",
             "Uninstall.exe",
+            "bin/user-tool.exe",
         ]
         .iter()
         .map(|path| fs::read(self.job.install_dir.join(path)).unwrap())
@@ -70,10 +68,6 @@ impl Fixture {
         assert_eq!(
             hash_file(&self.job.install_dir.join("vk-fast.exe"), MAX_EXECUTABLE).unwrap(),
             self.job.previous_exe
-        );
-        assert_eq!(
-            hash_file(&self.job.install_dir.join("bin/ffmpeg.exe"), MAX_DECODER).unwrap(),
-            self.job.previous_decoder
         );
     }
 }
@@ -85,7 +79,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn successful_update_replaces_both_files_preserves_all_data_and_calls_restart_once() {
+fn successful_update_replaces_only_the_application_preserves_all_data_and_calls_restart_once() {
     let fixture = Fixture::new();
     let before = fixture.data();
     let mut calls = 0;
@@ -94,10 +88,6 @@ fn successful_update_replaces_both_files_preserves_all_data_and_calls_restart_on
         assert_eq!(
             hash_file(&job.install_dir.join("vk-fast.exe"), MAX_EXECUTABLE).unwrap(),
             job.executable
-        );
-        assert_eq!(
-            hash_file(&job.install_dir.join("bin/ffmpeg.exe"), MAX_DECODER).unwrap(),
-            job.decoder
         );
         Ok(())
     })
@@ -113,7 +103,7 @@ fn successful_update_replaces_both_files_preserves_all_data_and_calls_restart_on
 }
 
 #[test]
-fn failed_new_process_start_restores_both_old_executables_and_keeps_data() {
+fn failed_new_process_start_restores_the_old_executable_and_keeps_data() {
     let fixture = Fixture::new();
     let before = fixture.data();
     assert_eq!(
@@ -153,7 +143,7 @@ fn changed_installation_or_tampered_staging_never_replaces_the_current_version()
 }
 
 #[test]
-fn failed_second_replacement_rolls_back_an_already_replaced_decoder() {
+fn failed_atomic_replacement_keeps_the_previous_executable_available() {
     let fixture = Fixture::new();
     let before = fixture.data();
     let mut executable = Replacement::stage(
@@ -164,19 +154,9 @@ fn failed_second_replacement_rolls_back_an_already_replaced_decoder() {
         &fixture.job.nonce,
     )
     .unwrap();
-    let mut audio = Replacement::stage(
-        &fixture.stage.path.join("next-ffmpeg.exe"),
-        fixture.job.install_dir.join("bin/ffmpeg.exe"),
-        &fixture.job.decoder,
-        &fixture.job.previous_decoder,
-        &fixture.job.nonce,
-    )
-    .unwrap();
-    audio.replace().unwrap();
     fs::remove_file(&executable.pending).unwrap();
     assert!(executable.replace().is_err());
     executable.rollback().unwrap();
-    audio.rollback().unwrap();
     fixture.assert_old();
     assert_eq!(fixture.data(), before);
 }
@@ -209,7 +189,7 @@ fn bounded_job_and_markers_reject_wrong_schema_nonce_and_unknown_commands() {
     let path = fixture.stage.path.join("job.json");
     let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     for (field, value) in [
-        ("schema", serde_json::json!(2)),
+        ("schema", serde_json::json!(3)),
         ("nonce", serde_json::json!("wrong")),
         ("command", serde_json::json!("not allowed")),
         ("executable", serde_json::json!("bad hash")),
@@ -232,7 +212,7 @@ fn bounded_job_and_markers_reject_wrong_schema_nonce_and_unknown_commands() {
 fn linked_program_files_or_staging_are_never_followed() {
     use std::os::unix::fs::symlink;
     let fixture = Fixture::new();
-    let target = fixture.job.install_dir.join("bin/ffmpeg.exe");
+    let target = fixture.job.install_dir.join("vk-fast.exe");
     let outside = fixture.stage.path.join("outside.exe");
     fs::rename(&target, &outside).unwrap();
     symlink(&outside, &target).unwrap();
@@ -243,8 +223,8 @@ fn linked_program_files_or_staging_are_never_followed() {
         .is_err()
     );
     assert_eq!(
-        hash_file(&outside, MAX_DECODER).unwrap(),
-        fixture.job.previous_decoder
+        hash_file(&outside, MAX_EXECUTABLE).unwrap(),
+        fixture.job.previous_exe
     );
     assert!(target.is_symlink());
 }
@@ -307,10 +287,6 @@ fn native_helper_process_waits_replaces_restarts_and_preserves_unicode_install_d
     assert_eq!(
         hash_file(&fixture.job.install_dir.join("vk-fast.exe"), MAX_EXECUTABLE).unwrap(),
         fixture.job.executable
-    );
-    assert_eq!(
-        hash_file(&fixture.job.install_dir.join("bin/ffmpeg.exe"), MAX_DECODER).unwrap(),
-        fixture.job.decoder
     );
     assert_eq!(fixture.data(), before);
 }

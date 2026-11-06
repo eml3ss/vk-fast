@@ -200,20 +200,17 @@ fn archive(path: &Path, entries: &[(&str, &[u8])]) {
 fn extraction_accepts_only_x64_program_files_and_ignores_empty_data_directories() {
     let stage = StagedUpdate::new().unwrap();
     let exe = pe("app");
-    let decoder = pe("decoder");
     let path = stage.path.join("test.zip");
     archive(
         &path,
         &[
             ("VK-Fast-0.1.2-windows-x86_64/vk-fast.exe", &exe),
-            ("VK-Fast-0.1.2-windows-x86_64/bin/ffmpeg.exe", &decoder),
             ("VK-Fast-0.1.2-windows-x86_64/config/", b""),
             ("VK-Fast-0.1.2-windows-x86_64/cache/", b""),
         ],
     );
-    let (first, second) = extract_package(&path, &stage.path, &Version::new(0, 1, 2)).unwrap();
+    let first = extract_package(&path, &stage.path, &Version::new(0, 1, 2)).unwrap();
     assert_eq!(first, hex_hash(&Sha256::digest(&exe)));
-    assert_eq!(second, hex_hash(&Sha256::digest(&decoder)));
     assert!(!stage.path.join("config").exists() && !stage.path.join("cache").exists());
 }
 
@@ -230,13 +227,7 @@ fn archive_cannot_write_traversal_data_payloads_other_versions_or_non_pe_binarie
     ] {
         let stage = StagedUpdate::new().unwrap();
         let path = stage.path.join("test.zip");
-        archive(
-            &path,
-            &[
-                (bad, &exe),
-                ("VK-Fast-0.1.2-windows-x86_64/bin/ffmpeg.exe", &exe),
-            ],
-        );
+        archive(&path, &[(bad, &exe)]);
         assert!(
             extract_package(&path, &stage.path, &Version::new(0, 1, 2)).is_err(),
             "{bad}"
@@ -246,13 +237,10 @@ fn archive_cannot_write_traversal_data_payloads_other_versions_or_non_pe_binarie
     let path = stage.path.join("test.zip");
     archive(
         &path,
-        &[
-            (
-                "VK-Fast-0.1.2-windows-x86_64/vk-fast.exe",
-                b"not a PE executable",
-            ),
-            ("VK-Fast-0.1.2-windows-x86_64/bin/ffmpeg.exe", &exe),
-        ],
+        &[(
+            "VK-Fast-0.1.2-windows-x86_64/vk-fast.exe",
+            b"not a PE executable",
+        )],
     );
     assert_eq!(
         extract_package(&path, &stage.path, &Version::new(0, 1, 2)),
@@ -271,12 +259,6 @@ fn archive_symlink_and_other_architectures_are_rejected() {
         SimpleFileOptions::default(),
     )
     .unwrap();
-    zip.start_file(
-        "VK-Fast-0.1.2-windows-x86_64/bin/ffmpeg.exe",
-        SimpleFileOptions::default(),
-    )
-    .unwrap();
-    zip.write_all(&pe("decoder")).unwrap();
     zip.finish().unwrap();
     assert_eq!(
         extract_package(&path, &stage.path, &Version::new(0, 1, 2)),
