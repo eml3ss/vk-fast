@@ -30,9 +30,13 @@ def atomic_archive(destination):
 def package(output, with_installer=False):
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
     name = f'VK-Fast-{version}-windows-x86_64'
-    executable = ROOT / 'target/x86_64-pc-windows-msvc/release/vk-fast.exe'
+    target = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT / 'target')))
+    if not target.is_absolute():
+        target = ROOT / target
+    executable = target / 'x86_64-pc-windows-msvc/release/vk-fast.exe'
     if not executable.is_file():
         raise SystemExit(f'Build output missing: {executable}')
+    windows_installer.require_x64(executable)
     output.mkdir(parents=True, exist_ok=True)
     destination = output / (name + '.zip')
     installer_destination = output / (name + '-setup.exe')
@@ -41,9 +45,7 @@ def package(output, with_installer=False):
         if with_installer:
             windows_installer.build(installer, executable, version)
         with atomic_archive(destination) as archive:
-            archive.write(executable, name + '/vk-fast.exe')
-            for folder in ['config', 'cache']:
-                archive.writestr(name + '/' + folder + '/', '')
+            archive.write(executable, 'vk-fast.exe')
         if with_installer:
             handle, temporary_name = tempfile.mkstemp(prefix='.vk-fast-setup-', suffix='.tmp', dir=output)
             published = Path(temporary_name)

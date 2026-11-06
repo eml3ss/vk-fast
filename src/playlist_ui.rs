@@ -127,6 +127,7 @@ pub fn show_sidebar(
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(4.0);
             icons::show(ui, Icon::Library, theme::MUTED, 16.0);
+            ui.add_space(3.0);
             ui.add(
                 egui::Label::new(
                     RichText::new(language.text("Библиотека", "Library"))
@@ -180,7 +181,7 @@ pub fn show_sidebar(
     ui.add_space(4.0);
     if search.open {
         egui::Frame::new()
-            .fill(theme::SURFACE)
+            .fill(Color32::from_rgb(37, 42, 50))
             .corner_radius(8)
             .inner_margin(8)
             .show(ui, |ui| {
@@ -325,6 +326,13 @@ const ROW_STRIDE: f32 = 52.0;
 const REORDER_SECONDS: f32 = 0.16;
 type PlaylistKey = (i64, i64);
 
+fn drag_top(pointer_y: f32, grab_y: f32, viewport: egui::Rect) -> f32 {
+    (pointer_y - grab_y).clamp(
+        viewport.top(),
+        (viewport.bottom() - ROW_HEIGHT).max(viewport.top()),
+    )
+}
+
 #[derive(Clone, Default)]
 struct DragMemory {
     active: Option<PlaylistDrag>,
@@ -450,12 +458,14 @@ fn playlist_rows(
         {
             drag.from = from;
             if let Some(pointer) = pointer {
-                update_drag_target(drag, view.items, pointer.y, origin_y);
+                let top = drag_top(pointer.y, drag.grab_y, clip);
+                let target_y = top + drag.grab_y;
+                update_drag_target(drag, view.items, target_y, origin_y);
                 // Keep the source animation at the pointer while dragging so
                 // release smoothly settles it into its final slot.
                 ctx.animate_value_with_time(
                     view.drag_id.with(("row-y", drag.key)),
-                    pointer.y - drag.grab_y - origin_y,
+                    top - origin_y,
                     0.0,
                 );
             }
@@ -514,7 +524,9 @@ fn playlist_rows(
                 grab_y,
             };
             if let Some(pointer) = pointer {
-                update_drag_target(&mut drag, view.items, pointer.y, origin_y);
+                let top = drag_top(pointer.y, drag.grab_y, clip);
+                let target_y = top + drag.grab_y;
+                update_drag_target(&mut drag, view.items, target_y, origin_y);
             }
             memory.active = Some(drag);
             memory.suppress_release = true;
@@ -582,7 +594,7 @@ fn playlist_rows(
         );
         ui.painter().rect_filled(marker, 1.0, theme::ACCENT);
         let ghost = egui::Rect::from_min_size(
-            egui::pos2(left, pointer.y - drag.grab_y),
+            egui::pos2(left, drag_top(pointer.y, drag.grab_y, clip)),
             egui::vec2(width, ROW_HEIGHT),
         );
         ctx.animate_value_with_time(
@@ -609,7 +621,7 @@ fn playlist_rows(
         );
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let edge = 32.0_f32.min(clip.height() * 0.25);
-        if edge > 0.0 && clip.x_range().contains(pointer.x) {
+        if edge > 0.0 && clip.expand2(egui::vec2(0.0, edge)).contains(pointer) {
             let speed = if pointer.y < clip.top() + edge {
                 ((clip.top() + edge - pointer.y) / edge).clamp(0.0, 1.0) * 360.0
             } else if pointer.y > clip.bottom() - edge {
@@ -1100,7 +1112,7 @@ mod tests {
             let (opened, _) = h.click(search_button);
             assert!(h.search.open && text_rect(&opened, caption).is_some());
             assert!(opened.shapes.iter().any(|shape| matches!(&shape.shape,
-                egui::Shape::Rect(rect) if rect.fill == theme::SURFACE && rect.rect.width() > 200.0 && (rect.rect.height() - 38.0).abs() < 0.5)));
+                egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(37, 42, 50) && rect.rect.width() > 200.0 && (rect.rect.height() - 38.0).abs() < 0.5)));
             let (filtered, _) = h.draw(vec![egui::Event::Text("Subscribed".into())]);
             assert_eq!(h.search.query, "Subscribed");
             assert!(text_rect(&filtered, "Saved release").is_none());
@@ -1459,6 +1471,46 @@ mod tests {
         assert!(matches!(h.frame(primary(edge, false)).1,
             Some(Action::Reorder { playlist, before: Some(before) }) if playlist.id == 1 && before.id > 10
         ));
+    }
+
+    #[test]
+    fn dragged_card_stays_inside_the_library_when_the_pointer_leaves_the_viewport() {
+        let mut h = MenuHarness::new(Language::English);
+        h.items = (1..=40).map(item).collect();
+        let initial = warm_drag_list(&mut h);
+        let from = text_rect(&initial, "Playlist 1").unwrap().center();
+        h.frame(primary(from, true));
+        for pointer in [
+            egui::pos2(from.x, -400.0),
+            egui::pos2(from.x, 1000.0),
+            egui::pos2(700.0, 300.0),
+        ] {
+            let (output, action) = h.frame(vec![egui::Event::PointerMoved(pointer)]);
+            assert!(action.is_none());
+            let card = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == Color32::from_rgb(31, 38, 49)
+                            && (rect.rect.height() - ROW_HEIGHT).abs() < 0.1 =>
+                    {
+                        Some((rect.rect, shape.clip_rect))
+                    }
+                    _ => None,
+                })
+                .expect("Visible drag card");
+            assert!(
+                card.1.expand(0.2).contains_rect(card.0),
+                "Drag escaped its viewport: {card:?}"
+            );
+            assert!(text_rect(&output, "Playlist 1").is_some());
+        }
+        assert!(
+            h.frame(primary(egui::pos2(700.0, 300.0), false))
+                .1
+                .is_none()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 Декодирование и обработка звука выполняются на Rust: **Symphonia**, **Rubato** и **ebur128**. [Устройство аудиотракта](docs/native-audio.md).
 
-Готовые выпуски: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). Текущая ветка разработки может отличаться от опубликованного выпуска.
+Готовые выпуски: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). [Список изменений](CHANGELOG.md). Текущая ветка разработки может отличаться от опубликованного выпуска.
 
 ## Возможности
 

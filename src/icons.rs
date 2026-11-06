@@ -655,11 +655,30 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(12.5, 16.5), (21.5, 16.5)]);
         }
         Icon::PlaylistAdd => {
-            line(&[(3.0, 6.0), (16.0, 6.0)]);
-            line(&[(3.0, 11.0), (13.0, 11.0)]);
-            line(&[(3.0, 16.0), (9.0, 16.0)]);
-            line(&[(17.0, 13.0), (17.0, 21.0)]);
-            line(&[(13.0, 17.0), (21.0, 17.0)]);
+            let pixels = painter.ctx().pixels_per_point();
+            let width = (stroke.width * pixels).round().max(1.0);
+            let top = (point(4.0, 4.0).y * pixels).round();
+            let bottom = (point(4.0, 20.0).y * pixels).round();
+            for x in [4.0, 8.0] {
+                let left = (point(x, 4.0).x * pixels - width * 0.5).round();
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(left, top) / pixels,
+                        egui::vec2(width, bottom - top) / pixels,
+                    ),
+                    width * 0.5 / pixels,
+                    color,
+                );
+            }
+            line(&[
+                (12.0, 5.0),
+                (15.5, 4.0),
+                (18.0, 13.5),
+                (14.5, 14.5),
+                (12.0, 5.0),
+            ]);
+            line(&[(18.0, 16.0), (18.0, 22.0)]);
+            line(&[(15.0, 19.0), (21.0, 19.0)]);
         }
         Icon::Radio => {
             painter.circle_filled(point(12.0, 12.0), 2.3 * scale, color);

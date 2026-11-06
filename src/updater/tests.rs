@@ -215,6 +215,41 @@ fn extraction_accepts_only_x64_program_files_and_ignores_empty_data_directories(
 }
 
 #[test]
+fn extraction_accepts_a_bare_executable_but_rejects_extra_entries_and_mixed_layouts() {
+    let stage = StagedUpdate::new().unwrap();
+    let exe = pe("single portable app");
+    let path = stage.path.join("single.zip");
+    archive(&path, &[("vk-fast.exe", &exe)]);
+    assert_eq!(
+        extract_package(&path, &stage.path, &Version::new(0, 2, 0)).unwrap(),
+        hex_hash(&Sha256::digest(&exe))
+    );
+    assert!(!stage.path.join("config").exists() && !stage.path.join("cache").exists());
+    for extra in [
+        "config/",
+        "cache/",
+        "config/session.json",
+        "unrelated.dll",
+        "VK-Fast-0.2.0-windows-x86_64/vk-fast.exe",
+    ] {
+        let stage = StagedUpdate::new().unwrap();
+        let path = stage.path.join("mixed.zip");
+        archive(
+            &path,
+            &[
+                ("vk-fast.exe", &exe),
+                (extra, if extra.ends_with('/') { b"" } else { &exe }),
+            ],
+        );
+        assert_eq!(
+            extract_package(&path, &stage.path, &Version::new(0, 2, 0)),
+            Err(Error::InvalidPackage),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
 fn archive_cannot_write_traversal_data_payloads_other_versions_or_non_pe_binaries() {
     let exe = pe("app");
     for bad in [

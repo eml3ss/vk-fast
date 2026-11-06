@@ -349,7 +349,8 @@ fn receive_archive(
 fn extract_package(archive: &Path, stage: &Path, version: &Version) -> Result<String, Error> {
     let mut archive =
         zip::ZipArchive::new(File::open(archive)?).map_err(|_| Error::InvalidPackage)?;
-    if !(1..=4).contains(&archive.len()) {
+    let entries = archive.len();
+    if !(1..=4).contains(&entries) {
         return Err(Error::InvalidPackage);
     }
     let prefix = format!("VK-Fast-{version}-windows-x86_64/");
@@ -369,8 +370,13 @@ fn extract_package(archive: &Path, stage: &Path, version: &Version) -> Result<St
         {
             return Err(Error::InvalidPackage);
         }
-        let Some(relative) = name.strip_prefix(&prefix) else {
-            return Err(Error::InvalidPackage);
+        let relative = if name == "vk-fast.exe" {
+            if entries != 1 {
+                return Err(Error::InvalidPackage);
+            }
+            name.as_str()
+        } else {
+            name.strip_prefix(&prefix).ok_or(Error::InvalidPackage)?
         };
         if matches!(relative, "" | "config/" | "cache/") {
             if !entry.is_dir() || entry.size() != 0 {
@@ -379,7 +385,7 @@ fn extract_package(archive: &Path, stage: &Path, version: &Version) -> Result<St
             continue;
         }
         let (destination, limit) = match relative {
-            "vk-fast.exe" => ("next-vk-fast.exe", MAX_EXECUTABLE),
+            "vk-fast.exe" if exe.is_none() => ("next-vk-fast.exe", MAX_EXECUTABLE),
             _ => return Err(Error::InvalidPackage),
         };
         let expected = entry.size();
