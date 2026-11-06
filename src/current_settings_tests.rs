@@ -291,3 +291,180 @@ fn a_full_library_scroll_view_reaches_the_player_separator_without_a_fixed_botto
         "List ends at {viewport_bottom}, player begins at {separator}"
     );
 }
+
+#[test]
+fn settings_navigation_uses_main_tab_colors_icons_and_retains_36_point_rows() {
+    for language in [Language::Russian, Language::English] {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, language);
+        app.settings_open = true;
+        let size = egui::vec2(1120.0, 850.0);
+        let mut tick = 0;
+        for section in [
+            SettingsSection::General,
+            SettingsSection::Interface,
+            SettingsSection::Playback,
+            SettingsSection::Cache,
+            SettingsSection::About,
+        ] {
+            app.settings_section = section;
+            let output = warm(&ctx, &mut app, size, &mut tick);
+            let selected: Vec<_> = account_ui_shapes(&output)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == theme::SELECTED
+                            && rect.rect.right() < 252.0
+                            && (rect.rect.width() - 216.0).abs() < 0.1 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(selected.len(), 1);
+            assert!((selected[0].height() - 36.0).abs() < 0.1);
+            assert!((selected[0].width() - 216.0).abs() < 0.1);
+            let caption = account_ui_shapes(&output)
+                .into_iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text() == section.title(language)
+                            && text.visual_bounding_rect().left() < 252.0 =>
+                    {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(caption.left() > selected[0].left() + 40.0);
+        }
+    }
+}
+
+#[test]
+fn track_list_empty_notices_follow_vk_counts_and_align_with_heading_but_not_footer() {
+    for language in [Language::Russian, Language::English] {
+        for playlist in [true, false] {
+            for count in [Some(0), Some(7), None] {
+                let ctx = egui::Context::default();
+                let mut app = account_ui_app(&ctx, language);
+                let reference = AlbumRef {
+                    id: 71,
+                    owner_id: 42,
+                    title: "Empty state fixture".into(),
+                    access_key: None,
+                    cover_url: None,
+                };
+                let page = if playlist {
+                    MusicPage::Playlist(reference.clone())
+                } else {
+                    MusicPage::Album(reference.clone())
+                };
+                let data = crate::web_audio::AlbumPage {
+                    album: reference,
+                    artists: Vec::new(),
+                    year: None,
+                    description: None,
+                    creator: None,
+                    tracks: Vec::new(),
+                    total_tracks: count,
+                    stats: crate::web_audio::AlbumStats::default(),
+                };
+                app.details.insert(
+                    page.detail_key().unwrap(),
+                    Arc::new(if playlist {
+                        DetailPage::Playlist(data)
+                    } else {
+                        DetailPage::Album(data)
+                    }),
+                );
+                app.page = page;
+                let size = egui::vec2(1120.0, 850.0);
+                let mut tick = 0;
+                let output = warm(&ctx, &mut app, size, &mut tick);
+                let notice = match (playlist, count == Some(0)) {
+                    (true, true) => language.text(
+                        "В этом плейлисте пока нет треков.",
+                        "This playlist is empty.",
+                    ),
+                    (false, true) => {
+                        language.text("В этом альбоме пока нет треков.", "This album is empty.")
+                    }
+                    (true, false) => language.text(
+                        "VK не вернул треки плейлиста.",
+                        "VK did not return the playlist tracks.",
+                    ),
+                    (false, false) => language.text(
+                        "VK не вернул треки альбома.",
+                        "VK did not return the album tracks.",
+                    ),
+                };
+                let heading = content_text(&output, language.text("Треки", "Tracks"));
+                let label = content_text(&output, notice);
+                assert!(
+                    (heading.left() - label.left()).abs() < 1.5,
+                    "{heading:?} {label:?}"
+                );
+                let footer = content_text(&output, language.text("0 треков", "0 tracks"));
+                assert!((heading.left() - footer.left() - 8.0).abs() < 1.5);
+                assert!(
+                    account_ui_text_rect(&output, language.text("Обновить", "Refresh")).is_none()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn track_hover_shows_only_the_clipped_title_and_no_hint_for_a_fitting_title() {
+    for long in [false, true] {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        let mut track = page(1, &[1]).items.remove(0);
+        track.title = if long {
+            "A very long track title that cannot fit into this narrow music list ".repeat(4)
+        } else {
+            "Short track".into()
+        };
+        track.artist = "Artist".into();
+        app.library.tracks = vec![track.clone()];
+        let size = egui::vec2(800.0, 600.0);
+        let mut tick = 0;
+        let output = warm(&ctx, &mut app, size, &mut tick);
+        let title = account_ui_shapes(&output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == track.display_title() => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .expect("track title");
+        let point = egui::pos2(title.left() + 12.0, title.center().y);
+        let mut output = output;
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut tick,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        for _ in 0..12 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
+        }
+        let labels: Vec<_> = account_ui_shapes(&output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(!labels.contains(&format!("{} — {}", track.artist, track.display_title())));
+        let titles = labels
+            .iter()
+            .filter(|label| label.as_str() == track.display_title())
+            .count();
+        assert_eq!(titles, if long { 2 } else { 1 }, "{labels:?}");
+    }
+}

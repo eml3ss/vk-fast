@@ -633,6 +633,15 @@ enum SettingsSection {
 }
 
 impl SettingsSection {
+    fn icon(self) -> Icon {
+        match self {
+            Self::General => Icon::Settings,
+            Self::Interface => Icon::Interface,
+            Self::Playback => Icon::Play,
+            Self::Cache => Icon::Storage,
+            Self::About => Icon::Info,
+        }
+    }
     fn title(self, language: Language) -> &'static str {
         match self {
             Self::General => language.text("Общие", "General"),
@@ -3888,10 +3897,12 @@ impl MusicApp {
                     );
                 } else {
                     if let Some(error) = &self.search.results_error {
-                        ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
-                            error.localized(language),
-                        );
+                        theme::inset_heading(ui, |ui| {
+                            ui.colored_label(
+                                Color32::from_rgb(255, 158, 153),
+                                error.localized(language),
+                            )
+                        });
                     }
                     if let Some(results) = &results {
                         ui.spacing_mut().item_spacing.y = 4.0;
@@ -3928,9 +3939,11 @@ impl MusicApp {
                         (action, track_action) = self.render_search_categories(ui, results);
                     }
                     if self.search.results_request.is_some() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(language.text("Ищем музыку…", "Searching music…"));
+                        theme::inset_heading(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(language.text("Ищем музыку…", "Searching music…"));
+                                ui.spinner();
+                            })
                         });
                     }
                 }
@@ -4095,12 +4108,16 @@ impl MusicApp {
                     && results.albums.is_empty()
                     && results.playlists.is_empty()
                 {
-                    ui.label(language.text("Ничего не найдено.", "No results found."));
+                    theme::inset_heading(ui, |ui| {
+                        ui.label(language.text("Ничего не найдено.", "No results found."))
+                    });
                 }
             }
             SearchCategory::Tracks => {
                 if results.tracks.is_empty() {
-                    ui.label(language.text("Ничего не найдено.", "No results found."));
+                    theme::inset_heading(ui, |ui| {
+                        ui.label(language.text("Ничего не найдено.", "No results found."))
+                    });
                 } else {
                     track_action = self.search_track_rows(ui, &results.tracks);
                 }
@@ -4125,7 +4142,9 @@ impl MusicApp {
                     false,
                 );
                 if artists.is_empty() && albums.is_empty() {
-                    ui.label(language.text("Ничего не найдено.", "No results found."));
+                    theme::inset_heading(ui, |ui| {
+                        ui.label(language.text("Ничего не найдено.", "No results found."))
+                    });
                 }
             }
             SearchCategory::Playlists => {
@@ -4138,7 +4157,9 @@ impl MusicApp {
                     None,
                 );
                 if results.playlists.is_empty() {
-                    ui.label(language.text("Ничего не найдено.", "No results found."));
+                    theme::inset_heading(ui, |ui| {
+                        ui.label(language.text("Ничего не найдено.", "No results found."))
+                    });
                 }
             }
         }
@@ -5387,11 +5408,12 @@ impl MusicApp {
                     .color(MUTED),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(
+                if icons::compact_button(
                     ui,
                     Icon::Refresh,
                     language.text("Обновить", "Refresh"),
                     self.detail_request.is_none(),
+                    false,
                 )
                 .clicked()
                 {
@@ -5405,7 +5427,9 @@ impl MusicApp {
         ui.add_space(12.0);
         let loading = self.detail_request.is_some();
         if let Some(error) = &self.detail_error {
-            ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language));
+            theme::inset_heading(ui, |ui| {
+                ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language))
+            });
         }
         if let MusicPage::Owner(creator) = &page {
             self.owner_content(ui, creator);
@@ -5552,15 +5576,36 @@ impl MusicApp {
                 });
                 ui.add_space(8.0);
                 if loading && tracks.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(language.text("Загружаем…", "Loading…"));
+                    theme::inset_heading(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(language.text("Загружаем…", "Loading…"));
+                            ui.spinner();
+                        })
                     });
                 } else if tracks.is_empty() && self.detail_error.is_none() {
-                    ui.label(language.text(
-                        "VK пока не вернул доступных треков.",
-                        "VK has not returned any available tracks yet.",
-                    ));
+                    let empty = matches!(data,Some(DetailPage::Album(album)|DetailPage::Playlist(album)) if album.confirmed_empty());
+                    let text = match (&page, empty) {
+                        (MusicPage::Playlist(_), true) => language.text(
+                            "В этом плейлисте пока нет треков.",
+                            "This playlist is empty.",
+                        ),
+                        (MusicPage::Album(_) | MusicPage::TrackAlbum(..), true) => {
+                            language.text("В этом альбоме пока нет треков.", "This album is empty.")
+                        }
+                        (MusicPage::Artist(_), _) => language.text(
+                            "VK не вернул популярные треки.",
+                            "VK did not return popular tracks.",
+                        ),
+                        (MusicPage::Playlist(_), _) => language.text(
+                            "VK не вернул треки плейлиста.",
+                            "VK did not return the playlist tracks.",
+                        ),
+                        _ => language.text(
+                            "VK не вернул треки альбома.",
+                            "VK did not return the album tracks.",
+                        ),
+                    };
+                    theme::inset_heading(ui, |ui| ui.label(text));
                 }
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let expanded_id = ui.make_persistent_id(("artist-all-tracks", page.detail_key()));
@@ -5845,8 +5890,18 @@ impl MusicApp {
     }
 
     fn nav_item(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool) -> egui::Response {
+        Self::navigation_button(ui, icon, label, selected, 42.0)
+    }
+
+    fn navigation_button(
+        ui: &mut egui::Ui,
+        icon: Icon,
+        label: &str,
+        selected: bool,
+        height: f32,
+    ) -> egui::Response {
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), Sense::click());
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
         if selected || response.hovered() {
             ui.painter().rect_filled(
                 rect,
@@ -6124,7 +6179,12 @@ impl MusicApp {
         if let Some(error) = self.audio_error.as_ref().filter(|_| is_library) {
             Frame::new()
                 .fill(Color32::from_rgb(58, 40, 41))
-                .inner_margin(12)
+                .inner_margin(egui::Margin {
+                    left: 8,
+                    right: 12,
+                    top: 12,
+                    bottom: 12,
+                })
                 .corner_radius(8)
                 .show(ui, |ui| {
                     ui.label(
@@ -6144,26 +6204,32 @@ impl MusicApp {
             ui.add_space(6.0);
         }
         if !is_library && let Some(error) = &self.home_error {
-            ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language));
+            theme::inset_heading(ui, |ui| {
+                ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language))
+            });
         }
         if self.view_tracks().is_empty() && !is_library {
             ui.add_space(28.0);
             if self.home_request.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(t("Загружаем треки…", "Loading tracks…"));
+                theme::inset_heading(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(t("Загружаем треки…", "Loading tracks…"));
+                        ui.spinner();
+                    })
                 });
-            } else {
-                ui.label(if self.page == MusicPage::Recent {
-                    t(
-                        "Здесь появятся треки, которые вы слушаете в VK Fast.",
-                        "Tracks you listen to in VK Fast will appear here.",
-                    )
-                } else {
-                    t(
-                        "В этой подборке пока нет доступных треков.",
-                        "No tracks are available in this playlist yet.",
-                    )
+            } else if self.home_error.is_none() {
+                theme::inset_heading(ui, |ui| {
+                    ui.label(if self.page == MusicPage::Recent {
+                        t(
+                            "Здесь появятся треки, которые вы слушаете в VK Fast.",
+                            "Tracks you listen to in VK Fast will appear here.",
+                        )
+                    } else {
+                        t(
+                            "VK не вернул треки подборки.",
+                            "VK did not return the collection tracks.",
+                        )
+                    })
                 });
             }
             return;
@@ -6171,45 +6237,45 @@ impl MusicApp {
         if self.view_tracks().is_empty() {
             ctx.data_mut(|data| data.remove::<(i64, usize, usize)>(pagination_id));
             if self.pending.is_some() && self.session.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(t("Загружаем аудиозаписи…", "Loading tracks…"));
+                theme::inset_heading(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(t("Загружаем аудиозаписи…", "Loading tracks…"));
+                        ui.spinner();
+                    })
                 });
-            } else if self.audio_error.is_none() {
-                let hero_height = if self.session.is_some() { 70.0 } else { 180.0 };
-                let top_gap = ((ui.available_height() - hero_height) * 0.25).clamp(0.0, 60.0);
-                ui.add_space(top_gap);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new(if self.session.is_some() {
-                            t("Здесь пока нет треков", "No tracks yet")
-                        } else {
-                            t("Музыка рядом", "Your music, closer")
-                        })
-                        .size(24.0),
-                    );
-                    ui.label(if self.session.is_some() {
+            } else if self.audio_error.is_none() && self.session.is_some() {
+                theme::inset_heading(ui, |ui| {
+                    ui.label(if self.library.total == Some(0) {
                         t(
-                            "VK вернул пустую библиотеку.",
-                            "VK returned an empty library.",
+                            "В вашей музыке пока нет треков.",
+                            "Your music library is empty.",
                         )
                     } else {
                         t(
-                            "Войдите в VK, чтобы слушать свою музыку.",
-                            "Sign in with VK to listen to your music.",
+                            "VK не вернул треки библиотеки.",
+                            "VK did not return the library tracks.",
                         )
-                    });
-                    if self.session.is_none() {
-                        ui.add_space(18.0);
-                        let width = ui.available_width().min(300.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(width, 0.0),
-                            Layout::top_down(Align::Center),
-                            |ui| {
-                                ui.push_id("empty-library-login", |ui| self.login_controls(ui));
-                            },
-                        );
-                    }
+                    })
+                });
+            } else if self.audio_error.is_none() {
+                let hero_height = 180.0;
+                let top_gap = ((ui.available_height() - hero_height) * 0.25).clamp(0.0, 60.0);
+                ui.add_space(top_gap);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(t("Музыка рядом", "Your music, closer")).size(24.0));
+                    ui.label(t(
+                        "Войдите в VK, чтобы слушать свою музыку.",
+                        "Sign in with VK to listen to your music.",
+                    ));
+                    ui.add_space(18.0);
+                    let width = ui.available_width().min(300.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, 0.0),
+                        Layout::top_down(Align::Center),
+                        |ui| {
+                            ui.push_id("empty-library-login", |ui| self.login_controls(ui));
+                        },
+                    );
                 });
             }
             return;
@@ -6219,10 +6285,12 @@ impl MusicApp {
             .track_view_cache
             .visible(self.view_tracks(), &self.filter);
         if visible.is_empty() {
-            ui.label(t(
-                "Среди загруженных треков ничего не найдено.",
-                "No matching tracks in the loaded library.",
-            ));
+            theme::inset_heading(ui, |ui| {
+                ui.label(t(
+                    "Среди загруженных треков ничего не найдено.",
+                    "No matching tracks in the loaded library.",
+                ))
+            });
         }
         let row_height = 54.0;
         let active = matches!(
@@ -6680,7 +6748,6 @@ impl MusicApp {
         {
             action = Some(TrackAction::Play(track.key()));
         }
-        response.on_hover_text(format!("{} — {}", track.artist, track.display_title()));
         action
     }
 
@@ -7359,12 +7426,14 @@ impl MusicApp {
 
     fn settings_sidebar(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
-        if ui
-            .add_sized(
-                [ui.available_width(), 36.0],
-                egui::Button::new(language.text("К музыке", "Back to music")),
-            )
-            .clicked()
+        if Self::navigation_button(
+            ui,
+            Icon::ArrowLeft,
+            language.text("К музыке", "Back to music"),
+            false,
+            36.0,
+        )
+        .clicked()
         {
             self.go_back(ui.ctx());
         }
@@ -7383,15 +7452,14 @@ impl MusicApp {
             SettingsSection::About,
         ] {
             ui.push_id(section as u8, |ui| {
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 36.0],
-                        egui::Button::new(section.title(language)).selected(
-                            self.settings_query.trim().is_empty()
-                                && self.settings_section == section,
-                        ),
-                    )
-                    .clicked()
+                if Self::navigation_button(
+                    ui,
+                    section.icon(),
+                    section.title(language),
+                    self.settings_query.trim().is_empty() && self.settings_section == section,
+                    36.0,
+                )
+                .clicked()
                 {
                     self.settings_section = section;
                     self.settings_query.clear();
@@ -13066,6 +13134,7 @@ mod tests {
                         track
                     })
                     .collect(),
+                total_tracks: None,
                 stats: crate::web_audio::AlbumStats {
                     plays: Some(861),
                     created_at: Some(1785426660),
@@ -13327,6 +13396,7 @@ mod tests {
                 description: None,
                 creator: None,
                 tracks: tracks.clone(),
+                total_tracks: None,
                 stats: crate::web_audio::AlbumStats {
                     plays: Some(861),
                     created_at: Some(1785426660),
@@ -13815,6 +13885,7 @@ mod tests {
                 description: None,
                 creator: None,
                 tracks: Vec::new(),
+                total_tracks: None,
                 stats: crate::web_audio::AlbumStats::default(),
             };
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -13986,6 +14057,7 @@ mod tests {
                 year: Some(2026),
                 description: None,
                 creator: None,
+                total_tracks: None,
                 stats: Default::default(),
                 tracks,
             })),

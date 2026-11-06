@@ -85,6 +85,7 @@ fn detail(reference: AlbumRef, album: bool) -> Arc<DetailPage> {
         description: Some("Old description".into()),
         creator: None,
         tracks: page(1, &[99]).items,
+        total_tracks: None,
         stats: AlbumStats::default(),
     };
     Arc::new(if album {
@@ -480,6 +481,7 @@ fn saved_playlist_refreshes_the_active_album_alias_and_cancels_reads_started_bef
                 description: Some("Old".into()),
                 creator: None,
                 tracks: Vec::new(),
+                total_tracks: None,
                 stats: AlbumStats::default(),
             })))
             .is_err()

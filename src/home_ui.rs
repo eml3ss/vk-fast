@@ -1,6 +1,7 @@
 //! The home page renders data supplied by the application and returns intents.
 //! It never invents VK collections or starts authentication or playback itself.
 use eframe::egui::{self, Align, Color32, Layout, Response, RichText, Sense, Stroke};
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     cover_art::CoverCache,
@@ -95,14 +96,12 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                 action = Some(Action::PlayRecent);
             }
             ui.add_space(10.0);
-            // Recent listens use two rows of compact cards. Unlike the
-            // collection grid, they can gain more columns in a wide window.
-            let columns = ((ui.available_width() + 16.0) / 216.0).floor().max(1.0) as usize;
+            let columns = ((ui.available_width() + 16.0) / 216.0)
+                .floor()
+                .clamp(1.0, 5.0) as usize;
             let width = cell_width(ui.available_width(), columns);
-            for (row, tracks) in view.recent[..view.recent.len().min(columns.saturating_mul(2))]
-                .chunks(columns)
-                .enumerate()
-            {
+            let recent = recent_preview(view.recent, columns * 2);
+            for (row, tracks) in recent.chunks(columns).enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
                     for (column, track) in tracks.iter().enumerate() {
@@ -635,12 +634,44 @@ fn section_heading(
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some((icon, label)) = action {
-                    clicked = icons::button(ui, icon, label, enabled).clicked();
+                    clicked = if matches!(icon, Icon::Refresh) {
+                        icons::compact_button(ui, icon, label, enabled, false).clicked()
+                    } else {
+                        icons::button(ui, icon, label, enabled).clicked()
+                    };
                 }
             });
         })
     });
     clicked
+}
+
+/// Presentation-only: keep the full history intact. Only exact IDs and an
+/// acknowledged library-copy relation identify the same recording.
+fn recent_preview(recent: &[Track], limit: usize) -> Vec<&Track> {
+    type Key = (i64, i64);
+    fn root(parents: &HashMap<Key, Key>, mut key: Key) -> Key {
+        while let Some(parent) = parents.get(&key).filter(|parent| **parent != key) {
+            key = *parent;
+        }
+        key
+    }
+    let mut parents = HashMap::new();
+    for track in recent {
+        if let Some(source) = track.library_source_key {
+            let a = root(&parents, track.key());
+            let b = root(&parents, source);
+            if a != b {
+                parents.insert(a.max(b), a.min(b));
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    recent
+        .iter()
+        .filter(|track| seen.insert(root(&parents, track.key())))
+        .take(limit.min(10))
+        .collect()
 }
 
 fn empty_collections(ui: &mut egui::Ui, view: &HomeView<'_>) {
@@ -910,8 +941,8 @@ mod tests {
             (330.0, 1),
             (700.0, 3),
             (1040.0, 4),
-            (1480.0, 6),
-            (2200.0, 10),
+            (1480.0, 5),
+            (2200.0, 5),
         ] {
             frame(width, &recent, Vec::new());
             frame(width, &recent, Vec::new());
@@ -1171,5 +1202,63 @@ mod tests {
             );
             assert_eq!(action, Some(Action::OpenCollection(collection.id.clone())));
         }
+    }
+}
+
+#[cfg(test)]
+mod recent_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_limits_only_home_and_retains_distinct_versions_with_matching_titles() {
+        let template = crate::model::demo_tracks().remove(0);
+        let recent: Vec<_> = (1..=32)
+            .map(|id| Track {
+                id,
+                owner_id: 42,
+                title: "Same title".into(),
+                release_key: Some((-9, 999)),
+                library_source_key: None,
+                ..template.clone()
+            })
+            .collect();
+        let preview = recent_preview(&recent, 100);
+        assert_eq!(preview.len(), 10);
+        assert_eq!(
+            preview.iter().map(|track| track.id).collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(recent.len(), 32);
+    }
+
+    #[test]
+    fn repeated_ids_and_confirmed_library_copies_share_one_preview_card() {
+        let original = Track {
+            id: 7,
+            owner_id: -9,
+            library_source_key: None,
+            ..crate::model::demo_tracks().remove(0)
+        };
+        let owned = Track {
+            id: 8,
+            owner_id: 42,
+            library_source_key: Some(original.key()),
+            ..original.clone()
+        };
+        let older = Track {
+            library_source_key: None,
+            ..owned.clone()
+        };
+        let other = Track {
+            id: 9,
+            ..original.clone()
+        };
+        let recent = vec![older, original.clone(), original, owned, other];
+        let preview = recent_preview(&recent, 10);
+        assert_eq!(
+            preview.iter().map(|track| track.key()).collect::<Vec<_>>(),
+            vec![(42, 8), (-9, 9)]
+        );
+        assert_eq!(recent.len(), 5);
     }
 }

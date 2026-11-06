@@ -72,6 +72,7 @@ fn owner_links_navigate_inside_the_player_and_back_without_changing_playback() {
                 description: None,
                 creator: Some(creator(owner)),
                 tracks: Vec::new(),
+                total_tracks: None,
                 stats: AlbumStats::default(),
             })),
         );

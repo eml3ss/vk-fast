@@ -494,24 +494,26 @@ pub fn artist_releases(
     ui.ctx().data_mut(|data| data.insert_temp(id, tab));
     ui.add_space(10.0);
     if view.incomplete {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(view.language.text(
-                    "Не удалось загрузить всю дискографию.",
-                    "Could not load the full discography.",
-                ))
-                .small()
-                .color(theme::MUTED),
-            );
-            if ui
-                .add_enabled(
-                    !view.loading,
-                    egui::Button::new(view.language.text("Повторить", "Retry")).frame(false),
-                )
-                .clicked()
-            {
-                action = Some(Action::ReloadReleases);
-            }
+        theme::inset_heading(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(view.language.text(
+                        "Не удалось загрузить всю дискографию.",
+                        "Could not load the full discography.",
+                    ))
+                    .small()
+                    .color(theme::MUTED),
+                );
+                if ui
+                    .add_enabled(
+                        !view.loading,
+                        egui::Button::new(view.language.text("Повторить", "Retry")).frame(false),
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::ReloadReleases);
+                }
+            })
         });
         ui.add_space(6.0);
     }
@@ -524,15 +526,17 @@ pub fn artist_releases(
         })
         .collect();
     if filtered.is_empty() && !view.incomplete {
-        ui.label(
-            RichText::new(match tab {
-                ReleaseTab::Albums => view.language.text("Альбомов пока нет", "No albums yet"),
-                ReleaseTab::Singles => view
-                    .language
-                    .text("Синглов и EP пока нет", "No singles or EPs yet"),
-            })
-            .color(theme::MUTED),
-        );
+        theme::inset_heading(ui, |ui| {
+            ui.label(
+                RichText::new(match tab {
+                    ReleaseTab::Albums => view.language.text("Альбомов пока нет", "No albums yet"),
+                    ReleaseTab::Singles => view
+                        .language
+                        .text("Синглов и EP пока нет", "No singles or EPs yet"),
+                })
+                .color(theme::MUTED),
+            )
+        });
     }
     ui.push_id(("artist-discography", view.artist_id, tab as u8), |ui| {
         if let Some(intent) = release_grid(ui, covers, view.language, &filtered) {

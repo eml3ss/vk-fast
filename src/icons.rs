@@ -21,6 +21,9 @@ pub enum Icon {
     Next,
     Volume,
     Settings,
+    Interface,
+    Storage,
+    Info,
     Shuffle,
     Loop,
     LoopOne,
@@ -393,6 +396,39 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             outline.push(outline[0]);
             rounded_stroke(painter, outline, gear_stroke, 0.9 * scale);
             painter.circle_stroke(point(12.0, 12.0), 3.0 * scale, gear_stroke);
+        }
+        Icon::Interface => {
+            painter.rect_stroke(
+                Rect::from_min_max(point(3.0, 4.0), point(21.0, 17.0)),
+                2.5 * scale,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[(12.0, 17.0), (12.0, 21.0)]);
+            line(&[(8.0, 21.0), (16.0, 21.0)]);
+        }
+        Icon::Storage => {
+            let top = (0..=32)
+                .map(|i| {
+                    let angle = i as f32 / 32.0 * std::f32::consts::TAU;
+                    point(12.0 + 8.0 * angle.cos(), 5.5 + 3.0 * angle.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(top, stroke));
+            line(&[(4.0, 5.5), (4.0, 18.0)]);
+            line(&[(20.0, 5.5), (20.0, 18.0)]);
+            let bottom = (0..=16)
+                .map(|i| {
+                    let angle = i as f32 / 16.0 * std::f32::consts::PI;
+                    point(12.0 + 8.0 * angle.cos(), 18.0 + 3.0 * angle.sin())
+                })
+                .collect();
+            rounded_stroke(painter, bottom, stroke, 0.8 * scale);
+        }
+        Icon::Info => {
+            painter.circle_stroke(point(12.0, 12.0), 9.0 * scale, stroke);
+            painter.circle_filled(point(12.0, 7.5), 1.0 * scale, color);
+            line(&[(12.0, 11.5), (12.0, 17.0)]);
         }
         Icon::Play => polygon(&[(6.5, 3.0), (21.0, 12.0), (6.5, 21.0)], 2.8),
         Icon::Pause => {
@@ -952,6 +988,9 @@ mod tests {
             Icon::Next,
             Icon::Volume,
             Icon::Settings,
+            Icon::Interface,
+            Icon::Storage,
+            Icon::Info,
             Icon::Shuffle,
             Icon::Loop,
             Icon::LoopOne,

@@ -176,7 +176,26 @@ pub struct AlbumPage {
     pub description: Option<String>,
     pub creator: Option<PlaylistCreator>,
     pub tracks: Vec<Track>,
+    /// VK's reported count, independent of the rows successfully returned.
+    pub total_tracks: Option<usize>,
     pub stats: AlbumStats,
+}
+
+impl AlbumPage {
+    pub fn confirmed_empty(&self) -> bool {
+        self.tracks.is_empty() && self.total_tracks == Some(0)
+    }
+
+    fn observe_track_count(&mut self, count: Option<usize>) {
+        // An empty/incomplete items response does not erase a positive count
+        // supplied by playlist metadata. Absence is established only by zero.
+        if let Some(count) = count {
+            self.total_tracks = Some(self.total_tracks.unwrap_or(0).max(count));
+        }
+        if !self.tracks.is_empty() {
+            self.total_tracks = Some(self.total_tracks.unwrap_or(0).max(self.tracks.len()));
+        }
+    }
 }
 
 /// The person or community that owns the original playlist, independent of
@@ -2039,6 +2058,7 @@ impl WebAudioClient {
             self.commit_home_streams(expected_owner, generation, streams, canceled)?;
             offset += rows.len();
             let count = response.get("count").and_then(Value::as_u64);
+            page.observe_track_count(count.and_then(|count| usize::try_from(count).ok()));
             if rows.is_empty()
                 || count.is_some_and(|count| offset as u64 >= count)
                 || (count.is_none() && rows.len() < 100)
@@ -3142,6 +3162,10 @@ fn parse_album_page(value: &Value, reference: &AlbumRef) -> Result<AlbumPage, We
         creator: playlist_creator_id(source)
             .and_then(|owner_id| playlist_creator_from_lookup(value, owner_id)),
         tracks: Vec::new(),
+        total_tracks: source
+            .get("count")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok()),
         stats: album_stats(source),
     })
 }
@@ -9320,6 +9344,36 @@ mod playlist_creation_tests {
             );
             assert!(matches!(returned, Err(actual) if actual == error));
             assert_eq!(calls, 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reported_track_count_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn empty_items_without_zero_count_do_not_establish_an_empty_playlist() {
+        let reference = AlbumRef {
+            id: 71,
+            owner_id: 42,
+            title: "Fixture".into(),
+            access_key: None,
+            cover_url: None,
+        };
+        for count in [Some(0), Some(7), None] {
+            let mut source = json!({"id":71,"owner_id":42,"title":"Fixture"});
+            if let Some(count) = count {
+                source["count"] = json!(count);
+            }
+            let mut page = parse_album_page(&source, &reference).unwrap();
+            assert_eq!(page.confirmed_empty(), count == Some(0));
+            page.observe_track_count(Some(0));
+            assert_eq!(page.confirmed_empty(), count != Some(7));
+            if count == Some(7) {
+                assert_eq!(page.total_tracks, Some(7));
+            }
         }
     }
 }
