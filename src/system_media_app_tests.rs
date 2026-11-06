@@ -209,6 +209,91 @@ fn stop_keeps_track_and_source_but_cancels_pending_work_and_resets_system_time()
 }
 
 #[test]
+fn system_and_tray_previous_restart_playing_and_restored_tracks_without_needing_history() {
+    for via_tray in [false, true] {
+        for paused in [false, true] {
+            for current in [0, 1] {
+                let ctx = egui::Context::default();
+                let mut app = app_with_track(&ctx);
+                let keys: Vec<_> = app
+                    .play_queue
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Track::key)
+                    .collect();
+                app.playing = Some(app.library.tracks[current].clone());
+                app.selected = Some(keys[current]);
+                let (player, _commands) = Player::test_playing(200, 42.75);
+                if !paused {
+                    app.player = player;
+                    app.resume_position = None;
+                }
+                app.seek_position = Some(100.0);
+                app.finished_handled = true;
+                app.home_autoplay = Some("pending-collection".into());
+                if via_tray {
+                    app.handle_tray_command(&ctx, crate::system_tray::Command::Previous);
+                } else {
+                    app.handle_system_media_command(&ctx, Command::Previous);
+                }
+                assert_eq!(app.playing.as_ref().unwrap().key(), keys[current]);
+                assert_eq!(app.selected, Some(keys[current]));
+                let snapshot = app.playback_snapshot();
+                assert_eq!(snapshot.position, 0.0);
+                assert_eq!(
+                    snapshot.state,
+                    if paused {
+                        PlaybackState::Paused
+                    } else {
+                        PlaybackState::Playing
+                    }
+                );
+                assert_eq!(
+                    app.play_queue
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(Track::key)
+                        .collect::<Vec<_>>(),
+                    keys
+                );
+                assert!(app.seek_position.is_none() && app.home_autoplay.is_none());
+                assert!(!app.finished_handled);
+                assert!(app.workers.is_empty() && app.playback_pending.is_none());
+                assert_eq!(app.player.decoder_starts(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn system_and_tray_previous_before_threshold_move_back_and_preserve_pause() {
+    for via_tray in [false, true] {
+        for position in [0.0, 2.999, 3.0] {
+            let ctx = egui::Context::default();
+            let mut app = app_with_track(&ctx);
+            let previous = app.library.tracks[0].key();
+            app.playing = Some(app.library.tracks[1].clone());
+            app.selected = app.playing.as_ref().map(Track::key);
+            app.resume_position = Some(position);
+            if via_tray {
+                app.handle_tray_command(&ctx, crate::system_tray::Command::Previous);
+            } else {
+                app.handle_system_media_command(&ctx, Command::Previous);
+            }
+            assert_eq!(app.playing.as_ref().unwrap().key(), previous);
+            assert_eq!(app.selected, Some(previous));
+            assert_eq!(app.resume_position, Some(0.0));
+            assert_eq!(app.playback_snapshot().state, PlaybackState::Paused);
+            assert_eq!(app.queue_origin.as_deref(), Some("playlist:42_9"));
+            assert!(app.workers.is_empty() && app.playback_pending.is_none());
+            assert_eq!(app.player.decoder_starts(), 0);
+        }
+    }
+}
+
+#[test]
 fn paused_and_stopped_navigation_skip_restricted_rows_without_starting_audio_or_replacing_the_source()
  {
     let ctx = egui::Context::default();

@@ -2215,16 +2215,11 @@ impl MusicApp {
     }
 
     fn previous_track(&mut self, ctx: &egui::Context, restart_after_three_seconds: bool) {
-        self.unavailable_playback.clear();
-        self.cancel_delayed_advance();
-        if restart_after_three_seconds
-            && self.playing.is_some()
-            && self.playback_snapshot().position > 3.0
-        {
-            self.commit_playback_seek(0.0);
-            self.finished_handled = false;
+        if restart_after_three_seconds && self.restart_track_after_three_seconds() {
             return;
         }
+        self.unavailable_playback.clear();
+        self.cancel_delayed_advance();
         self.synchronize_order();
         let Some(current) = self.playing.as_ref().map(Track::key).or(self.selected) else {
             return;
@@ -2234,6 +2229,20 @@ impl MusicApp {
             .advance_previous(current, self.allow_queue_wrap())
         {
             self.play_track(ctx, key);
+        }
+    }
+
+    fn restart_track_after_three_seconds(&mut self) -> bool {
+        if self.playing.is_some() && self.playback_snapshot().position > 3.0 {
+            crate::diagnostics::event("playback", "previous_restart_current");
+            self.unavailable_playback.clear();
+            self.cancel_delayed_advance();
+            self.seek_position = None;
+            self.commit_playback_seek(0.0);
+            self.finished_handled = false;
+            true
+        } else {
+            false
         }
     }
 

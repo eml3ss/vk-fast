@@ -207,7 +207,10 @@ impl MusicApp {
             }
             Command::Stop => self.system_media_stop(),
             Command::Next => self.system_media_adjacent(ctx, true),
-            Command::Previous => self.system_media_adjacent(ctx, false),
+            Command::Previous => {
+                crate::diagnostics::event("system_media", "previous_requested");
+                self.system_media_adjacent(ctx, false);
+            }
             Command::SeekBy(seconds) => {
                 if seconds.is_finite() {
                     let snapshot = self.playback_snapshot();
@@ -295,8 +298,11 @@ impl MusicApp {
             if next {
                 self.next_track(ctx);
             } else {
-                self.previous_track(ctx, false);
+                self.previous_track(ctx, true);
             }
+            return;
+        }
+        if !next && self.restart_track_after_three_seconds() {
             return;
         }
         self.cancel_delayed_advance();
