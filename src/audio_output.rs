@@ -32,7 +32,7 @@ impl Drop for OutputStream {
 /// without blocking. Success means the platform stream has started.
 pub fn open(
     render: impl FnMut(&mut [f32]) + Send + 'static,
-    on_error: impl Fn() + Send + 'static,
+    on_error: impl Fn() + Send + Sync + 'static,
 ) -> Result<OutputStream, ()> {
     #[cfg(target_os = "linux")]
     {
@@ -51,26 +51,64 @@ pub fn open(
 
 #[cfg(any(target_os = "windows", test))]
 mod windows_channels;
+#[cfg(any(target_os = "windows", test))]
+mod windows_status;
 
 #[cfg(target_os = "windows")]
 mod windows {
     use std::{
         sync::mpsc::{self, SyncSender},
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-    use super::{windows_channels::ChannelMapper, *};
+    use super::{
+        windows_channels::ChannelMapper,
+        windows_status::{self, Status},
+        *,
+    };
 
     const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
     const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(4);
     const STOP_INTERVAL: Duration = Duration::from_millis(20);
+    const START_TIMEOUT: Duration = Duration::from_secs(3);
+    const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+    fn failure(stage: &str, error: cpal::Error) {
+        crate::diagnostics::event(
+            "wasapi",
+            &format!(
+                "{stage}: kind={:?} native={} detail={error}",
+                error.kind(),
+                windows_status::code_text(error.message().and_then(windows_status::native_code))
+            ),
+        );
+    }
+
+    fn failure_kind(kind: cpal::ErrorKind) -> u8 {
+        match kind {
+            cpal::ErrorKind::DeviceChanged
+            | cpal::ErrorKind::Xrun
+            | cpal::ErrorKind::RealtimeDenied => 0,
+            cpal::ErrorKind::DeviceNotAvailable => 1,
+            cpal::ErrorKind::StreamInvalidated => 2,
+            cpal::ErrorKind::DeviceBusy => 3,
+            cpal::ErrorKind::UnsupportedConfig => 4,
+            cpal::ErrorKind::PermissionDenied => 5,
+            cpal::ErrorKind::HostUnavailable => 7,
+            cpal::ErrorKind::ResourceExhausted => 8,
+            cpal::ErrorKind::UnsupportedOperation => 9,
+            cpal::ErrorKind::InvalidInput => 10,
+            cpal::ErrorKind::Other => 11,
+            _ => 6,
+        }
+    }
 
     pub(super) fn open(
         render: impl FnMut(&mut [f32]) + Send + 'static,
-        on_error: impl Fn() + Send + 'static,
+        on_error: impl Fn() + Send + Sync + 'static,
     ) -> Result<OutputStream, ()> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -82,7 +120,9 @@ mod windows {
                     let _ = sender.try_send(Err(()));
                 }
             })
-            .map_err(|_| ())?;
+            .map_err(|error| {
+                crate::diagnostics::event("wasapi", &format!("worker_spawn: {error}"));
+            })?;
         match receiver.recv_timeout(OPEN_TIMEOUT) {
             Ok(Ok(())) => Ok(OutputStream {
                 stop,
@@ -90,6 +130,7 @@ mod windows {
             }),
             _ => {
                 stop.store(true, Ordering::Release);
+                crate::diagnostics::event("wasapi", "open_failed_or_timed_out");
                 let _ = worker.join();
                 Err(())
             }
@@ -98,14 +139,50 @@ mod windows {
 
     fn run(
         mut render: impl FnMut(&mut [f32]) + Send + 'static,
-        on_error: impl Fn() + Send + 'static,
+        on_error: impl Fn() + Send + Sync + 'static,
         stop: Arc<AtomicBool>,
         ready: &SyncSender<Result<(), ()>>,
     ) -> Result<(), ()> {
-        let host = cpal::host_from_id(cpal::HostId::Wasapi).map_err(|_| ())?;
-        let device = host.default_output_device().ok_or(())?;
-        let channels = device.default_output_config().map_err(|_| ())?.channels();
-        let mut mapper = ChannelMapper::new(channels).ok_or(())?;
+        let on_error = Arc::new(on_error);
+        let host = cpal::host_from_id(cpal::HostId::Wasapi).map_err(|error| {
+            crate::diagnostics::event("wasapi", &format!("host_open: {error}"));
+        })?;
+        let default = host.default_output_device().ok_or_else(|| {
+            crate::diagnostics::event("wasapi", "default_endpoint: not_available");
+        })?;
+        let endpoint_id = default
+            .id()
+            .map_err(|error| failure("default_endpoint_id", error))?;
+        // CPAL's default-device proxy uses ActivateAudioInterfaceAsync. Resolve
+        // the exact selected endpoint so desktop playback uses IMMDevice::Activate.
+        let device = host.device_by_id(&endpoint_id).ok_or_else(|| {
+            crate::diagnostics::event("wasapi", "resolve_selected_endpoint: not_available");
+        })?;
+        let native = device
+            .default_output_config()
+            .map_err(|error| failure("mix_format", error))?;
+        let channels = native.channels();
+        crate::diagnostics::event(
+            "wasapi",
+            &format!(
+                "selected_endpoint channels={channels} mix_rate_khz={:.3} mix_format={:?} output_rate_khz=48.000 output_format=f32",
+                f64::from(native.sample_rate()) / 1000.0,
+                native.sample_format()
+            ),
+        );
+        if let Ok(description) = device.description() {
+            crate::diagnostics::event(
+                "wasapi",
+                &format!(
+                    "output_device name={} interface={:?}",
+                    description.name(),
+                    description.interface_type()
+                ),
+            );
+        }
+        let mut mapper = ChannelMapper::new(channels).ok_or_else(|| {
+            crate::diagnostics::event("wasapi", "channel_mapping: unsupported_channel_count");
+        })?;
         let config = cpal::StreamConfig {
             channels,
             sample_rate: SAMPLE_RATE,
@@ -116,42 +193,87 @@ mod windows {
         // F32 stream to the device's mix rate/format, including Bluetooth.
         // Keep its native channel count; mono is downmixed and surround uses
         // front L/R. No custom resampler or integer conversion is needed.
-        let failed = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Status::default());
         let render_stop = stop.clone();
-        let render_failed = failed.clone();
+        let render_status = status.clone();
         let error_stop = stop.clone();
-        let error_failed = failed.clone();
+        let error_status = status.clone();
+        let callback_error = on_error.clone();
         let stream = device
             .build_output_stream(
                 config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if render_stop.load(Ordering::Acquire) || render_failed.load(Ordering::Acquire)
-                    {
+                    if render_stop.load(Ordering::Acquire) || render_status.failed() {
                         data.fill(0.0);
                     } else {
                         mapper.render(data, &mut render);
+                        render_status.started.store(true, Ordering::Release);
                     }
                 },
-                move |_| {
+                move |error| {
+                    let kind = failure_kind(error.kind());
                     if !error_stop.load(Ordering::Acquire)
-                        && !error_failed.swap(true, Ordering::AcqRel)
+                        && kind != 0
+                        && error_status.fail(kind, error.message())
                     {
-                        on_error();
+                        callback_error();
                     }
                 },
                 Some(ACTIVATE_TIMEOUT),
             )
-            .map_err(|_| ())?;
+            .map_err(|error| failure("stream_build", error))?;
         if stop.load(Ordering::Acquire) {
             return Err(());
         }
-        stream.play().map_err(|_| ())?;
-        if failed.load(Ordering::Acquire) {
+        stream
+            .play()
+            .map_err(|error| failure("stream_play_request", error))?;
+        let start_deadline = Instant::now() + START_TIMEOUT;
+        while !status.started.load(Ordering::Acquire) {
+            if status.failed() {
+                crate::diagnostics::event(
+                    "wasapi",
+                    &format!("stream_start_failed {}", status.diagnostic()),
+                );
+                return Err(());
+            }
+            if stop.load(Ordering::Acquire) {
+                return Err(());
+            }
+            if Instant::now() >= start_deadline {
+                crate::diagnostics::event("wasapi", "stream_start_timeout: no_output_callback");
+                return Err(());
+            }
+            thread::sleep(STOP_INTERVAL);
+        }
+        if status.failed() {
+            crate::diagnostics::event(
+                "wasapi",
+                &format!("stream_start_failed {}", status.diagnostic()),
+            );
             return Err(());
         }
+        crate::diagnostics::event("wasapi", "stream_started: output_callback_confirmed");
         let _ = ready.try_send(Ok(()));
-        while !stop.load(Ordering::Acquire) && !failed.load(Ordering::Acquire) {
+        let mut route_check = Instant::now();
+        while !stop.load(Ordering::Acquire) && !status.failed() {
+            if route_check.elapsed() >= ROUTE_CHECK_INTERVAL {
+                route_check = Instant::now();
+                if default.id().ok().as_ref() != Some(&endpoint_id) {
+                    crate::diagnostics::event("wasapi", "default_endpoint_changed");
+                    if status.fail(2, None) {
+                        on_error();
+                    }
+                    break;
+                }
+            }
             thread::sleep(STOP_INTERVAL);
+        }
+        if status.failed() {
+            crate::diagnostics::event(
+                "wasapi",
+                &format!("stream_runtime_failed {}", status.diagnostic()),
+            );
         }
         let _ = stream.pause();
         Ok(())

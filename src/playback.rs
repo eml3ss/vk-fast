@@ -1370,7 +1370,9 @@ impl Drop for Pump {
 }
 struct Running {
     pump: Option<Pump>,
-    _stream: OutputStream,
+    _stream: Option<OutputStream>,
+    #[cfg(windows)]
+    output_recoveries: u8,
     pcm: Arc<Pcm>,
     offset: f64,
     duration: u32,
@@ -1379,6 +1381,23 @@ struct Running {
     _pin: Option<CachePin>,
 }
 impl Running {
+    #[cfg(windows)]
+    fn recover_output(&mut self, control: &Control) -> Result<(), PlaybackError> {
+        if self.output_recoveries >= 2 {
+            return Err(PlaybackError::Device);
+        }
+        self.output_recoveries += 1;
+        crate::diagnostics::event(
+            "wasapi",
+            &format!("output_recovery attempt={}", self.output_recoveries),
+        );
+        // Join the old callbacks before clearing their error flag. The PCM
+        // cursor, decoder, cache and pause intent belong to this same track.
+        self._stream = None;
+        self._stream = Some(open_output(&self.pcm, control)?);
+        Ok(())
+    }
+
     fn seek_disk(
         &mut self,
         source: &Source,
@@ -1434,6 +1453,51 @@ impl Drop for Running {
         self.pump = None;
     }
 }
+
+fn open_output(pcm: &Arc<Pcm>, control: &Control) -> Result<OutputStream, PlaybackError> {
+    let attempts = if cfg!(windows) { 3 } else { 1 };
+    connect_output(pcm, control, attempts, |pcm| {
+        let render_pcm = pcm.clone();
+        let errors = pcm.clone();
+        let mut normalizer = normalization::OutputNormalizer::new(SAMPLE_RATE);
+        audio_output::open(
+            move |data| render_normalized(data, &render_pcm, &mut normalizer),
+            move || {
+                errors.device_failed.store(true, Ordering::Relaxed);
+            },
+        )
+    })
+}
+
+fn connect_output<T>(
+    pcm: &Arc<Pcm>,
+    control: &Control,
+    attempts: u8,
+    mut connect: impl FnMut(&Arc<Pcm>) -> Result<T, ()>,
+) -> Result<T, PlaybackError> {
+    let revision = control.revision.load(Ordering::SeqCst);
+    for attempt in 1..=attempts {
+        if control.revision.load(Ordering::SeqCst) != revision {
+            return Err(PlaybackError::Worker);
+        }
+        pcm.device_failed.store(false, Ordering::Relaxed);
+        if let Ok(stream) = connect(pcm) {
+            if control.revision.load(Ordering::SeqCst) != revision {
+                return Err(PlaybackError::Worker);
+            }
+            return Ok(stream);
+        }
+        if attempt < attempts {
+            crate::diagnostics::event(
+                "wasapi",
+                &format!("output_open_retry attempt={}", attempt + 1),
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    Err(PlaybackError::Device)
+}
+
 fn start(
     source: &Source,
     offset: f64,
@@ -1467,16 +1531,7 @@ fn start(
         source.loudness.scan_cache(cache, control.clone());
     }
     prefill(&pcm, &bytes, false);
-    let render_pcm = pcm.clone();
-    let errors = pcm.clone();
-    let mut normalizer = normalization::OutputNormalizer::new(SAMPLE_RATE);
-    let stream = audio_output::open(
-        move |data| render_normalized(data, &render_pcm, &mut normalizer),
-        move || {
-            errors.device_failed.store(true, Ordering::Relaxed);
-        },
-    )
-    .map_err(|_| PlaybackError::Device)?;
+    let stream = open_output(&pcm, &control)?;
     let prefetch = match &cache {
         Some(cache) => Prefetch::new(source, cache, frame, control.clone())?,
         None => None,
@@ -1491,7 +1546,9 @@ fn start(
     )?;
     Ok(Running {
         pump: Some(pump),
-        _stream: stream,
+        _stream: Some(stream),
+        #[cfg(windows)]
+        output_recoveries: 0,
         pcm,
         offset: frame_time(frame),
         duration: source.duration,
@@ -1706,6 +1763,10 @@ fn controller(
         };
         let (position, buffered_until, ready) = r.progress();
         let failure = if r.pcm.device_failed.load(Ordering::Relaxed) {
+            #[cfg(windows)]
+            if control.current(active) && r.recover_output(&control).is_ok() {
+                continue;
+            }
             Some(PlaybackError::Device)
         } else if r.pcm.read_failed.load(Ordering::Relaxed) {
             Some(
@@ -1808,6 +1869,59 @@ mod tests {
         );
         p
     }
+
+    #[test]
+    fn output_retries_preserve_pcm_position_pause_volume_and_buffer() {
+        let pcm = Arc::new(numbered_pcm());
+        pcm.paused.store(true, Ordering::Relaxed);
+        assert!(pcm.seek_cached(0.5, 0.0, 2));
+        let cursor = pcm.cursor.load(Ordering::Acquire);
+        let samples = retained_samples(&pcm);
+        let control = Control::default();
+        control.new_source();
+        let mut calls = 0;
+        let result = connect_output(&pcm, &control, 3, |pcm| {
+            calls += 1;
+            assert!(!pcm.device_failed.load(Ordering::Relaxed));
+            if calls == 1 {
+                pcm.device_failed.store(true, Ordering::Relaxed);
+                Err(())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, 2);
+        assert_eq!(pcm.cursor.load(Ordering::Acquire), cursor);
+        assert!(pcm.paused.load(Ordering::Relaxed));
+        assert_eq!(f32::from_bits(pcm.volume.load(Ordering::Relaxed)), 1.0);
+        assert_eq!(retained_samples(&pcm), samples);
+    }
+
+    #[test]
+    fn output_retries_are_bounded_and_cancel_stale_track_or_seek_requests() {
+        let pcm = Arc::new(numbered_pcm());
+        let control = Control::default();
+        control.new_source();
+        let mut calls = 0;
+        let result: Result<(), _> = connect_output(&pcm, &control, 3, |_| {
+            calls += 1;
+            Err(())
+        });
+        assert_eq!(result, Err(PlaybackError::Device));
+        assert_eq!(calls, 3);
+        for succeeds in [false, true] {
+            let mut calls = 0;
+            let result = connect_output(&pcm, &control, 3, |_| {
+                calls += 1;
+                control.seek();
+                succeeds.then_some(()).ok_or(())
+            });
+            assert_eq!(result, Err(PlaybackError::Worker));
+            assert_eq!(calls, 1);
+        }
+    }
+
     #[test]
     fn callback_scales_frames_and_freezes_when_paused_or_empty() {
         let p = pcm(2);
