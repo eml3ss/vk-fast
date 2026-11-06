@@ -27,11 +27,14 @@ use crate::{
 const WORKERS: usize = 3;
 const MAX_PENDING: usize = 48;
 const MAX_TEXTURES: usize = 128;
+const MAX_HIGH_RES_TEXTURES: usize = 4;
 const MAX_ENTRIES: usize = 256;
 const MAX_BODY: u64 = 3 * 1024 * 1024;
 const MAX_DECODE: u64 = 32 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
 const TEXTURE_SIZE: u32 = 256;
+const HIGH_RES_TEXTURE_SIZE: u32 = 1024;
+const CACHE_SIZES: [u32; 5] = [96, 160, 256, 512, HIGH_RES_TEXTURE_SIZE];
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct Key {
@@ -126,6 +129,18 @@ impl CoverCache {
                 continue;
             }
             let state = if let Some(image) = reply.image {
+                if reply.key.edge > TEXTURE_SIZE
+                    && self
+                        .entries
+                        .iter()
+                        .filter(|(key, entry)| {
+                            key.edge > TEXTURE_SIZE && matches!(entry.state, State::Ready(..))
+                        })
+                        .count()
+                        >= MAX_HIGH_RES_TEXTURES
+                {
+                    self.evict_oldest(true, TEXTURE_SIZE + 1);
+                }
                 if self
                     .entries
                     .values()
@@ -133,7 +148,7 @@ impl CoverCache {
                     .count()
                     >= MAX_TEXTURES
                 {
-                    self.evict_oldest(true);
+                    self.evict_oldest(true, 0);
                 }
                 let image = Arc::new(image);
                 State::Ready(
@@ -164,14 +179,17 @@ impl CoverCache {
         self.receive(context);
     }
 
-    fn evict_oldest(&mut self, textures_only: bool) -> bool {
+    fn evict_oldest(&mut self, textures_only: bool, min_edge: u32) -> bool {
         let oldest = self
             .entries
             .iter()
-            .filter(|(_, entry)| match entry.state {
-                State::Pending => false,
-                State::Ready(..) => true,
-                State::Failed => !textures_only,
+            .filter(|(key, entry)| {
+                key.edge >= min_edge
+                    && match entry.state {
+                        State::Pending => false,
+                        State::Ready(..) => true,
+                        State::Failed => !textures_only,
+                    }
             })
             .min_by_key(|(_, entry)| entry.touched)
             .map(|(key, _)| key.clone());
@@ -187,7 +205,7 @@ impl CoverCache {
         if self.entries.contains_key(&key) || self.pending >= MAX_PENDING {
             return;
         }
-        if self.entries.len() >= MAX_ENTRIES && !self.evict_oldest(false) {
+        if self.entries.len() >= MAX_ENTRIES && !self.evict_oldest(false, 0) {
             return;
         }
         let valid =
@@ -232,6 +250,34 @@ impl CoverCache {
         size: f32,
         radius: u8,
     ) -> Response {
+        self.show_with_resolution(ui, url, size, radius, texture_edge(size))
+    }
+
+    /// Fullscreen artwork is sized in physical pixels, with its own disk and
+    /// memory entries. A resident thumbnail remains visible while it loads.
+    pub fn show_high_resolution(
+        &mut self,
+        ui: &mut egui::Ui,
+        url: Option<&str>,
+        size: f32,
+        radius: u8,
+    ) -> Response {
+        let edge = if size * ui.ctx().pixels_per_point() > 512.0 {
+            HIGH_RES_TEXTURE_SIZE
+        } else {
+            512
+        };
+        self.show_with_resolution(ui, url, size, radius, edge)
+    }
+
+    fn show_with_resolution(
+        &mut self,
+        ui: &mut egui::Ui,
+        url: Option<&str>,
+        size: f32,
+        radius: u8,
+        edge: u32,
+    ) -> Response {
         self.receive(ui.ctx());
         self.clock = self.clock.wrapping_add(1);
         let size = size.clamp(1.0, 512.0);
@@ -242,9 +288,27 @@ impl CoverCache {
         if let Some(url) = url.filter(|url| !url.is_empty()) {
             let key = Key {
                 url: url.to_owned(),
-                edge: texture_edge(size),
+                edge,
             };
             self.request(ui.ctx(), key.clone());
+            let key = if edge > TEXTURE_SIZE
+                && !self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|entry| matches!(entry.state, State::Ready(..)))
+            {
+                self.entries
+                    .iter()
+                    .filter(|(candidate, entry)| {
+                        candidate.url == url
+                            && candidate.edge < edge
+                            && matches!(entry.state, State::Ready(..))
+                    })
+                    .max_by_key(|(candidate, _)| candidate.edge)
+                    .map_or(key, |(candidate, _)| candidate.clone())
+            } else {
+                key
+            };
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.touched = self.clock;
                 if let State::Ready(texture, _, _) = &entry.state {
@@ -617,10 +681,13 @@ fn decode_sized(bytes: &[u8], edge: u32) -> Result<ColorImage, ()> {
     let size = image
         .width()
         .min(image.height())
-        .min(edge.clamp(1, TEXTURE_SIZE));
-    let image = image
-        .resize_to_fill(size, size, FilterType::Triangle)
-        .into_rgba8();
+        .min(edge.clamp(1, HIGH_RES_TEXTURE_SIZE));
+    let filter = if edge > TEXTURE_SIZE {
+        FilterType::Lanczos3
+    } else {
+        FilterType::Triangle
+    };
+    let image = image.resize_to_fill(size, size, filter).into_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [size as usize, size as usize],
         image.as_raw(),
@@ -644,7 +711,7 @@ fn load_cover(
     fetcher: impl FnOnce() -> Result<ColorImage, ()>,
 ) -> Result<ColorImage, ()> {
     // A larger existing thumbnail satisfies a smaller view without HTTP.
-    for candidate in [96, 160, 256]
+    for candidate in CACHE_SIZES
         .into_iter()
         .filter(|candidate| *candidate >= edge)
     {
@@ -665,7 +732,11 @@ fn load_cover(
         Err(()) => {
             // A cached small cover remains useful when a bigger view is opened
             // offline or a CDN temporarily rejects its signed URL.
-            for candidate in [160, 96].into_iter().filter(|candidate| *candidate < edge) {
+            for candidate in CACHE_SIZES
+                .into_iter()
+                .rev()
+                .filter(|candidate| *candidate < edge)
+            {
                 if let Ok(bytes) = disk.load(url, candidate)
                     && let Ok(image) = decode_sized(&bytes, edge)
                 {
@@ -681,8 +752,8 @@ fn jpeg(image: &ColorImage) -> Result<Vec<u8>, ()> {
     let [width, height] = image.size;
     if width == 0
         || height == 0
-        || width > TEXTURE_SIZE as usize
-        || height > TEXTURE_SIZE as usize
+        || width > HIGH_RES_TEXTURE_SIZE as usize
+        || height > HIGH_RES_TEXTURE_SIZE as usize
         || image.pixels.len() != width * height
     {
         return Err(());
@@ -696,7 +767,12 @@ fn jpeg(image: &ColorImage) -> Result<Vec<u8>, ()> {
         }
     }
     let mut bytes = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 68)
+    let quality = if width > TEXTURE_SIZE as usize || height > TEXTURE_SIZE as usize {
+        90
+    } else {
+        68
+    };
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
         .encode(
             &rgb,
             width as u32,
@@ -1013,6 +1089,115 @@ mod tests {
                 assert!(compressed.len() < 8 * 1024);
             }
         }
+    }
+
+    #[test]
+    fn fullscreen_cover_fetches_original_instead_of_enlarging_a_cached_thumbnail() {
+        let fixture = CacheFixture::new();
+        let disk = fixture.disk();
+        let url = "https://images.example.test/fullscreen.jpg";
+        disk.save(
+            url,
+            256,
+            &jpeg(&ColorImage::filled([256, 256], Color32::RED)).unwrap(),
+        )
+        .unwrap();
+        let source = image::RgbImage::from_fn(1200, 1200, |x, y| {
+            image::Rgb([(x / 6 % 256) as u8, (y / 6 % 256) as u8, 140])
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(source)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let mut fetched = false;
+        let image = load_cover(&disk, url, 1024, || {
+            fetched = true;
+            decode_sized(bytes.get_ref(), 1024)
+        })
+        .unwrap();
+        assert!(fetched);
+        assert_eq!(image.size, [1024, 1024]);
+        let restarted = fixture.disk();
+        assert_eq!(
+            load_cover(&restarted, url, 1024, || panic!(
+                "high-resolution disk hit must avoid HTTP"
+            ))
+            .unwrap()
+            .size,
+            [1024, 1024]
+        );
+        assert_eq!(
+            load_cover(&restarted, url, 512, || panic!(
+                "larger cached art must satisfy this view"
+            ))
+            .unwrap()
+            .size,
+            [512, 512]
+        );
+        let offline = "https://images.example.test/offline-fullscreen.jpg";
+        restarted
+            .save(
+                offline,
+                512,
+                &jpeg(&ColorImage::filled([512, 512], Color32::BLUE)).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            load_cover(&restarted, offline, 1024, || Err(()))
+                .unwrap()
+                .size,
+            [512, 512]
+        );
+        assert!(restarted.load(offline, 1024).is_err());
+    }
+
+    #[test]
+    fn fullscreen_textures_have_a_separate_memory_limit_and_preserve_small_covers() {
+        let ctx = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let small = "https://images.example.test/small-resident.jpg";
+        cache.seed_image_for_test(&ctx, small, 40.0, ColorImage::filled([2, 2], Color32::BLUE));
+        let (sender, replies) = mpsc::sync_channel(MAX_PENDING);
+        cache.replies = replies;
+        let keys: Vec<_> = (0..MAX_HIGH_RES_TEXTURES + 2)
+            .map(|index| Key {
+                url: format!("https://images.example.test/large-{index}.jpg"),
+                edge: HIGH_RES_TEXTURE_SIZE,
+            })
+            .collect();
+        for (index, key) in keys.iter().enumerate() {
+            cache.entries.insert(
+                key.clone(),
+                Entry {
+                    state: State::Pending,
+                    touched: index as u64,
+                },
+            );
+            sender
+                .send(Reply {
+                    key: key.clone(),
+                    image: Some(ColorImage::filled([2, 2], Color32::RED)),
+                    color: None,
+                })
+                .unwrap();
+            cache.receive(&ctx);
+            assert!(
+                cache
+                    .entries
+                    .iter()
+                    .filter(|(key, entry)| key.edge > TEXTURE_SIZE
+                        && matches!(entry.state, State::Ready(..)))
+                    .count()
+                    <= MAX_HIGH_RES_TEXTURES
+            );
+        }
+        assert!(!cache.entries.contains_key(&keys[0]));
+        assert!(!cache.entries.contains_key(&keys[1]));
+        assert!(keys[2..].iter().all(|key| cache.entries.contains_key(key)));
+        assert!(cache.entries.contains_key(&Key {
+            url: small.into(),
+            edge: 96
+        }));
     }
 
     #[test]

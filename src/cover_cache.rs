@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 const LIMIT: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 10_000;
-pub(super) const MAX_FILE: u64 = 256 * 1024;
+pub(super) const MAX_FILE: u64 = 1024 * 1024;
 
 struct Entry {
     bytes: u64,
@@ -247,7 +247,10 @@ fn valid_name(name: &str) -> bool {
     };
     digest.len() == 64
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && matches!(suffix, "96.jpg" | "160.jpg" | "256.jpg")
+        && matches!(
+            suffix,
+            "96.jpg" | "160.jpg" | "256.jpg" | "512.jpg" | "1024.jpg"
+        )
 }
 
 fn root_path() -> Option<PathBuf> {

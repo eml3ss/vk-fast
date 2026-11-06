@@ -178,7 +178,7 @@ pub fn show(
             egui::vec2(art_size, art_size),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(artwork), |ui| {
-            covers.show_rounded(ui, cover_url, art_size, 14);
+            covers.show_high_resolution(ui, cover_url, art_size, 14);
         });
         let title = view.track.map_or_else(
             || t("Выберите трек", "Choose a track").to_owned(),
