@@ -19,7 +19,7 @@ pub enum Icon {
     Pause,
     Previous,
     Next,
-    Volume,
+    Volume(u8),
     Settings,
     Interface,
     Storage,
@@ -44,6 +44,21 @@ pub enum Icon {
     Trash,
     RemoveFromLibrary,
     Pin,
+}
+
+impl Icon {
+    pub fn volume(volume: f32) -> Self {
+        let waves = if !volume.is_finite() || volume <= 0.0 {
+            0
+        } else if volume <= 1.0 / 3.0 {
+            1
+        } else if volume <= 2.0 / 3.0 {
+            2
+        } else {
+            3
+        };
+        Self::Volume(waves)
+    }
 }
 
 /// Symmetric cubic lobes, a smooth cleft and a broad rounded bottom tip.
@@ -467,7 +482,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             polygon(&[(3.5, 3.5), (17.5, 12.0), (3.5, 20.5)], 2.5);
         }
-        Icon::Volume => {
+        Icon::Volume(waves) => {
             let body = rounded_path(
                 &[
                     point(3.0, 8.5),
@@ -485,10 +500,13 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 color,
                 painter.ctx().pixels_per_point(),
             )));
-            for (radius_x, radius_y) in [(5.0, 6.5), (8.0, 10.5)] {
+            for (radius_x, radius_y) in [(3.0, 3.5), (5.5, 6.0), (8.0, 8.5)]
+                .into_iter()
+                .take(usize::from(waves.min(3)))
+            {
                 let points = (0..=20)
                     .map(|index| {
-                        let angle = (-55.0 + 110.0 * index as f32 / 20.0).to_radians();
+                        let angle = (-40.0 + 80.0 * index as f32 / 20.0).to_radians();
                         point(13.0 + radius_x * angle.cos(), 12.0 + radius_y * angle.sin())
                     })
                     .collect();
@@ -612,22 +630,41 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&shoulders);
         }
         Icon::Lyrics => {
-            painter.rect_stroke(
-                Rect::from_min_max(point(8.0, 2.0), point(16.0, 14.0)),
-                4.0 * scale,
+            let mic_point = |x: f32, y: f32| {
+                point(
+                    12.0 + (x + y) * std::f32::consts::FRAC_1_SQRT_2,
+                    12.0 + (x - y) * std::f32::consts::FRAC_1_SQRT_2,
+                )
+            };
+            rounded_stroke(
+                painter,
+                [
+                    (-1.6, 1.2),
+                    (-1.25, -8.3),
+                    (0.0, -9.0),
+                    (1.25, -8.3),
+                    (1.6, 1.2),
+                ]
+                .into_iter()
+                .map(|(x, y)| mic_point(x, y))
+                .collect(),
                 stroke,
-                egui::StrokeKind::Inside,
+                1.0 * scale,
             );
-            line(&[
-                (5.0, 10.0),
-                (5.0, 13.5),
-                (8.0, 17.5),
-                (16.0, 17.5),
-                (19.0, 13.5),
-                (19.0, 10.0),
-            ]);
-            line(&[(12.0, 17.5), (12.0, 21.0)]);
-            line(&[(8.0, 21.0), (16.0, 21.0)]);
+            let mut head = Vec::with_capacity(34);
+            for (center, start) in [(6.0, 0.0), (3.0, std::f32::consts::PI)] {
+                for index in 0..=16 {
+                    let angle = start + std::f32::consts::PI * index as f32 / 16.0;
+                    head.push(mic_point(3.0 * angle.cos(), center + 3.0 * angle.sin()));
+                }
+            }
+            painter.add(egui::Shape::closed_line(head, stroke));
+            rounded_stroke(
+                painter,
+                vec![mic_point(-2.8, 2.0), mic_point(2.8, 2.0)],
+                stroke,
+                0.0,
+            );
         }
         Icon::Expand => {
             line(&[(3.0, 9.0), (3.0, 3.0), (9.0, 3.0)]);
@@ -1005,7 +1042,7 @@ mod tests {
             Icon::Pause,
             Icon::Previous,
             Icon::Next,
-            Icon::Volume,
+            Icon::Volume(3),
             Icon::Settings,
             Icon::Interface,
             Icon::Storage,
@@ -1386,7 +1423,7 @@ mod tests {
     #[test]
     fn volume_speaker_is_filled_and_sound_waves_remain_separate_thin_curves() {
         for size in [19.0, 20.0, 24.0] {
-            let (context, output, rect) = render(Icon::Volume, size);
+            let (context, output, rect) = render(Icon::Volume(3), size);
             let body = output
                 .shapes
                 .iter()
@@ -1405,10 +1442,40 @@ mod tests {
             let point = |x, y| rect.min + egui::vec2(x, y) * (size / 24.0);
             assert!(alpha_at(&primitives, point(6.0, 12.0)) > 250.0);
             assert!(alpha_at(&primitives, point(10.0, 12.0)) > 250.0);
-            assert!(alpha_at(&primitives, point(16.0, 12.0)) < 10.0);
-            assert!(alpha_at(&primitives, point(18.0, 12.0)) > 230.0);
-            assert!(alpha_at(&primitives, point(19.5, 12.0)) < 60.0);
+            assert!(alpha_at(&primitives, point(16.0, 12.0)) > 230.0);
+            assert!(alpha_at(&primitives, point(18.5, 12.0)) > 230.0);
+            assert!(alpha_at(&primitives, point(19.75, 12.0)) < 130.0);
             assert!(alpha_at(&primitives, point(21.0, 12.0)) > 230.0);
+        }
+    }
+
+    #[test]
+    fn volume_waves_follow_the_master_level_and_have_compact_vertical_spread() {
+        for (volume, count) in [(0.0, 0), (0.1, 1), (0.5, 2), (1.0, 3)] {
+            let (_, output, rect) = render(Icon::volume(volume), 24.0);
+            let waves: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Mesh(mesh) => Some(mesh),
+                    _ => None,
+                })
+                .skip(1)
+                .collect();
+            assert_eq!(waves.len(), count);
+            for wave in waves {
+                let top = wave
+                    .vertices
+                    .iter()
+                    .map(|vertex| vertex.pos.y)
+                    .fold(f32::INFINITY, f32::min);
+                let bottom = wave
+                    .vertices
+                    .iter()
+                    .map(|vertex| vertex.pos.y)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(bottom - top < rect.height() * 0.60);
+            }
         }
     }
 

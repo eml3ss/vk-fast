@@ -7244,7 +7244,7 @@ impl MusicApp {
                 icons::paint(
                     ui.painter(),
                     egui::Rect::from_center_size(volume_icon.center(), egui::Vec2::splat(20.0)),
-                    Icon::Volume,
+                    Icon::volume(volume),
                     MUTED,
                 );
                 let queue = icons::toggle_button_sized(
@@ -8345,11 +8345,12 @@ impl MusicApp {
             self.library_refresh_due = false;
             self.load_page(ctx, true);
         }
-        if self.resume_position.is_none()
+        if (self.resume_position.is_none() || self.lyrics.fullscreen)
             && let Some(track) = self.playing.as_ref().filter(|track| {
                 track.artists.is_empty()
                     || track.subtitle.is_none()
                     || track.library_liked.is_none()
+                    || self.lyrics.fullscreen
             })
         {
             self.hydrate_metadata(ctx, vec![track.key()]);

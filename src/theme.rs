@@ -8,6 +8,24 @@ pub const PRIMARY: Color32 = Color32::from_rgb(34, 77, 139);
 pub const SELECTED: Color32 = Color32::from_rgb(27, 44, 67);
 pub const SCROLL_HANDLE: Color32 = Color32::from_rgb(57, 65, 77);
 
+pub fn wrapped_body(
+    ui: &egui::Ui,
+    text: &str,
+    width: f32,
+    align: egui::Align,
+    color: Color32,
+) -> egui::Label {
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_owned(),
+        FontId::proportional(14.0),
+        color,
+        width.max(1.0),
+    );
+    job.justify = false;
+    job.halign = align;
+    egui::Label::new(ui.painter().layout_job(job)).selectable(false)
+}
+
 /// One interpolated surface with a rounded, antialiased perimeter. Vertex
 /// colors avoid the seams produced by clipping separate solid-color strips.
 pub fn horizontal_gradient(
@@ -343,6 +361,47 @@ mod tests {
         assert_eq!(inset.0.y_range(), normal.0.y_range());
         assert_eq!(inset.1, normal.1);
         assert_eq!(inset.2, normal.2);
+    }
+
+    #[test]
+    fn wrapped_russian_body_keeps_regular_font_and_natural_spacing_in_justified_layouts() {
+        let text = "Источник вернул неподходящий текст. Попробуйте позже.";
+        for align in [egui::Align::Min, egui::Align::Center] {
+            let context = egui::Context::default();
+            install(&context);
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(280.0, 180.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.style_mut().override_font_id = Some(FontId::monospace(14.0));
+                    ui.with_layout(
+                        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                        |ui| {
+                            ui.add(wrapped_body(ui, text, 240.0, align, MUTED));
+                        },
+                    );
+                },
+            );
+            let galley = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(shape) if shape.galley.text() == text => Some(&shape.galley),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(!galley.job.justify);
+            assert_eq!(
+                galley.job.sections[0].format.font_id.family,
+                FontFamily::Proportional
+            );
+            assert_eq!(galley.job.sections[0].format.font_id.size, 14.0);
+        }
     }
 
     #[test]

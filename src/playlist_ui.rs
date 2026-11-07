@@ -134,7 +134,8 @@ pub fn show_sidebar(
                         .family(theme::semibold())
                         .color(theme::MUTED),
                 )
-                .truncate(),
+                .truncate()
+                .selectable(false),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if header_button(

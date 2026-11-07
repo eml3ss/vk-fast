@@ -102,17 +102,16 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                     );
                 });
             } else if view.playlists.is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(language.text(
-                            "Нет доступных для изменения плейлистов",
-                            "No editable playlists",
-                        ))
-                        .color(theme::MUTED),
-                    )
-                    .wrap()
-                    .selectable(false),
-                );
+                ui.add(theme::wrapped_body(
+                    ui,
+                    language.text(
+                        "Нет доступных для изменения плейлистов",
+                        "No editable playlists",
+                    ),
+                    ui.available_width(),
+                    egui::Align::Min,
+                    theme::MUTED,
+                ));
             } else {
                 theme::scroll_area(
                     ui,

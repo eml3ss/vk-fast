@@ -27,14 +27,15 @@ use crate::{
 const WORKERS: usize = 3;
 const MAX_PENDING: usize = 48;
 const MAX_TEXTURES: usize = 128;
-const MAX_HIGH_RES_TEXTURES: usize = 4;
+const MAX_HIGH_RES_TEXTURES: usize = 2;
 const MAX_ENTRIES: usize = 256;
 const MAX_BODY: u64 = 3 * 1024 * 1024;
+const MAX_HIGH_RES_BODY: u64 = 8 * 1024 * 1024;
 const MAX_DECODE: u64 = 32 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
 const TEXTURE_SIZE: u32 = 256;
-const HIGH_RES_TEXTURE_SIZE: u32 = 1024;
-const CACHE_SIZES: [u32; 5] = [96, 160, 256, 512, HIGH_RES_TEXTURE_SIZE];
+const HIGH_RES_TEXTURE_SIZE: u32 = 2048;
+const CACHE_SIZES: [u32; 6] = [96, 160, 256, 512, 1024, HIGH_RES_TEXTURE_SIZE];
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct Key {
@@ -250,7 +251,7 @@ impl CoverCache {
         size: f32,
         radius: u8,
     ) -> Response {
-        self.show_with_resolution(ui, url, size, radius, texture_edge(size))
+        self.show_with_resolution(ui, url, size, radius, texture_edge(size), None)
     }
 
     /// Fullscreen artwork is sized in physical pixels, with its own disk and
@@ -259,15 +260,16 @@ impl CoverCache {
         &mut self,
         ui: &mut egui::Ui,
         url: Option<&str>,
+        fallback: Option<&str>,
         size: f32,
         radius: u8,
     ) -> Response {
         let edge = if size * ui.ctx().pixels_per_point() > 512.0 {
             HIGH_RES_TEXTURE_SIZE
         } else {
-            512
+            1024
         };
-        self.show_with_resolution(ui, url, size, radius, edge)
+        self.show_with_resolution(ui, url, size, radius, edge, fallback)
     }
 
     fn show_with_resolution(
@@ -277,6 +279,7 @@ impl CoverCache {
         size: f32,
         radius: u8,
         edge: u32,
+        fallback: Option<&str>,
     ) -> Response {
         self.receive(ui.ctx());
         self.clock = self.clock.wrapping_add(1);
@@ -300,7 +303,7 @@ impl CoverCache {
                 self.entries
                     .iter()
                     .filter(|(candidate, entry)| {
-                        candidate.url == url
+                        (candidate.url == url || Some(candidate.url.as_str()) == fallback)
                             && candidate.edge < edge
                             && matches!(entry.state, State::Ready(..))
                     })
@@ -626,6 +629,11 @@ pub(crate) fn fetch(client: &Client, value: &str) -> Result<ColorImage, ()> {
 }
 
 fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()> {
+    let limit = if edge > TEXTURE_SIZE {
+        MAX_HIGH_RES_BODY
+    } else {
+        MAX_BODY
+    };
     if value.len() > 16_384 {
         return Err(());
     }
@@ -637,16 +645,16 @@ fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()
     if !response.status().is_success()
         || response
             .content_length()
-            .is_some_and(|length| length > MAX_BODY)
+            .is_some_and(|length| length > limit)
     {
         return Err(());
     }
     let mut bytes = Vec::new();
     response
-        .take(MAX_BODY + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ())?;
-    if bytes.len() as u64 > MAX_BODY {
+    if bytes.len() as u64 > limit {
         return Err(());
     }
     decode_sized(&bytes, edge)
@@ -657,7 +665,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<ColorImage, ()> {
 }
 
 fn decode_sized(bytes: &[u8], edge: u32) -> Result<ColorImage, ()> {
-    if bytes.len() as u64 > MAX_BODY {
+    let limit = if edge > TEXTURE_SIZE {
+        MAX_HIGH_RES_BODY
+    } else {
+        MAX_BODY
+    };
+    if bytes.len() as u64 > limit {
         return Err(());
     }
     let mut reader = ImageReader::new(Cursor::new(bytes))
@@ -1102,7 +1115,7 @@ mod tests {
             &jpeg(&ColorImage::filled([256, 256], Color32::RED)).unwrap(),
         )
         .unwrap();
-        let source = image::RgbImage::from_fn(1200, 1200, |x, y| {
+        let source = image::RgbImage::from_fn(2400, 2400, |x, y| {
             image::Rgb([(x / 6 % 256) as u8, (y / 6 % 256) as u8, 140])
         });
         let mut bytes = Cursor::new(Vec::new());
@@ -1110,21 +1123,21 @@ mod tests {
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
         let mut fetched = false;
-        let image = load_cover(&disk, url, 1024, || {
+        let image = load_cover(&disk, url, 2048, || {
             fetched = true;
-            decode_sized(bytes.get_ref(), 1024)
+            decode_sized(bytes.get_ref(), 2048)
         })
         .unwrap();
         assert!(fetched);
-        assert_eq!(image.size, [1024, 1024]);
+        assert_eq!(image.size, [2048, 2048]);
         let restarted = fixture.disk();
         assert_eq!(
-            load_cover(&restarted, url, 1024, || panic!(
+            load_cover(&restarted, url, 2048, || panic!(
                 "high-resolution disk hit must avoid HTTP"
             ))
             .unwrap()
             .size,
-            [1024, 1024]
+            [2048, 2048]
         );
         assert_eq!(
             load_cover(&restarted, url, 512, || panic!(
@@ -1143,12 +1156,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            load_cover(&restarted, offline, 1024, || Err(()))
+            load_cover(&restarted, offline, 2048, || Err(()))
                 .unwrap()
                 .size,
             [512, 512]
         );
-        assert!(restarted.load(offline, 1024).is_err());
+        assert!(restarted.load(offline, 2048).is_err());
+    }
+
+    #[test]
+    fn full_resolution_art_keeps_a_resident_track_thumbnail_while_its_original_loads() {
+        let context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let thumbnail = "https://images.example.test/track-small.jpg";
+        cache.seed_image_for_test(
+            &context,
+            thumbnail,
+            40.0,
+            ColorImage::filled([96, 96], Color32::BLUE),
+        );
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                cache.show_high_resolution(
+                    ui,
+                    Some("https://images.example.test/track-original.jpg"),
+                    Some(thumbnail),
+                    400.0,
+                    14,
+                );
+            },
+        );
+        assert!(
+            output.shapes.iter().any(
+                |shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.brush.is_some())
+            )
+        );
+        assert!(cache.entries.contains_key(&Key {
+            url: "https://images.example.test/track-original.jpg".into(),
+            edge: 1024
+        }));
     }
 
     #[test]

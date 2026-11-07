@@ -296,13 +296,23 @@ impl AlbumRef {
             .and_then(serde_json::Value::as_str)
             .filter(|value| metadata_text(value, 512))
             .map(str::to_owned);
-        let cover_url = cover_from_fields(
-            value.get("cover_url"),
-            value.get("coverUrl"),
-            None,
-            value.get("thumb"),
-        )
-        .or_else(|| cover_from_fields(None, None, None, value.get("photo")));
+        let large_cover = ["photo_2400", "photo_2048", "photo_1200"]
+            .into_iter()
+            .find_map(|size| {
+                [value.get("thumb"), value.get("photo")]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|photo| photo.get(size)?.as_str().and_then(valid_cover_url))
+            });
+        let cover_url = large_cover.or_else(|| {
+            cover_from_fields(
+                value.get("cover_url"),
+                value.get("coverUrl"),
+                None,
+                value.get("thumb"),
+            )
+            .or_else(|| cover_from_fields(None, None, None, value.get("photo")))
+        });
         Some(Self {
             id,
             owner_id,
@@ -1042,6 +1052,27 @@ mod tests {
             assert_eq!(track.unavailable, expected, "{fields}");
             assert_eq!(audio_unavailable_from_object(&value), expected, "{fields}");
         }
+    }
+
+    #[test]
+    fn release_artwork_keeps_the_large_original_without_increasing_track_thumbnails() {
+        let track: Track = serde_json::from_value(serde_json::json!({
+            "id":7,"owner_id":42,"title":"Song","duration":120,
+            "coverUrl":"https://images.example.test/small.jpg",
+            "album":{"id":9,"owner_id":-42,"title":"Single","thumb":{
+                "photo_600":"https://images.example.test/600.jpg",
+                "photo_1200":"https://images.example.test/1200.jpg"
+            },"photo":{"photo_2400":"https://images.example.test/2400.jpg"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            track.cover_url.as_deref(),
+            Some("https://images.example.test/small.jpg")
+        );
+        assert_eq!(
+            track.album.unwrap().cover_url.as_deref(),
+            Some("https://images.example.test/2400.jpg")
+        );
     }
 
     #[test]

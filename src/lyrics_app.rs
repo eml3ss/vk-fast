@@ -193,6 +193,10 @@ impl MusicApp {
             self.lyrics.active = true;
         }
         self.lyrics.fullscreen = fullscreen;
+        if fullscreen && let Some(key) = self.playing.as_ref().map(Track::key) {
+            self.metadata_attempted.remove(&key);
+            self.hydrate_metadata(ctx, vec![key]);
+        }
         self.lyrics.view.reset();
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(if fullscreen {
             true

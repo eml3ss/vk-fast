@@ -7,7 +7,7 @@ use crate::{
     model::Track,
     theme,
 };
-use eframe::egui::{self, Align, Color32, FontId, Rect, RichText, Sense};
+use eframe::egui::{self, Align, Color32, FontId, Rect, Sense};
 use std::sync::Arc;
 
 pub enum Action {
@@ -115,7 +115,14 @@ pub fn show(
             rect.top() + if view.fullscreen { 54.0 } else { 32.0 },
         ),
     );
-    let cover_url = view.track.and_then(|track| track.cover_url.as_deref());
+    let regular_cover = view.track.and_then(|track| track.cover_url.as_deref());
+    let cover_url = if view.fullscreen {
+        view.track
+            .and_then(|track| track.album.as_ref()?.cover_url.as_deref())
+            .or(regular_cover)
+    } else {
+        regular_cover
+    };
     if view.fullscreen {
         let color = covers.header_color(ui.ctx(), cover_url, 512.0);
         background(ui.painter(), rect, color);
@@ -178,7 +185,7 @@ pub fn show(
             egui::vec2(art_size, art_size),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(artwork), |ui| {
-            covers.show_high_resolution(ui, cover_url, art_size, 14);
+            covers.show_high_resolution(ui, cover_url, regular_cover, art_size, 14);
         });
         let title = view.track.map_or_else(
             || t("Выберите трек", "Choose a track").to_owned(),
@@ -291,11 +298,13 @@ pub fn show(
                 center + egui::vec2(0.0, 18.0),
                 egui::vec2(content.width(), 40.0),
             ),
-            egui::Label::new(
-                RichText::new(t("Загружаем текст…", "Loading lyrics…")).color(theme::MUTED),
-            )
-            .wrap()
-            .halign(Align::Center),
+            theme::wrapped_body(
+                ui,
+                t("Загружаем текст…", "Loading lyrics…"),
+                content.width(),
+                Align::Center,
+                theme::MUTED,
+            ),
         );
     } else if let Some(error) = view.error {
         let center = content.center();
@@ -304,10 +313,13 @@ pub fn show(
                 center - egui::vec2(0.0, 58.0),
                 egui::vec2(content.width(), 88.0),
             ),
-            egui::Label::new(RichText::new(error.message(view.language)).color(theme::MUTED))
-                .wrap()
-                .halign(Align::Center)
-                .selectable(false),
+            theme::wrapped_body(
+                ui,
+                error.message(view.language),
+                content.width(),
+                Align::Center,
+                theme::MUTED,
+            ),
         );
         if !matches!(error, Error::MissingKey | Error::Auth | Error::Storage)
             && ui
@@ -355,10 +367,7 @@ pub fn show(
 fn centered(ui: &mut egui::Ui, rect: Rect, text: &str) {
     ui.put(
         Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 72.0)),
-        egui::Label::new(RichText::new(text).color(theme::MUTED))
-            .wrap()
-            .halign(Align::Center)
-            .selectable(false),
+        theme::wrapped_body(ui, text, rect.width(), Align::Center, theme::MUTED),
     );
 }
 
