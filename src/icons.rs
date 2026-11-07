@@ -50,12 +50,10 @@ impl Icon {
     pub fn volume(volume: f32) -> Self {
         let waves = if !volume.is_finite() || volume <= 0.0 {
             0
-        } else if volume <= 1.0 / 3.0 {
+        } else if volume <= 0.5 {
             1
-        } else if volume <= 2.0 / 3.0 {
-            2
         } else {
-            3
+            2
         };
         Self::Volume(waves)
     }
@@ -500,13 +498,13 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 color,
                 painter.ctx().pixels_per_point(),
             )));
-            for (radius_x, radius_y) in [(3.0, 3.5), (5.5, 6.0), (8.0, 8.5)]
+            for (radius_x, radius_y) in [(5.0, 7.0), (8.0, 10.0)]
                 .into_iter()
-                .take(usize::from(waves.min(3)))
+                .take(usize::from(waves.min(2)))
             {
                 let points = (0..=20)
                     .map(|index| {
-                        let angle = (-40.0 + 80.0 * index as f32 / 20.0).to_radians();
+                        let angle = (-45.0 + 90.0 * index as f32 / 20.0).to_radians();
                         point(13.0 + radius_x * angle.cos(), 12.0 + radius_y * angle.sin())
                     })
                     .collect();
@@ -630,10 +628,12 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&shoulders);
         }
         Icon::Lyrics => {
+            // Balance the heavier capsule against the handle so the microphone
+            // sits on the same optical center as adjacent player controls.
             let mic_point = |x: f32, y: f32| {
                 point(
-                    12.0 + (x + y) * std::f32::consts::FRAC_1_SQRT_2,
-                    12.0 + (x - y) * std::f32::consts::FRAC_1_SQRT_2,
+                    11.25 + (x + y) * std::f32::consts::FRAC_1_SQRT_2,
+                    12.75 + (x - y) * std::f32::consts::FRAC_1_SQRT_2,
                 )
             };
             rounded_stroke(
@@ -1042,7 +1042,7 @@ mod tests {
             Icon::Pause,
             Icon::Previous,
             Icon::Next,
-            Icon::Volume(3),
+            Icon::Volume(2),
             Icon::Settings,
             Icon::Interface,
             Icon::Storage,
@@ -1423,7 +1423,7 @@ mod tests {
     #[test]
     fn volume_speaker_is_filled_and_sound_waves_remain_separate_thin_curves() {
         for size in [19.0, 20.0, 24.0] {
-            let (context, output, rect) = render(Icon::Volume(3), size);
+            let (context, output, rect) = render(Icon::Volume(2), size);
             let body = output
                 .shapes
                 .iter()
@@ -1442,16 +1442,15 @@ mod tests {
             let point = |x, y| rect.min + egui::vec2(x, y) * (size / 24.0);
             assert!(alpha_at(&primitives, point(6.0, 12.0)) > 250.0);
             assert!(alpha_at(&primitives, point(10.0, 12.0)) > 250.0);
-            assert!(alpha_at(&primitives, point(16.0, 12.0)) > 230.0);
-            assert!(alpha_at(&primitives, point(18.5, 12.0)) > 230.0);
-            assert!(alpha_at(&primitives, point(19.75, 12.0)) < 130.0);
+            assert!(alpha_at(&primitives, point(18.0, 12.0)) > 230.0);
+            assert!(alpha_at(&primitives, point(19.5, 12.0)) < 130.0);
             assert!(alpha_at(&primitives, point(21.0, 12.0)) > 230.0);
         }
     }
 
     #[test]
     fn volume_waves_follow_the_master_level_and_have_compact_vertical_spread() {
-        for (volume, count) in [(0.0, 0), (0.1, 1), (0.5, 2), (1.0, 3)] {
+        for (volume, count) in [(0.0, 0), (0.1, 1), (0.5, 1), (0.51, 2), (1.0, 2)] {
             let (_, output, rect) = render(Icon::volume(volume), 24.0);
             let waves: Vec<_> = output
                 .shapes
@@ -1463,7 +1462,7 @@ mod tests {
                 .skip(1)
                 .collect();
             assert_eq!(waves.len(), count);
-            for wave in waves {
+            for (index, wave) in waves.into_iter().enumerate() {
                 let top = wave
                     .vertices
                     .iter()
@@ -1474,8 +1473,36 @@ mod tests {
                     .iter()
                     .map(|vertex| vertex.pos.y)
                     .fold(f32::NEG_INFINITY, f32::max);
-                assert!(bottom - top < rect.height() * 0.60);
+                let height = bottom - top;
+                assert!(height < rect.height() * 0.75);
+                if index == 1 {
+                    assert!(height > rect.height() * 0.65);
+                }
             }
+        }
+    }
+
+    #[test]
+    fn microphone_ink_is_centered_in_the_shared_player_icon_box() {
+        for size in [20.0, 24.0] {
+            let (context, output, rect) = render(Icon::Lyrics, size);
+            let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+            let mut mass = 0.0;
+            let mut moment = Vec2::ZERO;
+            for row in 0..48 {
+                for column in 0..48 {
+                    let point =
+                        rect.min + egui::vec2(column as f32 + 0.5, row as f32 + 0.5) * size / 48.0;
+                    let alpha = alpha_at(&primitives, point);
+                    mass += alpha;
+                    moment += point.to_vec2() * alpha;
+                }
+            }
+            let center = (moment / mass).to_pos2();
+            assert!(
+                center.distance(rect.center()) < size * 0.025,
+                "{center:?} at {size}"
+            );
         }
     }
 

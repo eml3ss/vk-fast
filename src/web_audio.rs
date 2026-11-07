@@ -59,6 +59,7 @@ pub(crate) const USER_AGENT: &str = crate::client_platform::USER_AGENT;
 pub enum WebAudioError {
     NoSession,
     Expired,
+    TokenExpired,
     WrongAccount,
     Unverified,
     Network,
@@ -84,6 +85,10 @@ impl WebAudioError {
             Self::Expired => language.text(
                 "Сессия VK истекла. Войдите через VK или QR заново.",
                 "The VK session has expired. Sign in with VK or QR again.",
+            ),
+            Self::TokenExpired => language.text(
+                "Не удалось обновить ключ музыки VK. Повторите попытку.",
+                "Could not refresh the VK music key. Try again.",
             ),
             Self::WrongAccount => language.text(
                 "Сессия VK не соответствует подтверждённому аккаунту. Повторите вход по QR-коду.",
@@ -505,6 +510,13 @@ fn body(response: Response) -> Result<Zeroizing<String>, WebAudioError> {
     }
 }
 
+fn token_body(response: Response) -> Result<Zeroizing<String>, WebAudioError> {
+    body(response).map_err(|error| match error {
+        WebAudioError::Expired => WebAudioError::TokenExpired,
+        other => other,
+    })
+}
+
 impl WebAudioClient {
     pub fn new(cookies: Vec<SessionCookie>) -> Result<Self, WebAudioError> {
         if cookies.len() > 256 || cookies.iter().any(|c| !valid_cookie(c)) {
@@ -694,6 +706,10 @@ impl WebAudioClient {
     }
 
     fn fetch_viewer(&self) -> Result<Profile, WebAudioError> {
+        profile_from_html(&self.fetch_viewer_html()?)
+    }
+
+    fn fetch_viewer_html(&self) -> Result<Zeroizing<String>, WebAudioError> {
         let mut url = reqwest::Url::parse(&format!("https://{}/feed", self.host))
             .map_err(|_| WebAudioError::Format)?;
         // Follow only HTTPS redirects on the same exact website host, rebuilding
@@ -723,8 +739,7 @@ impl WebAudioClient {
                 url = target;
                 continue;
             }
-            let html = body(response)?;
-            return profile_from_html(&html);
+            return body(response);
         }
         Err(WebAudioError::Expired)
     }
@@ -1184,9 +1199,9 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(WebAudioError::TokenExpired);
         }
-        body(response)
+        token_body(response)
     }
 
     fn stream_mix_request(
@@ -1236,16 +1251,16 @@ impl WebAudioClient {
             session.previous_batch.clear();
         }
         let text = request(&session, source.params()).inspect_err(|error| {
-            if *error == WebAudioError::Expired {
-                self.forget_mix_session(expected_owner, generation);
+            if *error == WebAudioError::TokenExpired {
+                self.forget_mix_session(expected_owner, generation, &session);
             }
         })?;
         if canceled.load(Ordering::Acquire) {
             return Err(WebAudioError::Canceled);
         }
         let (mut tracks, streams) = parse_mix_page(&text).inspect_err(|error| {
-            if *error == WebAudioError::Expired {
-                self.forget_mix_session(expected_owner, generation);
+            if *error == WebAudioError::TokenExpired {
+                self.forget_mix_session(expected_owner, generation, &session);
             }
         })?;
         // Only reload credentials and media URLs in `state.streams` are used for
@@ -2180,75 +2195,102 @@ impl WebAudioClient {
         params: Vec<(&'static str, String)>,
         canceled: &AtomicBool,
     ) -> Result<Value, WebAudioError> {
-        self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
-        let cached = self
-            .state
-            .lock()
-            .map_err(|_| WebAudioError::Unverified)?
-            .mix
-            .as_ref()
-            .filter(|session| session.expires > now() + 60)
-            .cloned();
-        let session = match cached {
-            Some(session) => session,
-            None => {
-                let session = self.fetch_mix_session(owner, canceled)?;
-                let mut state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
-                if canceled.load(Ordering::Acquire) {
-                    return Err(WebAudioError::Canceled);
-                }
-                if state.verified_owner != Some(owner) || state.generation != generation {
-                    return Err(WebAudioError::Unverified);
-                }
-                // Do not replace another request's already-established Mix
-                // continuation state when concurrent pages share the token.
-                if state
-                    .mix
-                    .as_ref()
-                    .is_none_or(|cached| cached.expires <= now() + 60)
-                {
-                    state.mix = Some(session.clone());
-                }
-                session
-            }
-        };
-        if canceled.load(Ordering::Acquire) {
-            return Err(WebAudioError::Canceled);
-        }
-        let mut form: Vec<_> = params
-            .iter()
-            .map(|(key, value)| (*key, value.as_str()))
-            .collect();
-        form.push(("access_token", session.token.as_str()));
-        self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
-        let response = self
-            .http
-            .post(format!(
-                "https://{}/method/{method}?v=5.289",
-                session.api_host
-            ))
-            .header(ORIGIN, format!("https://{}", self.host))
-            .header(REFERER, format!("https://{}/", self.host))
-            .form(&form)
-            .send()
-            .map_err(network)?;
-        let text = body(response).inspect_err(|error| {
-            if *error == WebAudioError::Expired {
-                self.forget_mix_session(owner, generation);
-            }
-        })?;
-        self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
-        detail_response(&text).inspect_err(|error| {
-            if *error == WebAudioError::Expired {
-                self.forget_mix_session(owner, generation);
-            }
-        })
+        self.detail_request_with(
+            owner,
+            generation,
+            method,
+            canceled,
+            || self.fetch_mix_session(owner, canceled),
+            |session| {
+                let mut form: Vec<_> = params
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect();
+                form.push(("access_token", session.token.as_str()));
+                let response = self
+                    .http
+                    .post(format!(
+                        "https://{}/method/{method}?v=5.289",
+                        session.api_host
+                    ))
+                    .header(ORIGIN, format!("https://{}", self.host))
+                    .header(REFERER, format!("https://{}/", self.host))
+                    .form(&form)
+                    .send()
+                    .map_err(network)?;
+                detail_response(&token_body(response)?)
+            },
+        )
     }
 
-    fn forget_mix_session(&self, owner: i64, generation: u64) {
+    fn detail_request_with(
+        &self,
+        owner: i64,
+        generation: u64,
+        method: &'static str,
+        canceled: &AtomicBool,
+        mut fetch: impl FnMut() -> Result<MixSession, WebAudioError>,
+        mut request: impl FnMut(&MixSession) -> Result<Value, WebAudioError>,
+    ) -> Result<Value, WebAudioError> {
+        let mut retried = false;
+        loop {
+            self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
+            let cached = self
+                .state
+                .lock()
+                .map_err(|_| WebAudioError::Unverified)?
+                .mix
+                .as_ref()
+                .filter(|session| session.expires > now() + 60)
+                .cloned();
+            let session = match cached {
+                Some(session) => session,
+                None => {
+                    let session = fetch()?;
+                    let mut state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
+                    if canceled.load(Ordering::Acquire) {
+                        return Err(WebAudioError::Canceled);
+                    }
+                    if state.verified_owner != Some(owner) || state.generation != generation {
+                        return Err(WebAudioError::Unverified);
+                    }
+                    // Reuse credentials another request has already refreshed,
+                    // preserving its continuous Mix position.
+                    if let Some(cached) = state
+                        .mix
+                        .as_ref()
+                        .filter(|cached| cached.expires > now() + 60)
+                    {
+                        cached.clone()
+                    } else {
+                        state.mix = Some(session.clone());
+                        session
+                    }
+                }
+            };
+            self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
+            let result = request(&session);
+            self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
+            if result == Err(WebAudioError::TokenExpired) {
+                self.forget_mix_session(owner, generation, &session);
+                crate::diagnostics::event("session", "music_key_rejected; account_retained");
+                if !retried && detail_method_is_readonly(method) {
+                    retried = true;
+                    crate::diagnostics::event("session", "music_key_refresh; retry_read");
+                    continue;
+                }
+            }
+            return result;
+        }
+    }
+
+    fn forget_mix_session(&self, owner: i64, generation: u64, rejected: &MixSession) {
         if let Ok(mut state) = self.state.lock()
             && state.verified_owner == Some(owner)
             && state.generation == generation
+            && state.mix.as_ref().is_some_and(|session| {
+                session.token == rejected.token && session.api_host == rejected.api_host
+            })
         {
             state.mix = None;
         }
@@ -2264,16 +2306,7 @@ impl WebAudioClient {
         }
         // Token metadata is read only from the app's own authenticated official
         // page, after checking that page's independent global viewer identity.
-        let response = self
-            .http
-            .get(format!("https://{}/feed", self.host))
-            .header(COOKIE, cookie_header(&self.cookies, self.host, "/feed")?)
-            .send()
-            .map_err(network)?;
-        if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
-        }
-        let html = body(response)?;
+        let html = self.fetch_viewer_html()?;
         let viewer = viewer_record(&html).ok_or(WebAudioError::Unverified)?;
         if viewer.id != owner {
             return Err(WebAudioError::WrongAccount);
@@ -2315,13 +2348,16 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(WebAudioError::TokenExpired);
         }
-        let text = body(response)?;
+        let text = token_body(response)?;
         if canceled.load(Ordering::Acquire) {
             return Err(WebAudioError::Canceled);
         }
-        let mut session = mix_login_token(&text, owner)?;
+        let mut session = mix_login_token(&text, owner).map_err(|error| match error {
+            WebAudioError::Expired => WebAudioError::TokenExpired,
+            other => other,
+        })?;
         session.api_host = api_host;
         Ok(session)
     }
@@ -2825,11 +2861,33 @@ fn parse_search_playlists(value: &Value) -> Result<Vec<UserPlaylist>, WebAudioEr
         .collect())
 }
 
+fn detail_method_is_readonly(method: &str) -> bool {
+    matches!(
+        method,
+        "audio.get"
+            | "audio.getById"
+            | "audio.getFollowedArtists"
+            | "audio.getLyrics"
+            | "audio.getPlaylistById"
+            | "audio.getPlaylists"
+            | "audio.getSearchSuggestions"
+            | "audio.getUploadServer"
+            | "audio.search"
+            | "audio.searchAlbums"
+            | "audio.searchArtists"
+            | "audio.searchPlaylists"
+            | "catalog.getAudioArtist"
+            | "catalog.getAudioSearch"
+            | "users.get"
+            | "groups.getById"
+    )
+}
+
 fn detail_response(text: &str) -> Result<Value, WebAudioError> {
     let mut value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
         return Err(match error.get("error_code").and_then(number) {
-            Some(5 | 27 | 28) => WebAudioError::Expired,
+            Some(5 | 27 | 28) => WebAudioError::TokenExpired,
             _ => WebAudioError::Rejected,
         });
     }
@@ -3440,7 +3498,7 @@ fn parse_mix_page(text: &str) -> Result<HomeTracks, WebAudioError> {
     let value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
         return Err(match error.get("error_code").and_then(number) {
-            Some(5 | 27 | 28) => WebAudioError::Expired,
+            Some(5 | 27 | 28) => WebAudioError::TokenExpired,
             _ => WebAudioError::Rejected,
         });
     }
@@ -6465,7 +6523,7 @@ mod tests {
         assert!(matches!(parse_mix_page(&home), Err(WebAudioError::Format)));
         assert!(matches!(
             parse_mix_page(r#"{"error":{"error_code":5}}"#),
-            Err(WebAudioError::Expired)
+            Err(WebAudioError::TokenExpired)
         ));
         assert!(matches!(
             parse_mix_page(r#"{"error":{"error_code":15}}"#),
@@ -7333,6 +7391,158 @@ mod library_action_tests {
             });
         }
         client
+    }
+
+    #[test]
+    fn rejected_music_key_refreshes_once_without_losing_the_verified_account_or_cursor() {
+        let client = client();
+        let generation = client.state.lock().unwrap().generation;
+        let mut replacement = client.state.lock().unwrap().mix.clone().unwrap();
+        replacement.token = Zeroizing::new("replacement-key".into());
+        let mut fetched = 0;
+        let mut requested = 0;
+        let result = client.detail_request_with(
+            42,
+            generation,
+            "audio.get",
+            &AtomicBool::new(false),
+            || {
+                fetched += 1;
+                Ok(replacement.clone())
+            },
+            |session| {
+                requested += 1;
+                if requested == 1 {
+                    Err(WebAudioError::TokenExpired)
+                } else {
+                    assert_eq!(session.token.as_str(), "replacement-key");
+                    Ok(json!({"items":[]}))
+                }
+            },
+        );
+        assert_eq!(result.unwrap(), json!({"items":[]}));
+        assert_eq!((fetched, requested), (1, 2));
+        let state = client.state.lock().unwrap();
+        assert_eq!(state.verified_owner, Some(42));
+        assert_eq!(state.generation, generation);
+        assert_eq!(state.cursor.as_ref().unwrap().offset, 17);
+        assert_eq!(
+            state.mix.as_ref().unwrap().token.as_str(),
+            "replacement-key"
+        );
+    }
+
+    #[test]
+    fn late_key_rejection_cannot_erase_concurrently_refreshed_credentials() {
+        let client = client();
+        let generation = client.state.lock().unwrap().generation;
+        let mut requested = 0;
+        client
+            .detail_request_with(
+                42,
+                generation,
+                "audio.getPlaylists",
+                &AtomicBool::new(false),
+                || panic!("The concurrent refresh must be reused"),
+                |session| {
+                    requested += 1;
+                    if requested == 1 {
+                        let mut replacement = session.clone();
+                        replacement.token = Zeroizing::new("concurrent-key".into());
+                        replacement.previous_batch = vec![(42, 19)];
+                        client.state.lock().unwrap().mix = Some(replacement);
+                        Err(WebAudioError::TokenExpired)
+                    } else {
+                        assert_eq!(session.token.as_str(), "concurrent-key");
+                        assert_eq!(session.previous_batch, [(42, 19)]);
+                        Ok(json!([]))
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(requested, 2);
+    }
+
+    #[test]
+    fn key_refresh_is_bounded_and_never_repeats_a_mutation_or_network_failure() {
+        for (method, error, attempts) in [
+            ("audio.get", WebAudioError::TokenExpired, 2),
+            ("audio.get", WebAudioError::Network, 1),
+            ("audio.add", WebAudioError::TokenExpired, 1),
+            ("audio.save", WebAudioError::TokenExpired, 1),
+            ("audio.editPlaylist", WebAudioError::TokenExpired, 1),
+            ("audio.futureMethod", WebAudioError::TokenExpired, 1),
+        ] {
+            let client = client();
+            let generation = client.state.lock().unwrap().generation;
+            let replacement = client.state.lock().unwrap().mix.clone().unwrap();
+            let mut requested = 0;
+            let result = client.detail_request_with(
+                42,
+                generation,
+                method,
+                &AtomicBool::new(false),
+                || Ok(replacement.clone()),
+                |_| {
+                    requested += 1;
+                    Err(error.clone())
+                },
+            );
+            assert_eq!(result, Err(error));
+            assert_eq!(requested, attempts, "{method}");
+            let state = client.state.lock().unwrap();
+            assert_eq!(state.verified_owner, Some(42));
+            assert_eq!(state.generation, generation);
+            assert_eq!(state.cursor.as_ref().unwrap().offset, 17);
+        }
+    }
+
+    #[test]
+    fn canceled_or_replaced_account_cannot_retry_a_rejected_music_key() {
+        for change_account in [false, true] {
+            let client = client();
+            let generation = client.state.lock().unwrap().generation;
+            let canceled = AtomicBool::new(false);
+            let result = client.detail_request_with(
+                42,
+                generation,
+                "audio.get",
+                &canceled,
+                || panic!("A stale request must not refresh credentials"),
+                |_| {
+                    if change_account {
+                        client.accept_profile(99).unwrap();
+                    } else {
+                        canceled.store(true, Ordering::Release);
+                    }
+                    Err(WebAudioError::TokenExpired)
+                },
+            );
+            assert_eq!(
+                result,
+                Err(if change_account {
+                    WebAudioError::Unverified
+                } else {
+                    WebAudioError::Canceled
+                })
+            );
+            assert_eq!(
+                client.state.lock().unwrap().verified_owner,
+                Some(if change_account { 99 } else { 42 })
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_errors_are_distinct_from_website_session_expiration() {
+        for code in [5, 27, 28] {
+            let response = json!({"error":{"error_code":code}}).to_string();
+            assert_eq!(detail_response(&response), Err(WebAudioError::TokenExpired));
+            assert!(matches!(
+                parse_mix_page(&response),
+                Err(WebAudioError::TokenExpired)
+            ));
+        }
     }
 
     fn audio(owner: i64, id: i64, release: Option<&str>) -> Value {

@@ -3032,14 +3032,16 @@ impl MusicApp {
                 // A failed startup check keeps the cached avatar for this run.
                 // A later library refresh must not consume a stale stored URL.
                 self.avatar_refresh_ready = true;
-                if matches!(
-                    &error,
-                    UiError::Music(
-                        WebAudioError::Expired
-                            | WebAudioError::NoSession
-                            | WebAudioError::WrongAccount
-                    )
-                ) {
+                if let UiError::Music(
+                    music_error @ (WebAudioError::Expired
+                    | WebAudioError::NoSession
+                    | WebAudioError::WrongAccount),
+                ) = &error
+                {
+                    crate::diagnostics::event(
+                        "session",
+                        &format!("account_disconnected stage=library reason={music_error:?}"),
+                    );
                     self.reset();
                     self.auth_error = Some(error);
                 } else if self.session.is_some() {
@@ -4392,6 +4394,10 @@ impl MusicApp {
                 | WebAudioError::NoSession
                 | WebAudioError::WrongAccount),
             ) => {
+                crate::diagnostics::event(
+                    "session",
+                    &format!("account_disconnected stage=playlists reason={error:?}"),
+                );
                 self.reset();
                 self.auth_error = Some(UiError::Music(error));
             }
@@ -4710,6 +4716,10 @@ impl MusicApp {
                 | WebAudioError::NoSession
                 | WebAudioError::WrongAccount),
             ) => {
+                crate::diagnostics::event(
+                    "session",
+                    &format!("account_disconnected stage=home reason={error:?}"),
+                );
                 self.reset();
                 self.auth_error = Some(UiError::Music(error));
             }
@@ -11201,6 +11211,49 @@ mod tests {
             cache_warning: false,
         });
         app
+    }
+
+    #[test]
+    fn expired_music_key_keeps_profile_and_cached_tracks_across_library_home_and_playlists() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.library.tracks = page(2, &[1, 2]).items;
+        app.recent = page(1, &[3]).items;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.pending = Some(receiver);
+        sender
+            .send(Err(UiError::Music(WebAudioError::TokenExpired)))
+            .unwrap();
+        app.poll(&ctx);
+        assert!(matches!(
+            app.audio_error,
+            Some(UiError::Music(WebAudioError::TokenExpired))
+        ));
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.home_request = Some(HomeRequest {
+            owner: 42,
+            collection: None,
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        sender.send(Err(WebAudioError::TokenExpired)).unwrap();
+        app.poll_home(&ctx);
+        assert_eq!(app.home_error, Some(WebAudioError::TokenExpired));
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.playlist_request = Some(PlaylistRequest {
+            owner: 42,
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        sender.send(Err(WebAudioError::TokenExpired)).unwrap();
+        app.poll_playlists(&ctx);
+        assert_eq!(app.playlist_error, Some(WebAudioError::TokenExpired));
+        assert_eq!(app.session.as_ref().unwrap().profile.id, 42);
+        assert_eq!(app.library.tracks.len(), 2);
+        assert_eq!(app.recent.len(), 1);
+        assert!(app.auth_error.is_none());
     }
 
     fn like_test_page(count: usize, ids: &[i64]) -> AudioPage {
