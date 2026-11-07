@@ -44,6 +44,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub open_page_available: bool,
     #[serde(default)]
+    pub retry_available: bool,
+    #[serde(default)]
     pub width: u16,
     #[serde(default)]
     pub height: u16,
@@ -75,6 +77,7 @@ pub enum Action {
     Other,
     Back,
     OpenPage,
+    Reload,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -267,6 +270,7 @@ impl Control {
             Action::Other => snapshot.other_option,
             Action::Back => snapshot.back_option,
             Action::OpenPage => true,
+            Action::Reload => snapshot.step == Step::Loading && snapshot.retry_available,
         };
         if !allowed
             || state.command.is_some()
@@ -284,7 +288,7 @@ impl Control {
         if !command.valid() {
             return false;
         }
-        if matches!(action, Action::Back | Action::Other)
+        if matches!(action, Action::Back | Action::Other | Action::Reload)
             || (action == Action::OpenPage && snapshot.step != Step::Captcha)
             || (action == Action::Submit && snapshot.step != Step::Code)
         {
@@ -391,6 +395,29 @@ mod tests {
         c.publish(view(Step::Password, 3));
         assert_eq!(c.take_command().unwrap().value, "synthetic");
         assert!(c.state.lock().unwrap().credentials.is_none());
+    }
+
+    #[test]
+    fn reload_requires_an_explicit_stalled_loading_step_and_discards_saved_credentials() {
+        let c = Control::default();
+        c.publish(view(Step::Identifier, 1));
+        assert!(!c.send(Action::Reload, String::new()));
+        assert!(c.send_credentials("user@example.test".into(), "synthetic".into()));
+        c.take_command().unwrap();
+        c.publish(Snapshot {
+            retry_available: true,
+            ..view(Step::Loading, 2)
+        });
+        assert!(c.send(Action::Reload, String::new()));
+        assert!(c.state.lock().unwrap().credentials.is_none());
+        let command = c.take_command().unwrap();
+        assert_eq!(command.action, Action::Reload);
+        assert_eq!(command.revision, 2);
+        c.publish(Snapshot {
+            retry_available: true,
+            ..view(Step::Code, 3)
+        });
+        assert!(!c.send(Action::Reload, String::new()));
     }
 
     #[test]

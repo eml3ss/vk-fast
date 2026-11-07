@@ -320,7 +320,8 @@ fn main() -> eframe::Result {
         "vk-fast",
         options,
         Box::new(move |cc: &eframe::CreationContext<'_>| {
-            let mut app = app::MusicApp::new(&cc.egui_ctx, demo, language);
+            let mut app =
+                app::MusicApp::new(&cc.egui_ctx, demo, language, cc.native_dialog_parent());
             app.attach_instance(activation);
             if qr_sign_in {
                 app.connect_qr(&cc.egui_ctx);

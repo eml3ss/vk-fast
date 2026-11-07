@@ -1017,6 +1017,7 @@ pub struct MusicApp {
     pending: Option<Receiver<Result<Reply, UiError>>>,
     browser_login: Option<Control>,
     web_login: Option<tauri_login::Control>,
+    dialog_parent: Option<eframe::NativeDialogParent>,
     native_login_ui: crate::web_login_ui::State,
     profile_cleanup: Option<Receiver<Result<(), ()>>>,
     workers: Vec<thread::JoinHandle<()>>,
@@ -1308,7 +1309,12 @@ impl MusicApp {
         }
     }
 
-    pub fn new(ctx: &egui::Context, demo: bool, language: Language) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        demo: bool,
+        language: Language,
+        dialog_parent: Option<eframe::NativeDialogParent>,
+    ) -> Self {
         theme::install(ctx);
         let cache_limit_mb = preferences::load_cache_limit_mb();
         #[cfg(not(test))]
@@ -1330,6 +1336,7 @@ impl MusicApp {
             pending: None,
             browser_login: None,
             web_login: None,
+            dialog_parent,
             native_login_ui: crate::web_login_ui::State::default(),
             profile_cleanup: None,
             workers: Vec::new(),
@@ -2581,10 +2588,11 @@ impl MusicApp {
         control.bind(ctx);
         self.native_login_ui.clear();
         self.web_login = Some(control.clone());
+        let parent = self.dialog_parent.clone();
         let language = self.language;
         self.start_job(ctx, move || {
             let mut signed_in =
-                tauri_login::login(control.clone(), language).map_err(UiError::WebLogin)?;
+                tauri_login::login(control.clone(), language, parent).map_err(UiError::WebLogin)?;
             if control.is_canceled() {
                 return Err(UiError::WebLogin(tauri_login::Error::Canceled));
             }
@@ -8812,6 +8820,7 @@ mod tests {
             pending: None,
             browser_login: None,
             web_login: None,
+            dialog_parent: None,
             native_login_ui: crate::web_login_ui::State::default(),
             profile_cleanup: None,
             workers: Vec::new(),
@@ -10736,7 +10745,7 @@ mod tests {
         let directory = CacheScheduleDirectory::new();
         let cache = AudioCache::test_at(directory.0.join("audio"), 4096).unwrap();
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         app.audio_cache = Some(cache.clone());
         app.cache_limit_mb = preferences::DEFAULT_CACHE_MB;
         (directory, ctx, app, cache)
@@ -14350,7 +14359,7 @@ mod tests {
     #[test]
     fn profile_cleanup_cannot_be_canceled_into_a_new_login() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.profile_cleanup = Some(receiver);
         app.reset();
@@ -14368,7 +14377,7 @@ mod tests {
     #[test]
     fn missing_saved_session_does_not_start_a_webview() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.pending = Some(receiver);
         assert!(sender.send(Ok(Reply::NoSavedSession)).is_ok());
@@ -14381,7 +14390,7 @@ mod tests {
     #[test]
     fn phone_code_input_is_available_before_the_optional_otp_status() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         let (_sender, receiver) = mpsc::sync_channel(1);
         app.qr_pending = Some(receiver);
         app.qr_texture = qr_image(&ctx, "https://vk.ru/?synthetic=1");
@@ -14440,7 +14449,7 @@ mod tests {
             for language in [Language::Russian, Language::English] {
                 let ctx = egui::Context::default();
                 let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-                let mut app = MusicApp::new(&ctx, false, language);
+                let mut app = MusicApp::new(&ctx, false, language, None);
                 let (_sender, receiver) = mpsc::sync_channel(1);
                 app.qr_pending = Some(receiver);
                 app.qr_open = true;
@@ -14578,7 +14587,7 @@ mod tests {
     #[test]
     fn cancel_qr_discards_a_late_signed_in_session() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.qr_pending = Some(receiver);
         app.qr_control = Some(qr_auth::Control::default());
@@ -14837,7 +14846,7 @@ mod tests {
     #[test]
     fn reset_discards_late_results() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.pending = Some(receiver);
         app.reset();

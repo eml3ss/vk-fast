@@ -87,6 +87,18 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             let response = ui.put(close, egui::Button::new("").frame(false));
             icons::paint(ui.painter(), close.shrink(7.0), Icon::Close, theme::MUTED);
             cancel |= response.on_hover_text(t("Закрыть", "Close")).clicked();
+            if view.back_option {
+                let back = Rect::from_min_size(body.left_top(), egui::vec2(28.0, 28.0));
+                let response = ui
+                    .add_enabled_ui(!view.busy, |ui| {
+                        icons::panel_button(ui, back, Icon::ArrowLeft, t("Назад", "Back"))
+                    })
+                    .inner;
+                if response.clicked() {
+                    state.input.zeroize();
+                    control.send(Action::Back, String::new());
+                }
+            }
             ui.scope_builder(
                 egui::UiBuilder::new().max_rect(rect(48.0, 40.0, 40.0)),
                 |ui| {
@@ -140,6 +152,13 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                     t("Вход подтверждён", "Sign-in approved"),
                     t("Подключаем вашу музыку…", "Connecting your music…"),
                 ),
+                Step::Loading if view.retry_available => (
+                    t("VK не ответил", "VK is not responding"),
+                    t(
+                        "Можно повторить подключение или открыть страницу VK.",
+                        "Retry the connection or open the VK page.",
+                    ),
+                ),
                 _ => (
                     t("Подключаем VK…", "Connecting to VK…"),
                     t(
@@ -158,6 +177,20 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             );
             text(ui, 138.0, 36.0, description, 14.0, theme::MUTED);
             let controls = width.min(320.0);
+            if view.step == Step::Loading
+                && view.retry_available
+                && ui
+                    .put(
+                        rect(196.0, controls, 40.0),
+                        egui::Button::new(t("Повторить подключение", "Retry connection"))
+                            .fill(theme::PRIMARY)
+                            .corner_radius(10),
+                    )
+                    .clicked()
+            {
+                state.input.zeroize();
+                control.send(Action::Reload, String::new());
+            }
             if view.accepts_input() {
                 let credentials = matches!(view.step, Step::Identifier | Step::Password);
                 let identifier = credentials.then(|| {
@@ -342,7 +375,11 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                 && ui
                     .add_enabled_ui(!view.busy, |ui| {
                         ui.put(
-                            rect(224.0, controls, 42.0),
+                            rect(
+                                if view.retry_available { 248.0 } else { 224.0 },
+                                controls,
+                                42.0,
+                            ),
                             egui::Button::new(if view.step == Step::Captcha {
                                 t("Открыть капчу", "Open CAPTCHA")
                             } else {
@@ -357,10 +394,12 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
             {
                 control.send(Action::OpenPage, String::new());
             }
-            if matches!(
-                view.step,
-                Step::Loading | Step::Entry | Step::Approval | Step::Finishing
-            ) {
+            if !view.retry_available
+                && matches!(
+                    view.step,
+                    Step::Loading | Step::Entry | Step::Approval | Step::Finishing
+                )
+            {
                 ui.put(
                     rect(
                         if view.open_page_available {
@@ -424,7 +463,6 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                     Action::Other,
                     t("Другой способ", "Another method"),
                 ),
-                (view.back_option, Action::Back, t("Назад", "Back")),
             ]
             .into_iter()
             .filter(|m| m.0)
@@ -548,6 +586,63 @@ mod tests {
             _ => {}
         }
     }
+    #[test]
+    fn back_is_an_arrow_at_the_top_left_and_sends_the_current_form_action() {
+        for language in [Language::Russian, Language::English] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let control = Control::default();
+            let mut state = State::default();
+            control.publish(crate::web_login_state::Snapshot {
+                document: "synthetic".into(),
+                revision: 1,
+                step: Step::Code,
+                code_length: 6,
+                back_option: true,
+                ..Default::default()
+            });
+            let mut title_center = egui::Pos2::ZERO;
+            for frame in 0..3 {
+                let (out, _) = render(
+                    &ctx,
+                    &mut state,
+                    &control,
+                    language,
+                    frame as f64 * 0.1,
+                    Vec::new(),
+                );
+                for shape in &out.shapes {
+                    texts(&shape.shape, &mut |text| {
+                        assert_ne!(text.galley.text(), language.text("Назад", "Back"));
+                        if text.galley.text() == language.text("Вход в VK", "Sign in to VK") {
+                            title_center = text.pos + text.galley.rect.center().to_vec2();
+                        }
+                    });
+                }
+            }
+            let pointer = title_center + egui::vec2(-404.0 / 2.0 + 14.0, -1.0);
+            for (index, pressed) in [true, false].into_iter().enumerate() {
+                render(
+                    &ctx,
+                    &mut state,
+                    &control,
+                    language,
+                    0.4 + index as f64 * 0.1,
+                    vec![
+                        egui::Event::PointerMoved(pointer),
+                        egui::Event::PointerButton {
+                            pos: pointer,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert_eq!(control.take_command().unwrap().action, Action::Back);
+        }
+    }
+
     #[test]
     fn every_native_step_fits_the_minimum_window_in_both_languages() {
         for language in [Language::Russian, Language::English] {

@@ -29,6 +29,8 @@ pub use crate::web_login_state::Control;
 use crate::web_login_state::{Action, Command as InputCommand, Snapshot as LoginSnapshot, Step};
 
 const CHILD_MARKER: &str = "VK_FAST_WEB_LOGIN_CHILD";
+const PARENT_WINDOW: &str = "VK_FAST_WEB_LOGIN_PARENT";
+const PARENT_PROCESS: &str = "VK_FAST_WEB_LOGIN_PARENT_PID";
 const FRAME: &[u8] = b"VK_FAST_WEB_LOGIN:";
 const MAX_REPLY: usize = 128 * 1024;
 const LOGIN_URL: &str = "https://vk.ru/";
@@ -104,12 +106,34 @@ impl Drop for Process {
 
 /// Starts only this application's own webview helper. Credentials travel in a
 /// private stdout pipe, never in arguments, logs, ordinary browser files or JS.
-pub fn login(control: Control, language: Language) -> Result<SignedIn, Error> {
+pub fn login(
+    control: Control,
+    language: Language,
+    parent: Option<eframe::NativeDialogParent>,
+) -> Result<SignedIn, Error> {
     if control.is_canceled() {
         return Err(Error::Canceled);
     }
     let executable = std::env::current_exe().map_err(|_| Error::Setup)?;
+    let parent = parent
+        .map(|parent| parent.export().ok_or(Error::Setup))
+        .transpose()?;
     let mut command = Command::new(executable);
+    command.env_remove(PARENT_WINDOW).env_remove(PARENT_PROCESS);
+    if let Some(parent) = &parent {
+        command
+            .env(PARENT_WINDOW, parent.identifier())
+            .env(PARENT_PROCESS, std::process::id().to_string());
+        #[cfg(target_os = "linux")]
+        command.env(
+            "GDK_BACKEND",
+            if parent.identifier().starts_with("wayland:") {
+                "wayland"
+            } else {
+                "x11"
+            },
+        );
+    }
     command
         .args([
             "--web-login",
@@ -139,6 +163,7 @@ pub fn login(control: Control, language: Language) -> Result<SignedIn, Error> {
     let output = Stdio::piped();
     command.stdout(output);
     let mut child = Process(command.spawn().map_err(|_| Error::Setup)?);
+    crate::diagnostics::event("sign-in", "helper_started");
     #[cfg(not(unix))]
     let mut stdout = child.0.stdout.take().ok_or(Error::Setup)?;
     let mut input = child.0.stdin.take().ok_or(Error::Setup)?;
@@ -153,15 +178,39 @@ pub fn login(control: Control, language: Language) -> Result<SignedIn, Error> {
             let mut decoder = ResponseStream::default();
             let mut chunk = [0_u8; 8192];
             loop {
-                match stdout.read(&mut chunk) {
+                #[cfg(windows)]
+                let available = {
+                    use std::os::windows::io::AsHandle as _;
+                    match eframe::windows_pipe_available(stdout.as_handle()) {
+                        Ok(0) => {
+                            if reader_stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                        Ok(count) => (count as usize).min(chunk.len()),
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                        Err(error) => return Err(error),
+                    }
+                };
+                #[cfg(not(windows))]
+                let available = chunk.len();
+                match stdout.read(&mut chunk[..available]) {
                     Ok(0) => break,
                     Ok(count) => {
-                        if decoder.push(&chunk[..count], &reader_control).is_err() {
-                            chunk.zeroize();
-                            reader_overflow.store(true, Ordering::Release);
-                            return Err(io::Error::other("Invalid sign-in response"));
-                        }
+                        let complete = match decoder.push(&chunk[..count], &reader_control) {
+                            Ok(complete) => complete,
+                            Err(_) => {
+                                chunk.zeroize();
+                                reader_overflow.store(true, Ordering::Release);
+                                return Err(io::Error::other("Invalid sign-in response"));
+                            }
+                        };
                         chunk.zeroize();
+                        if complete {
+                            break;
+                        }
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error)
@@ -189,6 +238,9 @@ pub fn login(control: Control, language: Language) -> Result<SignedIn, Error> {
         if overflow.load(Ordering::Acquire) {
             break Err(Error::Protocol);
         }
+        if reader.is_finished() {
+            break Ok(());
+        }
         if let Some(command) = control.take_command() {
             let mut bytes =
                 Zeroizing::new(serde_json::to_vec(&command).map_err(|_| Error::Protocol)?);
@@ -205,7 +257,7 @@ pub fn login(control: Control, language: Language) -> Result<SignedIn, Error> {
     };
     drop(input);
     // Reap before joining the pipe reader, including when network/WebKit stalls.
-    if result.is_err() {
+    if result.is_err() || !matches!(child.0.try_wait(), Ok(Some(_))) {
         let _ = child.0.kill();
     }
     let _ = child.0.wait();
@@ -234,7 +286,7 @@ struct ResponseStream {
     final_reply: Option<Zeroizing<Vec<u8>>>,
 }
 impl ResponseStream {
-    fn push(&mut self, bytes: &[u8], control: &Control) -> Result<(), Error> {
+    fn push(&mut self, bytes: &[u8], control: &Control) -> Result<bool, Error> {
         for byte in bytes {
             if self.line.len() >= MAX_REPLY {
                 return Err(Error::Protocol);
@@ -252,6 +304,19 @@ impl ResponseStream {
                             return Err(Error::Protocol);
                         }
                         if self.final_reply.is_none() {
+                            let previous = control.snapshot();
+                            if previous.step != view.step
+                                || previous.error != view.error
+                                || previous.retry_available != view.retry_available
+                            {
+                                crate::diagnostics::event(
+                                    "sign-in",
+                                    &format!(
+                                        "step={:?} busy={} error={} stalled={}",
+                                        view.step, view.busy, view.error, view.retry_available
+                                    ),
+                                );
+                            }
                             control.publish(view);
                         }
                     }
@@ -266,7 +331,7 @@ impl ResponseStream {
             self.line.zeroize();
             self.line.clear();
         }
-        Ok(())
+        Ok(self.final_reply.is_some())
     }
     fn finish(self) -> Result<Zeroizing<Vec<u8>>, Error> {
         self.final_reply.ok_or(Error::Protocol)
@@ -530,10 +595,7 @@ fn evaluate(window: &tauri::WebviewWindow, script: String) -> Option<serde_json:
             let _ = sender.try_send(parsed);
         })
         .ok()?;
-    receiver
-        .recv_timeout(Duration::from_millis(700))
-        .ok()
-        .flatten()
+    receiver.recv_timeout(Duration::from_secs(3)).ok().flatten()
 }
 
 fn inspect(window: &tauri::WebviewWindow) -> Option<LoginSnapshot> {
@@ -572,8 +634,14 @@ fn challenge_window(window: &tauri::WebviewWindow, change: flow::Change, covered
                 let _ =
                     view.set_min_size(Some(tauri::LogicalSize::new(f64::from(w), f64::from(h))));
                 let _ = view.set_size(tauri::LogicalSize::new(f64::from(w), f64::from(h)));
+                #[cfg(target_os = "windows")]
+                if let Ok(handle) = view.hwnd() {
+                    eframe::center_owned_windows_dialog(handle.0 as isize);
+                }
                 if matches!(change, flow::Change::Show(..)) {
-                    let _ = view.center();
+                    if std::env::var_os(PARENT_WINDOW).is_none() {
+                        let _ = view.center();
+                    }
                     let _ = view.show();
                     #[cfg(target_os = "windows")]
                     if let Ok(handle) = view.hwnd() {
@@ -591,8 +659,33 @@ fn challenge_window(window: &tauri::WebviewWindow, change: flow::Change, covered
     });
 }
 
+fn attach_parent(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let Ok(parent) = std::env::var(PARENT_WINDOW) else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    let attached = window
+        .gtk_window()
+        .is_ok_and(|window| eframe::attach_gtk_dialog(&window, &parent));
+    #[cfg(target_os = "windows")]
+    let attached = window.hwnd().is_ok_and(|handle| {
+        let owner_pid = std::env::var(PARENT_PROCESS)
+            .ok()
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or(0);
+        eframe::attach_windows_dialog(handle.0 as isize, &parent, owner_pid)
+    });
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let attached = false;
+    if attached {
+        Ok(())
+    } else {
+        Err("Could not attach VK dialog to its parent".into())
+    }
+}
+
 /// The hidden helper owns VK's real website. Only a human challenge or an
-/// explicit fallback opens its frameless window; the website has no native IPC.
+/// explicit fallback opens its owned dialog; the website has no native IPC.
 pub fn run_helper(language: Language) -> Result<(), String> {
     if std::env::var(CHILD_MARKER).as_deref() != Ok("1") {
         return Err("Start VK sign-in from the application.".into());
@@ -608,6 +701,7 @@ pub fn run_helper(language: Language) -> Result<(), String> {
     let outcome = Arc::new(Mutex::new(None));
     let done = Arc::new(AtomicBool::new(false));
     let revision = Arc::new(AtomicU64::new(0));
+    let completed_revision = Arc::new(AtomicU64::new(u64::MAX));
     let dismissed = Arc::new(AtomicBool::new(false));
     let (commands, receiver) = std::sync::mpsc::sync_channel::<InputCommand>(1);
     thread::Builder::new()
@@ -637,23 +731,37 @@ pub fn run_helper(language: Language) -> Result<(), String> {
     let setup_done = done.clone();
     let setup_outcome = outcome.clone();
     let setup_revision = revision.clone();
+    let setup_completed_revision = completed_revision.clone();
     let app=tauri::Builder::default().setup(move |app| {
         let page_revision=setup_revision.clone();
+        let page_completed_revision = setup_completed_revision.clone();
         let cover=include_str!("tauri_login_cover.js").replace("__STATUS_TEXT__",&serde_json::to_string(language.text("Подключаем VK…","Connecting to VK…")).unwrap());
         let mut builder=WebviewWindowBuilder::new(app,"vk-login",WebviewUrl::External(LOGIN_URL.parse()?))
             .title(language.text("Проверка VK", "VK verification"))
             .inner_size(340.0,400.0).min_inner_size(340.0,400.0).max_inner_size(340.0,400.0)
-            .resizable(false).maximizable(false).decorations(false).skip_taskbar(true)
-            .center().visible(false).focused(false).data_directory(directory)
+            .resizable(false).maximizable(false).minimizable(false).decorations(true).skip_taskbar(true)
+            .visible(false).focused(false).data_directory(directory)
             .devtools(false).general_autofill_enabled(false).user_agent(crate::web_audio::USER_AGENT)
             .initialization_script(cover).initialization_script(bridge_script())
             .on_navigation(navigation_allowed)
-            .on_page_load(move |_, page| {
-                if page.event()==tauri::webview::PageLoadEvent::Started && navigation_allowed(page.url()) {page_revision.fetch_add(1,Ordering::AcqRel);}
+            .on_page_load(move |webview, page| {
+                if !navigation_allowed(page.url()) {
+                    return;
+                }
+                match page.event() {
+                    tauri::webview::PageLoadEvent::Started => {
+                        page_revision.fetch_add(1, Ordering::AcqRel);
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        page_completed_revision.store(page_revision.load(Ordering::Acquire), Ordering::Release);
+                        let _ = webview.eval(bridge_script());
+                    }
+                }
             });
         #[cfg(windows)] { builder=builder.theme(Some(tauri::Theme::Dark)).background_color(tauri::webview::Color(15,17,21,255)); }
         if let Some(icon)=app.default_window_icon() {builder=builder.icon(icon.clone())?;}
         let window=builder.build()?;
+        attach_parent(&window)?;
         let close_window=window.clone();let close_done=setup_done.clone();let close_dismissed=dismissed.clone();
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested{api,..}=event
@@ -665,15 +773,24 @@ pub fn run_helper(language: Language) -> Result<(), String> {
         thread::Builder::new().name("vk-native-sign-in".into()).spawn(move || {
             let mut popup=flow::Popup::default();let mut previous_view=None;let mut previous_session=None;
             let mut retry=Instant::now();let mut loading_since=Instant::now();
+            let mut bridge_retry = Instant::now() - Duration::from_secs(1);
+            let mut inspected_at = Instant::now();
             let mut entry_attempt: Option<(String,u64,u8,Instant)>=None;
             let mut last_good: Option<(u64,LoginSnapshot)>=None;
             while !setup_done.load(Ordering::Acquire) {
                 let epoch=setup_revision.load(Ordering::Acquire);
-                let inspected=inspect(&window).filter(|view|last_good.as_ref().is_none_or(|(at,old)|*at==epoch || old.document!=view.document));
+                let inspected = inspect(&window);
+                if inspected.is_none() && bridge_retry.elapsed() >= Duration::from_secs(1) {
+                    let _ = window.eval(bridge_script());
+                    bridge_retry = Instant::now();
+                }
+                if inspected.is_some() {
+                    inspected_at = Instant::now();
+                }
                 let ready=inspected.is_some();
                 let mut view=if let Some(view)=inspected {
                     last_good=Some((epoch,view.clone()));view
-                } else if let Some((_,previous))=last_good.as_ref().filter(|(at,_)|*at==epoch) {
+                } else if let Some((_,previous))=last_good.as_ref().filter(|(at,_)|*at==epoch && inspected_at.elapsed()<Duration::from_secs(10)) {
                     let mut view=previous.clone();view.busy=true;
                     view
                 } else {LoginSnapshot::default()};
@@ -681,11 +798,23 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 if raw_step!=Step::Loading {loading_since=Instant::now();}
                 // A slow navigation is not an unknown form. Offer the original
                 // page without discarding the password for this explicit attempt.
-                if raw_step==Step::Loading && loading_since.elapsed()>Duration::from_secs(10) {view.open_page_available=true;}
+                if raw_step == Step::Loading && loading_since.elapsed() > Duration::from_secs(10) {
+                    view.open_page_available = true;
+                    view.retry_available = true;
+                }
                 let mut ack=false;let mut open=false;
                 match receiver.try_recv() {
                     Ok(command)=>{
-                        if command.action==Action::OpenPage {open=true;} else {
+                        if command.action == Action::OpenPage {
+                            open = true;
+                        } else if command.action == Action::Reload {
+                            if view.retry_available && command.document == view.document && command.revision == view.revision {
+                                let _ = window.reload();
+                                last_good = None;
+                                loading_since = Instant::now();
+                                view = LoginSnapshot::default();
+                            }
+                        } else {
                             let accepted=ready && setup_revision.load(Ordering::Acquire)==epoch && perform(&window,&command);
                             view=inspect(&window).unwrap_or_default();
                             if !accepted {view.error=true;} else {popup.resume();}
@@ -716,15 +845,21 @@ pub fn run_helper(language: Language) -> Result<(), String> {
                 }
                 // A recognized challenge or credential form must be completed in
                 // VK before a saved cookie can be accepted as a finished login.
-                if ready && raw_step==Step::Loading && !view.document.is_empty() {
-                    let ticket=setup_revision.load(Ordering::Acquire);
+                if flow::can_verify_session(
+                    ready,
+                    epoch,
+                    setup_completed_revision.load(Ordering::Acquire),
+                    raw_step,
+                    &view.document,
+                ) {
+                    let ticket = epoch;
                     let cookies=snapshot(&window);let current=(ticket,fingerprint(&cookies));
                     if has_session(&cookies) && (previous_session!=Some(current) || Instant::now()>=retry) {
                         previous_session=Some(current);retry=Instant::now()+Duration::from_secs(10);
                         let verified=WebAudioClient::new(cookies.clone()).and_then(|client|client.session_profile());
                         let latest=snapshot(&window);
                         let latest_view=inspect(&window);
-                        if setup_revision.load(Ordering::Acquire)!=ticket || !verified_session_matches(&latest,current.1)
+                        if setup_revision.load(Ordering::Acquire)!=ticket || setup_completed_revision.load(Ordering::Acquire)!=ticket || !verified_session_matches(&latest,current.1)
                             || latest_view.as_ref().is_none_or(|v|v.step!=Step::Loading) {previous_session=None;continue;}
                         if let Ok(profile)=verified {
                             let outcome=setup_outcome.clone();let done=setup_done.clone();let revision=setup_revision.clone();let handle=handle.clone();let view=window.clone();
@@ -777,6 +912,17 @@ mod tests {
         bytes.extend(serde_json::to_vec(reply).unwrap());
         bytes
     }
+    #[test]
+    fn helper_final_packet_completes_without_waiting_for_browser_pipe_eof() {
+        let control = Control::default();
+        let mut decoder = ResponseStream::default();
+        let mut bytes = frame(&Reply::Canceled);
+        assert!(!decoder.push(&bytes, &control).unwrap());
+        bytes.push(b'\n');
+        assert!(decoder.push(b"\n", &control).unwrap());
+        assert_eq!(&*decoder.finish().unwrap(), &bytes);
+    }
+
     #[test]
     fn helper_result_is_bounded_and_keeps_credentials_out_of_errors() {
         let reply = Reply::Success {
@@ -912,7 +1058,7 @@ mod tests {
     }
     #[test]
     #[ignore]
-    fn local_hidden_webview_and_frameless_challenge_probe() {
+    fn local_hidden_webview_and_owned_challenge_probe() {
         // Local blank app page + synthetic fields only. Never navigates to VK.
         let directory =
             std::env::temp_dir().join(format!("vk-fast-native-login-probe-{}", std::process::id()));
@@ -923,8 +1069,9 @@ mod tests {
         let app=tauri::Builder::default().any_thread().setup(move |app| {
         let window=WebviewWindowBuilder::new(app,"vk-login",WebviewUrl::App("index.html".into()))
             .title("VK Fast — local UI test").inner_size(340.0,400.0).min_inner_size(340.0,400.0).max_inner_size(340.0,400.0)
-            .decorations(false).resizable(false).skip_taskbar(true).visible(false).focused(false)
+            .decorations(true).resizable(false).skip_taskbar(true).visible(false).focused(false)
             .data_directory(profile).build()?;
+        attach_parent(&window)?;
         let handle=app.handle().clone();
         thread::spawn(move || {
             let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -932,7 +1079,7 @@ mod tests {
                     if evaluate(&window,"document.readyState".into()).is_some_and(|v|v=="complete"){break;}
                     thread::sleep(Duration::from_millis(100));
                 }
-                assert!(!window.is_visible().unwrap());assert!(!window.is_decorated().unwrap());
+                assert!(!window.is_visible().unwrap());assert!(window.is_decorated().unwrap());
                 let html="<form name='EnterPhoneOrMailForm'><input name='login' type='tel'><button type='submit' data-test-id='submit_btn'>Continue</button></form>";
                 let mut setup=format!("document.body.innerHTML={}; document.querySelector('form').onsubmit=e=>{{e.preventDefault();window.fixtureValue=document.querySelector('input').value;}};",serde_json::to_string(html).unwrap());
                 setup.push_str(&include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/src/tauri_login_bridge.mjs")).replace("export function installAuthBridge","function installAuthBridge"));
@@ -985,11 +1132,11 @@ mod tests {
                 assert_eq!(view.step,Step::Captcha,"Local fixture visibility: {diagnostic:?}");
                 let mut popup=flow::Popup::default();challenge_window(&window,popup.update(&view,false,false),false);
                 thread::sleep(Duration::from_millis(600));
-                assert!(window.is_visible().unwrap());assert!(!window.is_decorated().unwrap());
+                assert!(window.is_visible().unwrap());assert!(window.is_decorated().unwrap());
                 let size=window.inner_size().unwrap();let scale=window.scale_factor().unwrap();
                 let width=size.width as f64/scale;let height=size.height as f64/scale;
                 assert!(width<=640.0 && height<=800.0,"Compositor expanded the challenge to {width}×{height}");
-                eprintln!("Local popup: {width}×{height}, decorations=false; hidden identifier and delayed password submission passed");
+                eprintln!("Local popup: {width}×{height}, decorations=true; hidden identifier and delayed password submission passed");
                 challenge_window(&window,flow::Change::Hide,true);
                 thread::sleep(Duration::from_millis(200));assert!(!window.is_visible().unwrap());
             }));

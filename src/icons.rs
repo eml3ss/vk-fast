@@ -20,6 +20,7 @@ pub enum Icon {
     Previous,
     Next,
     Volume(u8),
+    VolumeMuted,
     Settings,
     Interface,
     Storage,
@@ -48,7 +49,10 @@ pub enum Icon {
 
 impl Icon {
     pub fn volume(volume: f32) -> Self {
-        let waves = if !volume.is_finite() || volume <= 0.0 {
+        if !volume.is_finite() || volume <= 0.0 {
+            return Self::VolumeMuted;
+        }
+        let waves = if volume <= 0.2 {
             0
         } else if volume <= 0.5 {
             1
@@ -480,7 +484,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             polygon(&[(3.5, 3.5), (17.5, 12.0), (3.5, 20.5)], 2.5);
         }
-        Icon::Volume(waves) => {
+        Icon::Volume(_) | Icon::VolumeMuted => {
             let body = rounded_path(
                 &[
                     point(3.0, 8.5),
@@ -498,17 +502,22 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 color,
                 painter.ctx().pixels_per_point(),
             )));
-            for (radius_x, radius_y) in [(5.0, 7.0), (8.0, 10.0)]
-                .into_iter()
-                .take(usize::from(waves.min(2)))
-            {
-                let points = (0..=20)
-                    .map(|index| {
-                        let angle = (-45.0 + 90.0 * index as f32 / 20.0).to_radians();
-                        point(13.0 + radius_x * angle.cos(), 12.0 + radius_y * angle.sin())
-                    })
-                    .collect();
-                rounded_stroke(painter, points, stroke, 0.0);
+            if matches!(icon, Icon::VolumeMuted) {
+                line(&[(16.0, 9.5), (21.0, 14.5)]);
+                line(&[(16.0, 14.5), (21.0, 9.5)]);
+            } else if let Icon::Volume(waves) = icon {
+                for (radius_x, radius_y) in [(5.0, 7.0), (8.0, 10.0)]
+                    .into_iter()
+                    .take(usize::from(waves.min(2)))
+                {
+                    let points = (0..=20)
+                        .map(|index| {
+                            let angle = (-45.0 + 90.0 * index as f32 / 20.0).to_radians();
+                            point(13.0 + radius_x * angle.cos(), 12.0 + radius_y * angle.sin())
+                        })
+                        .collect();
+                    rounded_stroke(painter, points, stroke, 0.0);
+                }
             }
         }
         Icon::Library => {
@@ -868,7 +877,14 @@ pub fn toggle_button_sized(
         };
         paint(
             ui.painter(),
-            Rect::from_center_size(rect.center(), Vec2::splat(20.0)),
+            Rect::from_center_size(
+                rect.center(),
+                Vec2::splat(if matches!(icon, Icon::Lyrics) {
+                    22.0
+                } else {
+                    20.0
+                }),
+            ),
             icon,
             color,
         );
@@ -1043,6 +1059,7 @@ mod tests {
             Icon::Previous,
             Icon::Next,
             Icon::Volume(2),
+            Icon::VolumeMuted,
             Icon::Settings,
             Icon::Interface,
             Icon::Storage,
@@ -1450,7 +1467,14 @@ mod tests {
 
     #[test]
     fn volume_waves_follow_the_master_level_and_have_compact_vertical_spread() {
-        for (volume, count) in [(0.0, 0), (0.1, 1), (0.5, 1), (0.51, 2), (1.0, 2)] {
+        for (volume, count) in [
+            (0.01, 0),
+            (0.2, 0),
+            (0.21, 1),
+            (0.5, 1),
+            (0.51, 2),
+            (1.0, 2),
+        ] {
             let (_, output, rect) = render(Icon::volume(volume), 24.0);
             let waves: Vec<_> = output
                 .shapes
@@ -1483,8 +1507,20 @@ mod tests {
     }
 
     #[test]
+    fn muted_volume_has_a_cross_but_quiet_audible_volume_has_a_plain_speaker() {
+        assert!(matches!(Icon::volume(0.0), Icon::VolumeMuted));
+        assert!(matches!(Icon::volume(0.01), Icon::Volume(0)));
+        for (volume, cross) in [(0.0, true), (0.01, false)] {
+            let (context, output, rect) = render(Icon::volume(volume), 24.0);
+            let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+            let point = rect.min + egui::vec2(18.5, 12.0);
+            assert_eq!(alpha_at(&primitives, point) > 230.0, cross);
+        }
+    }
+
+    #[test]
     fn microphone_ink_is_centered_in_the_shared_player_icon_box() {
-        for size in [20.0, 24.0] {
+        for size in [20.0, 22.0, 24.0] {
             let (context, output, rect) = render(Icon::Lyrics, size);
             let primitives = context.tessellate(output.shapes, output.pixels_per_point);
             let mut mass = 0.0;

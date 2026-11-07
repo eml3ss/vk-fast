@@ -1,5 +1,17 @@
 //! Only human verification opens the webview; ordinary forms stay in egui.
 use crate::web_login_state::{Snapshot, Step};
+
+/// Render recognized forms immediately, even before native ContentLoading.
+/// Cookie verification waits for a completed navigation and no active form.
+pub fn can_verify_session(
+    ready: bool,
+    epoch: u64,
+    completed_epoch: u64,
+    step: Step,
+    document: &str,
+) -> bool {
+    ready && epoch == completed_epoch && step == Step::Loading && !document.is_empty()
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
     None,
@@ -73,6 +85,60 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_early_document_answer_is_unblocked_after_native_load_completion() {
+        assert!(!can_verify_session(
+            true,
+            0,
+            u64::MAX,
+            Step::Loading,
+            "new-document"
+        ));
+        assert!(!can_verify_session(
+            true,
+            1,
+            u64::MAX,
+            Step::Loading,
+            "new-document"
+        ));
+        assert!(can_verify_session(
+            true,
+            1,
+            1,
+            Step::Loading,
+            "new-document"
+        ));
+    }
+
+    #[test]
+    fn another_navigation_or_a_human_challenge_prevents_cookie_acceptance() {
+        assert!(!can_verify_session(
+            true,
+            2,
+            1,
+            Step::Loading,
+            "old-document"
+        ));
+        for step in [
+            Step::Identifier,
+            Step::Password,
+            Step::Code,
+            Step::Captcha,
+            Step::Manual,
+            Step::Approval,
+        ] {
+            assert!(!can_verify_session(true, 2, 2, step, "current-document"));
+        }
+        assert!(!can_verify_session(
+            false,
+            2,
+            2,
+            Step::Loading,
+            "current-document"
+        ));
+        assert!(!can_verify_session(true, 2, 2, Step::Loading, ""));
+    }
     #[test]
     fn hidden_forms_and_single_captcha_popup_preserve_human_control() {
         let mut p = Popup::default();

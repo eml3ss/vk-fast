@@ -164,6 +164,26 @@ default-features = false
 [dependencies.raw-window-handle]
 version = "0.6.2"
 
+[target.'cfg(target_os = "linux")'.dependencies.gtk]
+version = "0.18"
+
+[target.'cfg(target_os = "linux")'.dependencies.gdkx11]
+version = "0.18"
+
+[target.'cfg(target_os = "linux")'.dependencies.gdkwayland-sys]
+version = "0.18"
+
+[target.'cfg(target_os = "linux")'.dependencies.wayland-client]
+version = "0.31"
+
+[target.'cfg(target_os = "linux")'.dependencies.wayland-backend]
+version = "0.3"
+features = ["client_system"]
+
+[target.'cfg(target_os = "linux")'.dependencies.wayland-protocols]
+version = "0.32"
+features = ["client", "unstable"]
+
 [dependencies.ron]
 version = "0.12.2"
 features = ["integer128"]
@@ -220,6 +240,7 @@ features = [
     "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Accessibility",
     "Win32_UI_Shell",

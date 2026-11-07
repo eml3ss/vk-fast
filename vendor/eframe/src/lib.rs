@@ -166,6 +166,17 @@ mod epi;
 // Re-export everything in `epi` so `eframe` users don't have to care about what `epi` is:
 pub use epi::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod native_dialog;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_dialog::{NativeDialogParent, NativeDialogParentHandle};
+#[cfg(target_os = "linux")]
+pub use native_dialog::attach_gtk_dialog;
+#[cfg(target_os = "windows")]
+pub use native_dialog::{attach_windows_dialog, center_owned_windows_dialog};
+#[cfg(target_os = "windows")]
+pub use native_dialog::windows_pipe_available;
+
 /// Let a running desktop process activate its window after this process was
 /// launched by user input. This does not activate a window by itself.
 ///
