@@ -1284,10 +1284,14 @@ mod tests {
                 assert!(activity(&mut stream).is_null());
             });
             let rpc = client(path);
+            let published = Instant::now();
             rpc.publish(snapshot("Track", 10.0, State::Playing));
             let first = receive(&rx);
             for _ in 0..50 {
-                rpc.publish(snapshot("Track", 10.3, State::Playing));
+                // Playback advances with wall time; only the 0.3 s jitter is
+                // left, so a slow test host cannot turn this into a seek.
+                let position = 10.3 + published.elapsed().as_secs_f64();
+                rpc.publish(snapshot("Track", position, State::Playing));
             }
             assert_eq!(receive(&rx), "quiet");
             rpc.publish(snapshot("Track", 90.0, State::Playing));

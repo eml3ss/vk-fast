@@ -2869,20 +2869,21 @@ impl MusicApp {
         self.start_job(ctx, move || {
             let mut refreshed = None;
             let page = if let Some(music) = music {
-                if refresh {
-                    let profile = music.refresh_profile(owner_id).map_err(UiError::Music)?;
-                    if profile.id != owner_id {
-                        return Err(UiError::Music(WebAudioError::WrongAccount));
+                let mut load = || {
+                    if refresh {
+                        let profile = music.refresh_profile(owner_id)?;
+                        if profile.id != owner_id {
+                            return Err(WebAudioError::WrongAccount);
+                        }
+                        let cache_warning = !write_profile_metadata(&profile);
+                        refreshed = Some(RefreshedProfile {
+                            profile,
+                            cache_warning,
+                        });
                     }
-                    let cache_warning = !write_profile_metadata(&profile);
-                    refreshed = Some(RefreshedProfile {
-                        profile,
-                        cache_warning,
-                    });
-                }
-                music
-                    .page_batch(owner_id, offset, 100)
-                    .map_err(UiError::Music)
+                    music.page_batch(owner_id, offset, 100)
+                };
+                load().map_err(|error| UiError::Music(music.confirm_expired(owner_id, error)))
             } else if let Some(client) = client {
                 client.audio_page(owner_id, offset).map_err(UiError::Vk)
             } else {
@@ -4339,7 +4340,9 @@ impl MusicApp {
         match thread::Builder::new()
             .name("vk-playlists".into())
             .spawn(move || {
-                let result = client.playlists(owner, &worker_cancel);
+                let result = client
+                    .playlists(owner, &worker_cancel)
+                    .map_err(|error| client.confirm_expired(owner, error));
                 let _ = sender.send(result);
                 ctx.request_repaint();
             }) {
@@ -4594,7 +4597,10 @@ impl MusicApp {
         match thread::Builder::new()
             .name("vk-home".into())
             .spawn(move || {
-                let result = client.home(owner, &worker_cancel).map(HomeReply::Catalog);
+                let result = client
+                    .home(owner, &worker_cancel)
+                    .map(HomeReply::Catalog)
+                    .map_err(|error| client.confirm_expired(owner, error));
                 let _ = sender.send(result);
                 ctx.request_repaint();
             }) {
@@ -4649,7 +4655,8 @@ impl MusicApp {
             .spawn(move || {
                 let result = client
                     .playlist_tracks(owner, &source, &worker_cancel)
-                    .map(|tracks| HomeReply::Tracks(id, tracks));
+                    .map(|tracks| HomeReply::Tracks(id, tracks))
+                    .map_err(|error| client.confirm_expired(owner, error));
                 let _ = sender.send(result);
                 ctx.request_repaint();
             }) {

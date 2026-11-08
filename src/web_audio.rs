@@ -60,6 +60,9 @@ pub enum WebAudioError {
     NoSession,
     Expired,
     TokenExpired,
+    /// VK's anti-bot or rate-limit check, or a request that failed while the
+    /// website session was confirmed alive. The sign-in is kept.
+    Temporary,
     WrongAccount,
     Unverified,
     Network,
@@ -89,6 +92,10 @@ impl WebAudioError {
             Self::TokenExpired => language.text(
                 "Не удалось обновить ключ музыки VK. Повторите попытку.",
                 "Could not refresh the VK music key. Try again.",
+            ),
+            Self::Temporary => language.text(
+                "VK временно не выполнил запрос. Вход сохранён — повторите чуть позже.",
+                "VK temporarily did not complete the request. You are still signed in; try again shortly.",
             ),
             Self::WrongAccount => language.text(
                 "Сессия VK не соответствует подтверждённому аккаунту. Повторите вход по QR-коду.",
@@ -517,6 +524,32 @@ fn token_body(response: Response) -> Result<Zeroizing<String>, WebAudioError> {
     })
 }
 
+/// VK answers suspicious or too frequent traffic with a same-site redirect to
+/// its anti-bot check (`/challenge.html`, formerly `/429.html`). Unlike a
+/// redirect to the sign-in pages, that does not mean the session ended.
+fn is_challenge(url: &reqwest::Url, host: &str) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(host)
+        && matches!(url.path(), "/challenge.html" | "/429.html")
+}
+
+fn redirect_error_at(request: &reqwest::Url, location: Option<&str>, host: &str) -> WebAudioError {
+    let target = location.and_then(|location| request.join(location).ok());
+    if target.is_some_and(|target| is_challenge(&target, host)) {
+        WebAudioError::Temporary
+    } else {
+        WebAudioError::Expired
+    }
+}
+
+fn redirect_error(response: &Response, host: &str) -> WebAudioError {
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|header| header.to_str().ok());
+    redirect_error_at(response.url(), location, host)
+}
+
 impl WebAudioClient {
     pub fn new(cookies: Vec<SessionCookie>) -> Result<Self, WebAudioError> {
         if cookies.len() > 256 || cookies.iter().any(|c| !valid_cookie(c)) {
@@ -682,6 +715,54 @@ impl WebAudioClient {
         }
     }
 
+    /// Before the app signs out on `Expired`, ask the website's own viewer page
+    /// whether the session really ended. A redirect or relogin code from one
+    /// music request is also how VK reports anti-bot checks and transient
+    /// failures. Call it on a worker thread: it may perform one HTTP request.
+    pub fn confirm_expired(&self, owner: i64, error: WebAudioError) -> WebAudioError {
+        if error != WebAudioError::Expired {
+            return error;
+        }
+        self.confirm_expired_request(owner, || self.fetch_viewer())
+    }
+
+    fn confirm_expired_request(
+        &self,
+        owner: i64,
+        fetch: impl FnOnce() -> Result<Profile, WebAudioError>,
+    ) -> WebAudioError {
+        let result = fetch();
+        let outcome = match &result {
+            Ok(profile) if profile.id == owner && owner > 0 => {
+                // A failed viewer refresh may have invalidated verification;
+                // restore it only when nothing else verified meanwhile.
+                let restored = self.state.lock().is_ok_and(|mut state| {
+                    if state.verified_owner.is_none() {
+                        state.verified_owner = Some(owner);
+                        state.generation = state.generation.wrapping_add(1);
+                        state.cursor = None;
+                        state.streams.clear();
+                        state.mix = None;
+                    }
+                    state.verified_owner == Some(owner)
+                });
+                if restored {
+                    WebAudioError::Temporary
+                } else {
+                    WebAudioError::WrongAccount
+                }
+            }
+            Ok(_) => WebAudioError::WrongAccount,
+            Err(error @ (WebAudioError::Expired | WebAudioError::NoSession)) => error.clone(),
+            // Network failures, anti-bot checks or an unreadable page do not
+            // prove a sign-out; keep the session and report the failure.
+            Err(WebAudioError::Unverified | WebAudioError::Format) => WebAudioError::Temporary,
+            Err(other) => other.clone(),
+        };
+        crate::diagnostics::event("session", &format!("expired_recheck result={outcome:?}"));
+        outcome
+    }
+
     fn reset_verification(&self) -> Result<(), WebAudioError> {
         let mut state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
         state.verified_owner = None;
@@ -728,6 +809,9 @@ impl WebAudioClient {
                     .and_then(|h| h.to_str().ok())
                     .ok_or(WebAudioError::Expired)?;
                 let target = url.join(location).map_err(|_| WebAudioError::Expired)?;
+                if is_challenge(&target, self.host) {
+                    return Err(WebAudioError::Temporary);
+                }
                 if target.scheme() != "https"
                     || target.host_str() != Some(self.host)
                     || target.port_or_known_default() != Some(443)
@@ -885,7 +969,7 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(redirect_error(&response, self.host));
         }
         parse_page(&body(response)?)
     }
@@ -2459,7 +2543,7 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(redirect_error(&response, self.host));
         }
         let text = body(response)?;
         if canceled.load(Ordering::Acquire) {
@@ -2605,7 +2689,7 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(redirect_error(&response, self.host));
         }
         let row = parse_reload_row(&body(response)?, key)?;
         lookup.check()?;
@@ -2666,7 +2750,7 @@ impl WebAudioClient {
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
-            return Err(WebAudioError::Expired);
+            return Err(redirect_error(&response, self.host));
         }
         let text = body(response)?;
         parse_reload(&text, key, viewer)
@@ -7287,6 +7371,64 @@ mod track_mix_tests {
         assert_eq!(state.verified_owner, Some(42));
         assert!(state.generation > generation);
         assert!(state.mix.is_none() && state.cursor.is_none() && state.streams.is_empty());
+    }
+
+    #[test]
+    fn anti_bot_redirects_keep_the_session_but_sign_in_redirects_expire_it() {
+        let request = reqwest::Url::parse("https://vk.ru/al_audio.php").unwrap();
+        for location in [
+            "/challenge.html?hash429=synthetic&redirect429=%2Faudios42",
+            "https://vk.ru/429.html?hash429=synthetic",
+        ] {
+            assert_eq!(
+                redirect_error_at(&request, Some(location), "vk.ru"),
+                WebAudioError::Temporary
+            );
+        }
+        for location in [
+            Some("https://login.vk.ru/?act=login"),
+            Some("https://evil.example.test/challenge.html"),
+            Some("http://vk.ru/challenge.html"),
+            Some("/login?to=YXVkaW9z"),
+            None,
+        ] {
+            assert_eq!(
+                redirect_error_at(&request, location, "vk.ru"),
+                WebAudioError::Expired
+            );
+        }
+    }
+
+    #[test]
+    fn expired_music_requests_sign_out_only_after_the_viewer_page_confirms_it() {
+        let client = client();
+        assert_eq!(
+            client.confirm_expired(42, WebAudioError::Network),
+            WebAudioError::Network
+        );
+        // The session is alive: keep it and restore a verification that a
+        // failed refresh invalidated.
+        client.reset_verification().unwrap();
+        assert_eq!(
+            client.confirm_expired_request(42, || Ok(profile(42))),
+            WebAudioError::Temporary
+        );
+        assert_eq!(client.state.lock().unwrap().verified_owner, Some(42));
+        for (fetched, expected) in [
+            (Err(WebAudioError::Unverified), WebAudioError::Temporary),
+            (Err(WebAudioError::Temporary), WebAudioError::Temporary),
+            (Err(WebAudioError::Timeout), WebAudioError::Timeout),
+            (Err(WebAudioError::Expired), WebAudioError::Expired),
+            (Err(WebAudioError::NoSession), WebAudioError::NoSession),
+            (Ok(profile(99)), WebAudioError::WrongAccount),
+        ] {
+            assert_eq!(client.confirm_expired_request(42, || fetched), expected);
+        }
+        client.accept_profile(99).unwrap();
+        assert_eq!(
+            client.confirm_expired_request(42, || Ok(profile(42))),
+            WebAudioError::WrongAccount
+        );
     }
 
     #[test]

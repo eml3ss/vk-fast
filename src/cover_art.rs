@@ -1175,7 +1175,7 @@ mod tests {
             40.0,
             ColorImage::filled([96, 96], Color32::BLUE),
         );
-        let output = context.run_ui(
+        let mut output = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1193,6 +1193,7 @@ mod tests {
                 );
             },
         );
+        output.textures_delta.clear();
         assert!(
             output.shapes.iter().any(
                 |shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.brush.is_some())

@@ -369,7 +369,7 @@ mod tests {
         for align in [egui::Align::Min, egui::Align::Center] {
             let context = egui::Context::default();
             install(&context);
-            let output = context.run_ui(
+            let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -387,6 +387,7 @@ mod tests {
                     );
                 },
             );
+            output.textures_delta.clear();
             let galley = output
                 .shapes
                 .iter()
