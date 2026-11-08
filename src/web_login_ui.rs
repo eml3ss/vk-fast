@@ -311,14 +311,19 @@ pub fn show(ctx: &egui::Context, state: &mut State, control: &Control, language:
                     }
                 }
                 if view.error {
-                    text(
-                        ui,
-                        278.0,
-                        26.0,
+                    let message = if view.error_text.is_empty() {
                         t(
                             "Проверьте данные и повторите вход.",
                             "Check your details and try again.",
-                        ),
+                        )
+                    } else {
+                        view.error_text.as_str()
+                    };
+                    text(
+                        ui,
+                        276.0,
+                        32.0,
+                        message,
                         12.0,
                         Color32::from_rgb(255, 158, 153),
                     );

@@ -65,9 +65,25 @@ function command(f,action,value=''){const s=f.api.snapshot();return {document:s.
  assert.equal(f.api.snapshot().step,'password');
  assert.equal(f.api.snapshot().busy,false,'An empty password disables Continue, not the native password field');
  assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);
- assert.equal(f.values.get(field),'synthetic-password');
+ assert.equal(f.values.get(field),undefined,'A password form that has just appeared settles before it is filled');
+ f.tick();assert.equal(f.values.get(field),'synthetic-password');
  f.tick();f.tick();assert.equal(submit.clicks,0,'Wait for website validation without bypassing disabled');
  submit.disabled=false;f.flush();assert.equal(submit.clicks,1);
+}
+{
+ const f=fixture('id.vk.ru','/auth'),field=new f.Input({type:'password'}),submit=new f.Element('button',{type:'submit'},'Continue');f.set([field,submit]);
+ f.api.snapshot();f.advance(1500);
+ assert.equal(f.api.perform(command(f,'submit','synthetic-password')),true);
+ assert.equal(f.values.get(field),'synthetic-password','A password form shown for a while is filled at once');
+}
+{
+ const f=fixture('id.vk.ru','/auth'),form=new f.Element('form'),field=new f.Input({type:'password','aria-invalid':'true','aria-label':'Enter password'}),submit=new f.Element('button',{type:'submit'},'Continue');
+ const alert=new f.Element('div',{role:'alert'},'  Wrong\n  password  ');
+ field.form=submit.form=alert.form=form;f.set([form,field,submit,alert]);
+ const state=f.api.snapshot();assert.equal(state.error,true);assert.equal(state.error_text,'Wrong password');
+ alert.hidden=true;assert.equal(f.api.snapshot().error_text,'','Hidden messages and field labels are not reported');
+ alert.hidden=false;alert.textContent='x'.repeat(161);assert.equal(f.api.snapshot().error_text,'','Long page text is not reported as an error');
+ f.set([form,field,submit]);field.attrs['aria-invalid']='false';assert.equal(f.api.snapshot().error_text,'');
 }
 {
  for(const change of ['replacement','captcha','locked','validation-failed']) {

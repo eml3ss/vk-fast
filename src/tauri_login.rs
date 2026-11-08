@@ -312,8 +312,12 @@ impl ResponseStream {
                                 crate::diagnostics::event(
                                     "sign-in",
                                     &format!(
-                                        "step={:?} busy={} error={} stalled={}",
-                                        view.step, view.busy, view.error, view.retry_available
+                                        "step={} busy={} error={} vk_message={} stalled={}",
+                                        step_name(view.step),
+                                        view.busy,
+                                        view.error,
+                                        !view.error_text.is_empty(),
+                                        view.retry_available
                                     ),
                                 );
                             }
@@ -596,6 +600,23 @@ fn evaluate(window: &tauri::WebviewWindow, script: String) -> Option<serde_json:
         })
         .ok()?;
     receiver.recv_timeout(Duration::from_secs(3)).ok().flatten()
+}
+
+/// The log filter drops any line that mentions passwords, which used to hide
+/// every event of that sign-in step.
+fn step_name(step: Step) -> &'static str {
+    match step {
+        Step::Loading => "loading",
+        Step::Entry => "entry",
+        Step::Identifier => "identifier",
+        Step::Password => "secret-form",
+        Step::Code => "code",
+        Step::Approval => "approval",
+        Step::Methods => "methods",
+        Step::Captcha => "captcha",
+        Step::Manual => "manual",
+        Step::Finishing => "finishing",
+    }
 }
 
 fn inspect(window: &tauri::WebviewWindow) -> Option<LoginSnapshot> {

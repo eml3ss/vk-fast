@@ -33,6 +33,10 @@ pub struct Snapshot {
     pub busy: bool,
     #[serde(default)]
     pub error: bool,
+    /// VK's own short message for a rejected form, shown instead of the
+    /// generic hint. Never logged.
+    #[serde(default)]
+    pub error_text: String,
     #[serde(default)]
     pub code_length: u8,
     #[serde(default)]
@@ -61,6 +65,8 @@ impl Snapshot {
             && (!self.document.is_empty()
                 || matches!(self.step, Step::Loading | Step::Manual | Step::Finishing))
             && self.code_length <= 16
+            && self.error_text.chars().count() <= 160
+            && !self.error_text.chars().any(char::is_control)
             && self.width <= 1200
             && self.height <= 1200
     }
@@ -465,6 +471,18 @@ mod tests {
             c.publish(view(Step::Password, 5));
             assert!(c.take_command().is_none());
         }
+    }
+
+    #[test]
+    fn vk_error_messages_are_short_single_line_text() {
+        let mut snapshot = view(Step::Password, 1);
+        snapshot.error = true;
+        snapshot.error_text = "Неверный пароль".into();
+        assert!(snapshot.valid());
+        snapshot.error_text = "x".repeat(161);
+        assert!(!snapshot.valid());
+        snapshot.error_text = "first\nsecond".into();
+        assert!(!snapshot.valid());
     }
 
     #[test]

@@ -6,7 +6,7 @@ export function installAuthBridge({window, document, location, getComputedStyle,
   if (location.protocol !== 'https:' || !hosts.includes(location.hostname)) return;
   if (window.__vkFastAuth) return;
   const documentId = globalThis.crypto?.randomUUID?.() || `doc-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const ids = new WeakMap(); let nextId=0, revision=0, signature='', formSignature='', pending=0, pendingSignature='', attempt=0;
+  const ids = new WeakMap(); let nextId=0, revision=0, signature='', formSignature='', formSince=0, pending=0, pendingSignature='', attempt=0;
   const id = node => { if (!node) return 0; if (!ids.has(node)) ids.set(node,++nextId); return ids.get(node); };
   const visible = el => {
     if(!el || !el.isConnected)return false;
@@ -44,6 +44,18 @@ export function installAuthBridge({window, document, location, getComputedStyle,
     const box=card?.getBoundingClientRect();
     return {node:widget||frame||checkbox,width:Math.round(Math.max(340,Math.min(620,(box?.width||336)+32))),height:Math.round(Math.max(400,Math.min(780,(box?.height||430)+32)))};
   }
+  // VK's own wording for a rejected form ("wrong password", "too many
+  // attempts"). Only visible message text is read, never a field's value.
+  function errorMessage(errors,scope) {
+    const described=errors.flatMap(el=>[el.getAttribute('aria-describedby'),el.getAttribute('aria-errormessage')].join(' ').split(/\s+/).filter(Boolean).map(name=>document.getElementById?.(name)));
+    const candidates=[...errors.filter(el=>el.tagName!=='INPUT'),...described,...all('[class*="error"],[class*="Error"],[class*="status"],[class*="Status"]',scope)];
+    for(const el of candidates) {
+      if(!el || !visible(el) || el.querySelector?.('input,textarea,select,button,iframe'))continue;
+      const message=(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();
+      if(message && message.length<=160)return message;
+    }
+    return '';
+  }
   function inspect() {
     const cap=captcha(); if(cap)return {step:'captcha',fields:[],cap};
     if(!authRoute())return {step:'loading',fields:[]};
@@ -78,13 +90,15 @@ export function installAuthBridge({window, document, location, getComputedStyle,
     const consent=all('input[type="checkbox"]',scope).some(el=>el.getAttribute('data-test-id')!=='save_user_chk' && (el.required || /agree|consent|terms|policy|offer/i.test([el.name,el.id].join(' '))));
     const registration=/зарегистр|создать (?:новый )?аккаунт|регистрация|sign up|create (?:an? |your |new )?account/i;
     if(consent || (submit && registration.test(text(submit))))return {step:'manual',fields:[]};
-    const error=all('[aria-invalid="true"],[role="alert"],[data-test-id*="error"],[data-testid*="error"],[class*="FormItem__statusError"],[class*="TextField__error"]',scope).length>0;
+    const errors=all('[aria-invalid="true"],[role="alert"],[data-test-id*="error"],[data-testid*="error"],[class*="FormItem__statusError"],[class*="TextField__error"]',scope);
+    const error=errors.length>0;
     if(step==='loading' && (password||other))step='methods';
-    return {step,fields:active,entry,submit,password,other,back,error,scope};
+    return {step,fields:active,entry,submit,password,other,back,error,errorText:error?errorMessage(errors,scope):'',scope};
   }
   function snapshot() {
     const info=inspect();
-    formSignature=[info.step,...info.fields.map(el=>`${id(el)}-${el.maxLength}`),id(info.entry),id(info.cap?.node)].join(':');
+    const nextForm=[info.step,...info.fields.map(el=>`${id(el)}-${el.maxLength}`),id(info.entry),id(info.cap?.node)].join(':');
+    if(nextForm!==formSignature){formSignature=nextForm;formSince=now();}
     const next=`${formSignature}:${!!info.error}`;
     if(next!==signature){signature=next;revision++;}
     const elapsed=now()-pending;
@@ -93,7 +107,7 @@ export function installAuthBridge({window, document, location, getComputedStyle,
     const busy=(pending && (elapsed<250 || (formSignature===pendingSignature && !info.error && elapsed<8000))) || disabled(info.entry) || locked(info);
     let length=info.fields.length>1?info.fields.length:info.fields[0]?.maxLength;
     if(!(length>=4&&length<=16))length=6;
-    return {document:documentId,revision,step:info.step,busy:Boolean(busy),error:!!info.error,code_length:info.step==='code'?length:0,password_option:!!info.password,other_option:!!info.other,back_option:!!info.back,width:info.cap?.width||0,height:info.cap?.height||0};
+    return {document:documentId,revision,step:info.step,busy:Boolean(busy),error:!!info.error,error_text:info.errorText||'',code_length:info.step==='code'?length:0,password_option:!!info.password,other_option:!!info.other,back_option:!!info.back,width:info.cap?.width||0,height:info.cap?.height||0};
   }
   const setValue = (el,value) => {
     const descriptor=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
@@ -112,7 +126,10 @@ export function installAuthBridge({window, document, location, getComputedStyle,
     if(info.step==='code' && (!/^\d+$/.test(command.value) || command.value.length!==current.code_length))return false;
     let value=command.value;command.value='';
     pending=now();pendingSignature=formSignature;
-    const activeAttempt=++attempt, submitBy=now()+5000;
+    // A password form that has just appeared is not submitted instantly:
+    // VK can reject a password sent in the same moment its page loads.
+    const settle=info.step==='password'?Math.max(0,formSince+1200-now()):0;
+    const activeAttempt=++attempt, submitBy=now()+settle+5000;
     const fill=()=>{
       if(activeAttempt!==attempt || now()>submitBy){value='';return;}
       const currentForm=inspect();
@@ -140,7 +157,8 @@ export function installAuthBridge({window, document, location, getComputedStyle,
       const tab=bySelector(value.includes('@')?'[data-test-id="email-id"]':'[data-test-id="phone-id"]');
       if(tab)tab.click();
       setTimeout(fill,0);
-    } else fill();
+    } else if(settle>0)setTimeout(fill,settle);
+    else fill();
     return true;
   }
   window.__vkFastAuth={snapshot,perform};
