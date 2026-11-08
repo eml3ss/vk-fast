@@ -290,8 +290,10 @@ impl Service {
     }
 }
 
-/// The chosen source, then the other synced one (VK or Musixmatch), then
-/// Genius, each only when enabled. The chosen source's error is reported.
+/// The chosen source as it comes; then the other synced source (VK or
+/// Musixmatch) only with timings; then Genius; and last the other source's
+/// plain lyrics. E.g. Musixmatch -> VK with timings -> Genius -> plain VK.
+/// Each fallback runs only when enabled; the chosen source's error is kept.
 fn resolve_sources(
     source: Source,
     other: bool,
@@ -299,24 +301,43 @@ fn resolve_sources(
     canceled: &impl Fn() -> bool,
     mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
 ) -> Result<Arc<Lyrics>, Error> {
-    let fallbacks = [
-        source.other().filter(|_| other),
-        (genius && source != Source::Genius).then_some(Source::Genius),
-    ];
     let mut first = None;
-    for source in std::iter::once(source).chain(fallbacks.into_iter().flatten()) {
+    let mut fail = |error| {
+        first.get_or_insert(error);
+    };
+    if canceled() {
+        return Err(Error::Canceled);
+    }
+    match fetch(source) {
+        Err(Error::Canceled) => return Err(Error::Canceled),
+        Err(error) => fail(error),
+        found => return found,
+    }
+    let mut plain = None;
+    if let Some(other) = source.other().filter(|_| other) {
         if canceled() {
             return Err(Error::Canceled);
         }
-        match fetch(source) {
+        match fetch(other) {
             Err(Error::Canceled) => return Err(Error::Canceled),
-            Err(error) => {
-                first.get_or_insert(error);
-            }
-            result => return result,
+            Err(error) => fail(error),
+            Ok(lyrics) if lyrics.synced || lyrics.instrumental => return Ok(lyrics),
+            Ok(lyrics) => plain = Some(lyrics),
         }
     }
-    Err(first.unwrap_or(Error::NotFound))
+    if genius && source != Source::Genius {
+        if canceled() {
+            return Err(Error::Canceled);
+        }
+        match fetch(Source::Genius) {
+            Err(Error::Canceled) => return Err(Error::Canceled),
+            Err(error) => fail(error),
+            found => return found,
+        }
+    }
+    plain
+        .map(Ok)
+        .unwrap_or_else(|| Err(first.unwrap_or(Error::NotFound)))
 }
 
 fn fetch_source(
@@ -557,6 +578,25 @@ mod tests {
             .unwrap_err();
             assert_eq!(error, Error::NotFound);
             assert_eq!(calls, [source, other, Source::Genius]);
+            // The other source's plain lyrics wait until Genius has failed.
+            for genius_found in [true, false] {
+                calls.clear();
+                let found = resolve_sources(source, true, true, &|| false, |source| {
+                    calls.push(source);
+                    match source {
+                        Source::Genius if genius_found => {
+                            Ok(Arc::new(super::super::test_data(3, false)))
+                        }
+                        source if source == other => {
+                            Ok(Arc::new(super::super::test_data(2, false)))
+                        }
+                        _ => Err(Error::NotFound),
+                    }
+                })
+                .unwrap();
+                assert_eq!(calls, [source, other, Source::Genius]);
+                assert_eq!(found.lines.len(), if genius_found { 3 } else { 2 });
+            }
         }
     }
 
