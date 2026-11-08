@@ -577,6 +577,13 @@ struct LikeRequest {
     receiver: Receiver<Result<LibraryChange, WebAudioError>>,
 }
 
+struct DislikeRequest {
+    owner: i64,
+    key: (i64, i64),
+    dislike: bool,
+    receiver: Receiver<Result<(), WebAudioError>>,
+}
+
 struct PlaylistAddRequest {
     owner: i64,
     source: Track,
@@ -1130,6 +1137,9 @@ pub struct MusicApp {
     metadata_request: Option<MetadataRequest>,
     metadata_attempted: HashSet<(i64, i64)>,
     like_request: Option<LikeRequest>,
+    dislike_request: Option<DislikeRequest>,
+    /// Tracks marked "Не нравится" during this session.
+    disliked: HashSet<(i64, i64)>,
     like_aliases: HashMap<(i64, i64), (i64, i64)>,
     removed_from_library: HashSet<(i64, i64)>,
     like_error: Option<WebAudioError>,
@@ -1448,6 +1458,8 @@ impl MusicApp {
             metadata_request: None,
             metadata_attempted: HashSet::new(),
             like_request: None,
+            dislike_request: None,
+            disliked: HashSet::new(),
             like_aliases: HashMap::new(),
             removed_from_library: HashSet::new(),
             like_error: None,
@@ -1705,8 +1717,10 @@ impl MusicApp {
         self.play_order =
             PlaybackOrder::with_modes(self.play_order.shuffle(), self.play_order.repeat());
         self.restoring = false;
-        // VK Mix settings belong to the account that chose them.
+        // VK Mix settings and dislikes belong to the account that chose them.
         self.mix_tuning = None;
+        self.dislike_request = None;
+        self.disliked.clear();
         self.mix_settings.close();
         self.pending = None; // Discard any late response from the previous session.
         self.session = None;
@@ -4994,6 +5008,87 @@ impl MusicApp {
         response
     }
 
+    /// Mark or unmark VK's "Не нравится" for a track. Like VK's player, a
+    /// disliked track that is playing is skipped.
+    fn toggle_dislike(&mut self, ctx: &egui::Context, track: &Track) {
+        if self.demo || self.dislike_request.is_some() || !self.search_ready() {
+            return;
+        }
+        let Some((owner, client)) = self
+            .session
+            .as_ref()
+            .and_then(|session| Some((session.profile.id, session.music.clone()?)))
+        else {
+            return;
+        };
+        let key = track.key();
+        let dislike = !self.disliked.contains(&key);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let repaint = self.repaint_target.with_context(ctx);
+        match thread::Builder::new()
+            .name("vk-dislike".into())
+            .spawn(move || {
+                let canceled = AtomicBool::new(false);
+                let _ = sender.send(client.set_dislike(owner, key, dislike, &canceled));
+                repaint.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.dislike_request = Some(DislikeRequest {
+                    owner,
+                    key,
+                    dislike,
+                    receiver,
+                });
+            }
+            Err(_) => self.track_menu_error = Some(WebAudioError::Network),
+        }
+    }
+
+    fn poll_dislike(&mut self, ctx: &egui::Context) {
+        let Some(request) = &self.dislike_request else {
+            return;
+        };
+        let result = match request.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        let DislikeRequest {
+            owner,
+            key,
+            dislike,
+            ..
+        } = self.dislike_request.take().unwrap();
+        if self.session.as_ref().map(|session| session.profile.id) != Some(owner) {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                let text = if dislike {
+                    self.disliked.insert(key);
+                    self.language
+                        .text("Отмечено «Не нравится»", "Marked as disliked")
+                } else {
+                    self.disliked.remove(&key);
+                    self.language
+                        .text("Убрано из «Не нравится»", "Dislike removed")
+                };
+                self.track_menu_notice =
+                    Some((text.into(), Instant::now() + Duration::from_secs(3)));
+                if dislike
+                    && self
+                        .playing
+                        .as_ref()
+                        .is_some_and(|track| track.key() == key)
+                {
+                    self.advance_track(ctx, false);
+                }
+            }
+            Err(error) => self.track_menu_error = Some(error),
+        }
+    }
+
     fn toggle_like(&mut self, ctx: &egui::Context, source: Track) {
         if self.demo
             || self.like_request.is_some()
@@ -6806,6 +6901,8 @@ impl MusicApp {
                 playlists_loading: self.playlist_request.is_some() || !self.playlists_requested,
                 playlist_busy: self.playlist_add_request.is_some() || self.like_request.is_some(),
                 connected,
+                disliked: self.disliked.contains(&track.key()),
+                dislike_pending: self.dislike_request.is_some(),
             },
         )?;
         Some(TrackAction::Menu(track.clone(), action))
@@ -6823,6 +6920,7 @@ impl MusicApp {
         match action {
             track_menu::Action::AddToQueue => self.add_to_queue(ctx, track.clone()),
             track_menu::Action::ToggleLike => self.toggle_like(ctx, track.clone()),
+            track_menu::Action::ToggleDislike => self.toggle_dislike(ctx, track),
             track_menu::Action::AddToPlaylist(playlist) => {
                 self.add_track_to_playlist(ctx, track.clone(), playlist)
             }
@@ -7880,16 +7978,9 @@ impl MusicApp {
                     size(self.storage.history)
                 ),
                 format!(
-                    "{} {}. {}",
-                    t(
-                        "Прослушанные здесь треки хранятся в",
-                        "Tracks played here are stored in"
-                    ),
-                    place(&self.storage.history_path),
-                    t(
-                        "Файл никуда не отправляется.",
-                        "This file is never uploaded."
-                    )
+                    "{} {}",
+                    t("Хранится в", "Stored in"),
+                    place(&self.storage.history_path)
                 ),
                 t("Очистить", "Clear"),
                 self.session.is_some() && !self.recent.is_empty(),
@@ -8472,7 +8563,7 @@ impl MusicApp {
                             .step_by(0.25)
                             .show_value(false),
                         );
-                        ui.label(format!("{gb:.2} {}", t("ГиБ", "GiB")));
+                        ui.label(format!("{gb:.2} {}", t("ГБ", "GB")));
                         if response.changed() {
                             self.cache_limit_mb = (gb * 1024.0).round() as u32;
                             self.cache_save_at = Some(Instant::now() + Duration::from_millis(500));
@@ -8799,6 +8890,7 @@ impl MusicApp {
         self.poll_detail(ctx);
         self.poll_metadata(ctx);
         self.poll_like(ctx);
+        self.poll_dislike(ctx);
         self.poll_playlist_add(ctx);
         self.poll_playlist_create(ctx);
         self.poll_audio_upload(ctx);
@@ -9308,6 +9400,8 @@ mod tests {
             metadata_request: None,
             metadata_attempted: HashSet::new(),
             like_request: None,
+            dislike_request: None,
+            disliked: HashSet::new(),
             like_aliases: HashMap::new(),
             removed_from_library: HashSet::new(),
             like_error: None,

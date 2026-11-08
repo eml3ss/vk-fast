@@ -35,12 +35,13 @@ impl Source {
     }
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Config {
     #[serde(default)]
     pub source: Source,
-    #[serde(default)]
+    /// On for a new install; an explicit choice in Settings is kept.
+    #[serde(default = "genius_fallback_default")]
     pub fallback_to_genius: bool,
     #[serde(default)]
     pub genius_retry_after: u64,
@@ -65,6 +66,30 @@ pub(super) struct Config {
     #[serde(default)]
     pub token_rejected: bool,
 }
+fn genius_fallback_default() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            source: Source::default(),
+            fallback_to_genius: genius_fallback_default(),
+            genius_retry_after: 0,
+            vk_retry_after: 0,
+            mode: Mode::default(),
+            api_key: String::new(),
+            user_token: String::new(),
+            token_app_id: String::new(),
+            token_created: 0,
+            token_retry_after: 0,
+            anonymous_retry_after: 0,
+            api_retry_after: 0,
+            token_rejected: false,
+        }
+    }
+}
+
 impl Drop for Config {
     fn drop(&mut self) {
         self.api_key.zeroize();

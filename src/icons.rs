@@ -30,6 +30,8 @@ pub enum Icon {
     Account,
     Heart,
     HeartFilled,
+    /// A struck-through heart: VK's "Не нравится".
+    Dislike,
     QueueAdd,
     Queue,
     Lyrics,
@@ -805,6 +807,10 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.add(egui::Shape::closed_line(contour, stroke));
             }
         }
+        Icon::Dislike => {
+            painter.add(egui::Shape::closed_line(heart_path(rect), stroke));
+            line(&[(3.5, 3.5), (20.5, 20.5)]);
+        }
     }
 }
 
@@ -1075,6 +1081,7 @@ mod tests {
             Icon::Account,
             Icon::Heart,
             Icon::HeartFilled,
+            Icon::Dislike,
             Icon::QueueAdd,
             Icon::Queue,
             Icon::Lyrics,

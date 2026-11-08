@@ -331,6 +331,14 @@ impl MusicApp {
             !self.lyrics.settings_busy && self.lyrics.status.is_some(),
             |ui| {
                 ui.label(t("Источник текстов", "Lyrics source"));
+                ui.label(
+                    RichText::new(t(
+                        "VK и Musixmatch поддерживают таймкоды, если они доступны. Genius — обычный текст.",
+                        "VK and Musixmatch support timing when available. Genius provides plain lyrics.",
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
                 egui::ComboBox::from_id_salt("lyrics-source")
                     .selected_text(source.name())
                     .show_ui(ui, |ui| {
@@ -480,15 +488,6 @@ impl MusicApp {
                 self.configure_lyrics(&ctx, ConfigAction::Reload);
             }
         }
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(t(
-                "VK и Musixmatch поддерживают таймкоды, если они доступны. Genius — обычный текст.",
-                "VK and Musixmatch support timing when available. Genius provides plain lyrics.",
-            ))
-            .small()
-            .color(MUTED),
-        );
     }
 }
 

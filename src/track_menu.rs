@@ -25,6 +25,9 @@ pub struct View<'a> {
     pub playlists_loading: bool,
     pub playlist_busy: bool,
     pub connected: bool,
+    /// Marked "Не нравится" in this session; the item then undoes it.
+    pub disliked: bool,
+    pub dislike_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +40,7 @@ pub enum Action {
     Album,
     CopyLink,
     RefreshPlaylists,
+    ToggleDislike,
 }
 
 pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
@@ -159,6 +163,22 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
             action = result.inner.or(action.take());
         }
     });
+    if row(
+        ui,
+        Icon::Dislike,
+        if view.disliked {
+            language.text("Убрать из «Не нравится»", "Remove dislike")
+        } else {
+            language.text("Не нравится", "Dislike")
+        },
+        view.connected && !view.dislike_pending && view.track.unavailable != Some(true),
+        false,
+        view.dislike_pending,
+    )
+    .clicked()
+    {
+        action = Some(Action::ToggleDislike);
+    }
 
     separator(ui);
     if row(
@@ -387,6 +407,7 @@ mod tests {
         action: Option<Action>,
         liked: bool,
         pending: bool,
+        disliked: bool,
     }
 
     impl Harness {
@@ -402,6 +423,7 @@ mod tests {
                 action: None,
                 liked: true,
                 pending: false,
+                disliked: false,
             }
         }
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
@@ -439,6 +461,8 @@ mod tests {
                                 playlists_loading: false,
                                 playlist_busy: false,
                                 connected: true,
+                                disliked: self.disliked,
+                                dislike_pending: false,
                             },
                         );
                     });
@@ -486,6 +510,7 @@ mod tests {
                 language.text("Добавить в очередь", "Add to queue"),
                 language.text("Убрать из моей музыки", "Remove from My music"),
                 language.text("Добавить в плейлист", "Add to playlist"),
+                language.text("Не нравится", "Dislike"),
                 language.text("Микс по треку", "Go to track mix"),
                 language.text("К исполнителю", "Go to artist"),
                 language.text("К альбому", "Go to album"),
@@ -502,6 +527,34 @@ mod tests {
                     .center(),
             );
             assert_eq!(h.action, Some(Action::AddToQueue));
+        }
+    }
+
+    #[test]
+    fn dislike_sits_under_add_to_playlist_and_undoes_a_marked_track() {
+        for language in [Language::Russian, Language::English] {
+            let mut h = Harness::new(language);
+            let output = h.warm();
+            let playlist = text_rect(
+                &output,
+                language.text("Добавить в плейлист", "Add to playlist"),
+            )
+            .unwrap();
+            let dislike = text_rect(&output, language.text("Не нравится", "Dislike")).unwrap();
+            assert!(dislike.top() > playlist.bottom());
+            assert!(dislike.top() - playlist.bottom() < ROW_HEIGHT);
+            h.click(dislike.center());
+            assert_eq!(h.action, Some(Action::ToggleDislike));
+            h.disliked = true;
+            let marked = h.warm();
+            assert!(text_rect(&marked, language.text("Не нравится", "Dislike")).is_none());
+            assert!(
+                text_rect(
+                    &marked,
+                    language.text("Убрать из «Не нравится»", "Remove dislike")
+                )
+                .is_some()
+            );
         }
     }
 

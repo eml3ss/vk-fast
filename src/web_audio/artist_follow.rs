@@ -233,6 +233,56 @@ impl WebAudioClient {
     }
 }
 
+impl WebAudioClient {
+    /// VK's "Не нравится" for one track, the signal its recommendations and
+    /// mixes learn from. VK's web player sends `audio_ids=<owner>_<id>`.
+    pub fn set_dislike(
+        &self,
+        owner: i64,
+        track: (i64, i64),
+        dislike: bool,
+        canceled: &AtomicBool,
+    ) -> Result<(), WebAudioError> {
+        self.set_dislike_request(
+            owner,
+            track,
+            dislike,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn set_dislike_request(
+        &self,
+        owner: i64,
+        track: (i64, i64),
+        dislike: bool,
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<(), WebAudioError> {
+        if track.0 == 0 || track.1 <= 0 {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(owner, canceled)?;
+        let result = request(
+            generation,
+            if dislike {
+                "audio.addDislike"
+            } else {
+                "audio.removeDislike"
+            },
+            vec![("audio_ids", format!("{}_{}", track.0, track.1))],
+        )?;
+        playlist_manage::mutation_succeeded(&result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +369,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(client.artist_followed(42, &target), Some(false));
+    }
+
+    #[test]
+    fn dislike_sends_the_web_players_method_and_track_id() {
+        let client = client();
+        let canceled = AtomicBool::new(false);
+        for (dislike, expected) in [(true, "audio.addDislike"), (false, "audio.removeDislike")] {
+            client
+                .set_dislike_request(42, (-7, 91), dislike, &canceled, |_, method, params| {
+                    assert_eq!(method, expected);
+                    assert_eq!(params, vec![("audio_ids", "-7_91".to_owned())]);
+                    Ok(json!(1))
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            client.set_dislike_request(42, (-7, 91), true, &canceled, |_, _, _| Ok(json!(0))),
+            Err(WebAudioError::Rejected)
+        ));
+        assert!(matches!(
+            client.set_dislike_request(42, (0, 91), true, &canceled, |_, _, _| unreachable!()),
+            Err(WebAudioError::Format)
+        ));
     }
 
     #[test]

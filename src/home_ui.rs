@@ -299,7 +299,7 @@ fn catalog_sections(
         section_heading(
             ui,
             Icon::Radio,
-            language.text("Микс по артистам", "Artist mixes"),
+            language.text("Микс по исполнителям", "Artist mixes"),
             None,
             true,
         );
@@ -1412,7 +1412,7 @@ mod tests {
             "Жанры",
             "Настроения и занятия",
             "Слушайте друг друга",
-            "Микс по артистам",
+            "Микс по исполнителям",
         ] {
             text_center(&output, heading);
         }
