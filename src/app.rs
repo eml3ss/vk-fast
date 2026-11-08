@@ -4101,7 +4101,10 @@ impl MusicApp {
                 } else {
                     self.search.hints_error.is_some()
                 };
-                if error && ui.button(language.text("Повторить", "Retry")).clicked() {
+                if error
+                    && theme::inset_heading(ui, |ui| ui.button(language.text("Повторить", "Retry")))
+                        .clicked()
+                {
                     if query.is_empty() {
                         self.search.popular_error = None;
                         self.search.popular_requested = false;
