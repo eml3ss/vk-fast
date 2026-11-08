@@ -16,6 +16,7 @@ pub(super) struct State {
     pub(super) open: bool,
     pub(super) fullscreen: bool,
     previous_fullscreen: bool,
+    previous_maximized: bool,
     service: Option<Service>,
     query: Option<Query>,
     pending: Option<u64>,
@@ -188,6 +189,8 @@ impl MusicApp {
         if fullscreen {
             self.lyrics.previous_fullscreen =
                 ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+            self.lyrics.previous_maximized =
+                ctx.input(|input| input.viewport().maximized.unwrap_or(false));
             self.queue_ui.open = false;
             self.lyrics.open = true;
             self.lyrics.active = true;
@@ -198,11 +201,20 @@ impl MusicApp {
             self.hydrate_metadata(ctx, vec![key]);
         }
         self.lyrics.view.reset();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(if fullscreen {
-            true
+        if cfg!(windows) && !self.lyrics.previous_fullscreen {
+            // Windows' borderless fullscreen breaks the custom title bar:
+            // the taskbar vanishes and the classic frame shows through.
+            // The lyrics fill a maximized window there instead.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(
+                fullscreen || self.lyrics.previous_maximized,
+            ));
         } else {
-            self.lyrics.previous_fullscreen
-        }));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(if fullscreen {
+                true
+            } else {
+                self.lyrics.previous_fullscreen
+            }));
+        }
         ctx.request_repaint();
     }
 
@@ -275,6 +287,23 @@ impl MusicApp {
             }
             lyrics_ui::Action::Fullscreen => {
                 self.set_lyrics_fullscreen(ctx, !self.lyrics.fullscreen)
+            }
+            lyrics_ui::Action::Reload => {
+                self.lyrics.cancel_pending();
+                self.lyrics.error = None;
+                self.lyrics.settings_error = None;
+                self.ensure_lyrics_service(ctx);
+                if let (Some(service), Some(query)) =
+                    (&self.lyrics.service, self.lyrics.query.clone())
+                {
+                    let vk = self.session.as_ref().and_then(|session| {
+                        session.music.clone().map(|client| VkSession {
+                            owner: session.profile.id,
+                            client,
+                        })
+                    });
+                    self.lyrics.pending = Some(service.reload(query, vk));
+                }
             }
             lyrics_ui::Action::Retry => {
                 self.lyrics.error = None;

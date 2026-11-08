@@ -15,6 +15,8 @@ pub enum Action {
     Close,
     Fullscreen,
     Retry,
+    /// Load the lyrics again from their sources.
+    Reload,
     Settings,
     Seek(f64),
     /// Open the playing track's album or single.
@@ -136,7 +138,7 @@ pub fn show(
         Rect::from_min_size(
             header.min,
             egui::vec2(
-                (header.width() - if view.fullscreen { 38.0 } else { 70.0 }).max(0.0),
+                (header.width() - if view.fullscreen { 72.0 } else { 104.0 }).max(0.0),
                 32.0,
             ),
         ),
@@ -148,6 +150,23 @@ pub fn show(
         header.right_center() - egui::vec2(14.0, 0.0),
         egui::vec2(28.0, 28.0),
     );
+    // Reload sits left of the close (or exit fullscreen) button.
+    let reload = end.translate(egui::vec2(-34.0, 0.0));
+    let can_reload = view.track.is_some() && !view.loading && view.retry_allowed;
+    if ui
+        .add_enabled_ui(can_reload, |ui| {
+            icons::panel_button(
+                ui,
+                reload,
+                Icon::Refresh,
+                t("Обновить текст", "Reload lyrics"),
+            )
+        })
+        .inner
+        .clicked()
+    {
+        action = Some(Action::Reload);
+    }
     if view.fullscreen {
         if icons::panel_button(
             ui,
@@ -166,7 +185,7 @@ pub fn show(
         }
         if icons::panel_button(
             ui,
-            end.translate(egui::vec2(-34.0, 0.0)),
+            end.translate(egui::vec2(-68.0, 0.0)),
             Icon::Expand,
             t("На весь экран", "Fullscreen lyrics"),
         )

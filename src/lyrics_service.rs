@@ -42,6 +42,8 @@ struct Fetch {
     query: Query,
     vk: Option<VkSession>,
     cancel: Arc<AtomicBool>,
+    /// Reload asked for: skip the in-memory cache.
+    fresh: bool,
 }
 #[derive(Default)]
 struct Jobs {
@@ -152,7 +154,10 @@ impl Service {
                     }
                     let owner = request.vk.as_ref().map(|vk| vk.owner);
                     let cached = cache.iter().position(|(query, at, _, account)| {
-                        query == &request.query && *account == owner && at.elapsed().as_secs() < 900
+                        !request.fresh
+                            && query == &request.query
+                            && *account == owner
+                            && at.elapsed().as_secs() < 900
                     });
                     let result = if let Some(index) = cached {
                         let entry = cache.remove(index).unwrap();
@@ -243,6 +248,13 @@ impl Service {
         let _ = self.wake.try_send(());
     }
     pub fn fetch(&self, query: Query, vk: Option<VkSession>) -> u64 {
+        self.fetch_with(query, vk, false)
+    }
+    /// Fetch again from the sources, not the recent-lyrics cache.
+    pub fn reload(&self, query: Query, vk: Option<VkSession>) -> u64 {
+        self.fetch_with(query, vk, true)
+    }
+    fn fetch_with(&self, query: Query, vk: Option<VkSession>, fresh: bool) -> u64 {
         let id = self.latest.fetch_add(1, Ordering::AcqRel) + 1;
         if let Ok(mut jobs) = self.jobs.lock() {
             if let Some(cancel) = jobs.cancel.take() {
@@ -255,6 +267,7 @@ impl Service {
                 query,
                 vk,
                 cancel,
+                fresh,
             });
         }
         let _ = self.wake.try_send(());
