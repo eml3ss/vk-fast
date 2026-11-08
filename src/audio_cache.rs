@@ -131,7 +131,7 @@ fn validate_limit(limit: u64) -> io::Result<()> {
         Ok(())
     }
 }
-fn root_path() -> io::Result<PathBuf> {
+pub(crate) fn root_path() -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
         let root = crate::app_paths::cache_dir()?;

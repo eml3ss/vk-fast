@@ -67,6 +67,7 @@ struct Entry {
 
 pub struct CoverCache {
     entries: HashMap<Key, Entry>,
+    disk: Arc<DiskCache>,
     jobs: Option<SyncSender<Job>>,
     replies: Receiver<Reply>,
     canceled: Arc<AtomicBool>,
@@ -77,6 +78,11 @@ pub struct CoverCache {
 }
 
 impl CoverCache {
+    /// The artwork files on disk, shared with the download workers.
+    pub(crate) fn disk(&self) -> Arc<DiskCache> {
+        self.disk.clone()
+    }
+
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Job>(MAX_PENDING);
         let (reply_sender, replies) = mpsc::sync_channel::<Reply>(MAX_PENDING);
@@ -86,7 +92,12 @@ impl CoverCache {
         // arbitrary artwork URLs supplied by fixtures.
         let enabled = !cfg!(test);
         let client = enabled.then(http_client).and_then(Result::ok);
-        let disk = Arc::new(DiskCache::new());
+        // Tests never index or clear the user's artwork directory.
+        let disk = Arc::new(if enabled {
+            DiskCache::new()
+        } else {
+            DiskCache::at(None, 0)
+        });
         let mut workers = Vec::new();
         if enabled {
             for index in 0..WORKERS {
@@ -105,6 +116,7 @@ impl CoverCache {
         }
         Self {
             entries: HashMap::new(),
+            disk,
             jobs: if workers.is_empty() {
                 None
             } else {

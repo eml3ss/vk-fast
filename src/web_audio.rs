@@ -164,6 +164,8 @@ type ParsedArtist = (ArtistPage, HashMap<(i64, i64), StreamInfo>);
 /// categories such as mood, familiarity and language, each with options.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MixSettings {
+    /// The stream these settings belong to; tuned batches use the same id.
+    pub mix_id: String,
     pub title: String,
     pub subtitle: String,
     pub categories: Vec<MixCategory>,
@@ -188,6 +190,7 @@ pub struct MixOption {
 /// choices, sent with every batch, and one option per category.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MixTuning {
+    pub mix_id: String,
     pub id: u64,
     pub choices: Vec<(String, String)>,
 }
@@ -944,13 +947,53 @@ impl WebAudioClient {
         Ok(count)
     }
 
+    /// The website's audio rows leave out the cover VK generates for a track
+    /// without album art, while the API returns it as `thumb`. Ask the API for
+    /// those covers in batches of 100. Best effort: a failure keeps the rows.
+    fn fill_missing_covers(&self, owner: i64, tracks: &mut [Track], canceled: &AtomicBool) {
+        // Synthetic tests never send their fixture session to VK.
+        if cfg!(test) {
+            return;
+        }
+        let missing: Vec<usize> = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track.cover_url.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let Ok(generation) = self.home_owner(owner, canceled) else {
+            return;
+        };
+        for chunk in missing.chunks(100) {
+            let ids = chunk
+                .iter()
+                .map(|index| format!("{}_{}", tracks[*index].owner_id, tracks[*index].id))
+                .collect::<Vec<_>>()
+                .join(",");
+            let Ok(value) = self.detail_request(
+                owner,
+                generation,
+                "audio.getById",
+                vec![("audios", ids)],
+                canceled,
+            ) else {
+                return;
+            };
+            apply_api_covers(&value, tracks, chunk);
+        }
+    }
+
     fn page_with_library_total(
         &self,
         owner_id: i64,
         offset: usize,
-        page: AudioPage,
+        mut page: AudioPage,
     ) -> Result<AudioPage, WebAudioError> {
         let canceled = AtomicBool::new(false);
+        self.fill_missing_covers(owner_id, &mut page.items, &canceled);
         let (page, confirmed) = self.enrich_library_total(owner_id, offset, page, || {
             self.library_count(owner_id, &canceled)
         })?;
@@ -1253,8 +1296,11 @@ impl WebAudioClient {
             ],
             canceled,
         )?;
-        let parsed = parse_home(&text)?;
+        let mut parsed = parse_home(&text)?;
         self.commit_home_streams(expected_owner, generation, parsed.streams, canceled)?;
+        for collection in &mut parsed.collections {
+            self.fill_missing_covers(expected_owner, &mut collection.tracks, canceled);
+        }
         Ok(parsed.collections)
     }
 
@@ -1293,17 +1339,43 @@ impl WebAudioClient {
             |session, _| {
                 self.request_stream_mix(
                     session,
-                    vec![("mix_id", "vk_mix".into()), ("options", options)],
+                    vec![("mix_id", tuning.mix_id.clone()), ("options", options)],
                 )
             },
         )
     }
 
-    /// The categories and options of VK Mix's settings dialog
-    /// (`audio.getStreamMixSettings`, as VK's web player requests them).
+    /// The categories and options of VK Mix's settings dialog. VK's web
+    /// player asks `audio.getStreamMixSettings` with its catalog mix id; the
+    /// tunable VK Mix is `common` (Home's genre mixes tune the same stream),
+    /// with `vk_mix` as the fallback.
     pub fn vk_mix_settings(
         &self,
         expected_owner: i64,
+        canceled: &AtomicBool,
+    ) -> Result<MixSettings, WebAudioError> {
+        let mut last = MixSettings::default();
+        for mix_id in ["common", "vk_mix"] {
+            let settings = self.stream_mix_settings(expected_owner, mix_id, canceled)?;
+            crate::diagnostics::event(
+                "vk-mix",
+                &format!(
+                    "settings mix_id={mix_id} categories={}",
+                    settings.categories.len()
+                ),
+            );
+            if !settings.categories.is_empty() {
+                return Ok(settings);
+            }
+            last = settings;
+        }
+        Ok(last)
+    }
+
+    fn stream_mix_settings(
+        &self,
+        expected_owner: i64,
+        mix_id: &str,
         canceled: &AtomicBool,
     ) -> Result<MixSettings, WebAudioError> {
         let generation = self.home_owner(expected_owner, canceled)?;
@@ -1333,10 +1405,7 @@ impl WebAudioClient {
             ))
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
-            .form(&[
-                ("mix_id", "vk_mix"),
-                ("access_token", session.token.as_str()),
-            ])
+            .form(&[("mix_id", mix_id), ("access_token", session.token.as_str())])
             .send()
             .map_err(network)?;
         if response.status().is_redirection() {
@@ -1344,11 +1413,13 @@ impl WebAudioClient {
             return Err(WebAudioError::TokenExpired);
         }
         let text = token_body(response)?;
-        parse_mix_settings(&text).inspect_err(|error| {
+        let mut settings = parse_mix_settings(&text).inspect_err(|error| {
             if *error == WebAudioError::TokenExpired {
                 self.forget_mix_session(expected_owner, generation, &session);
             }
-        })
+        })?;
+        settings.mix_id = mix_id.to_owned();
+        Ok(settings)
     }
 
     /// Current first-party Track mix identity sends its source type separately
@@ -2689,9 +2760,10 @@ impl WebAudioClient {
             ],
             canceled,
         )?;
-        let (tracks, streams) =
+        let (mut tracks, streams) =
             parse_home_playlist(&text, collection.owner_id, collection.playlist_id)?;
         self.commit_home_streams(expected_owner, generation, streams, canceled)?;
+        self.fill_missing_covers(expected_owner, &mut tracks, canceled);
         Ok(tracks)
     }
 
@@ -3844,6 +3916,29 @@ fn album_stats(value: &Value) -> AlbumStats {
     }
 }
 
+/// Covers from an `audio.getById` answer for the tracks at `indices`,
+/// matched by their exact owner and audio IDs.
+fn apply_api_covers(value: &Value, tracks: &mut [Track], indices: &[usize]) {
+    let items = value
+        .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array));
+    for item in items.into_iter().flatten() {
+        let key = (
+            item.get("owner_id").and_then(number),
+            item.get("id").and_then(number),
+        );
+        let Some(cover) = cover_from_object(item) else {
+            continue;
+        };
+        for index in indices {
+            let track = &mut tracks[*index];
+            if track.cover_url.is_none() && key == (Some(track.owner_id), Some(track.id)) {
+                track.cover_url = Some(cover.clone());
+            }
+        }
+    }
+}
+
 fn parse_mix_settings(text: &str) -> Result<MixSettings, WebAudioError> {
     let value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
@@ -3906,6 +4001,7 @@ fn parse_mix_settings(text: &str) -> Result<MixSettings, WebAudioError> {
         })
         .collect();
     Ok(MixSettings {
+        mix_id: String::new(),
         title: text(settings, "title", 512).unwrap_or_default(),
         subtitle: text(settings, "subtitle", 1024).unwrap_or_default(),
         categories,
@@ -6693,6 +6789,44 @@ mod tests {
     }
 
     #[test]
+    fn api_covers_fill_only_coverless_rows_with_the_same_ids() {
+        let row = |owner: i64, id: i64, cover: Option<&str>| {
+            let mut track = parse_track(
+                &json!({"id":id,"owner_id":owner,"title":"T","artist":"A","duration":60}),
+            )
+            .unwrap();
+            track.cover_url = cover.map(str::to_owned);
+            track
+        };
+        let mut tracks = vec![
+            row(1, 10, None),
+            row(1, 11, Some("https://images.example.test/own.jpg")),
+            row(-2, 12, None),
+            row(3, 13, None),
+        ];
+        let answer = json!([
+            {"owner_id":1,"id":10,"thumb":{"photo_600":"https://images.example.test/generated.jpg"}},
+            {"owner_id":1,"id":11,"thumb":{"photo_600":"https://images.example.test/other.jpg"}},
+            {"owner_id":-2,"id":12,"album":{"thumb":{"photo_300":"https://images.example.test/album.jpg"}}},
+            {"owner_id":3,"id":99,"thumb":{"photo_600":"https://images.example.test/wrong.jpg"}}
+        ]);
+        apply_api_covers(&answer, &mut tracks, &[0, 1, 2, 3]);
+        let covers: Vec<_> = tracks
+            .iter()
+            .map(|track| track.cover_url.as_deref())
+            .collect();
+        assert_eq!(
+            covers,
+            [
+                Some("https://images.example.test/generated.jpg"),
+                Some("https://images.example.test/own.jpg"),
+                Some("https://images.example.test/album.jpg"),
+                None,
+            ]
+        );
+    }
+
+    #[test]
     fn vk_mix_settings_and_tuning_follow_the_web_player_format() {
         let settings = parse_mix_settings(
             &json!({"response":{"settings":{
@@ -6728,6 +6862,7 @@ mod tests {
             Err(WebAudioError::TokenExpired)
         );
         let tuning = MixTuning {
+            mix_id: "common".into(),
             id: 1_234_567_890_123,
             choices: vec![
                 ("mood".into(), "sad".into()),

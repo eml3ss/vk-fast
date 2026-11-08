@@ -76,11 +76,13 @@ impl Query {
                 "общие дискорд активность статус музыка general discord rpc rich presence status activity music"
             }
             Setting::CacheLimit => {
-                "кеш кэш лимит размер гигабайты хранение диск cache limit size budget storage disk gib gb"
+                "кеш кэш аудиокэш аудиокеш лимит размер гигабайты хранение диск cache audio limit size budget storage disk gib gb"
             }
-            Setting::CacheClear => "кеш кэш очистить очистка удалить cache clear delete remove",
+            Setting::CacheClear => {
+                "кеш кэш очистить очистка удалить обложки аудио история cache clear delete remove artwork audio history"
+            }
             Setting::CacheStatus => {
-                "кеш кэш занято свободно данные загруженное аудио cache used free status space loaded audio data"
+                "кеш кэш хранилище занято свободно данные загруженное аудио обложки история прослушиваний cache storage used free status space loaded audio data artwork play history"
             }
             Setting::About => {
                 "о приложении приложение описание версия лицензия about application version license gpl vk fast"

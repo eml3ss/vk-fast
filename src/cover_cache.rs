@@ -47,6 +47,37 @@ impl DiskCache {
         }
     }
 
+    /// Where artwork files live, for the storage settings.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Bytes of artwork on disk. Indexes the directory once; call off the UI thread.
+    pub fn usage(&self) -> io::Result<u64> {
+        let root = self.root.as_ref().ok_or_else(unavailable)?;
+        let mut index = self.index.lock().map_err(|_| unavailable())?;
+        self.initialize(root, &mut index)?;
+        Ok(index.bytes)
+    }
+
+    /// Delete every saved artwork file. Images already shown stay in memory
+    /// and are downloaded again when needed.
+    pub fn clear(&self) -> io::Result<()> {
+        let root = self.root.as_ref().ok_or_else(unavailable)?;
+        let mut index = self.index.lock().map_err(|_| unavailable())?;
+        self.initialize(root, &mut index)?;
+        let mut result = Ok(());
+        for name in index.entries.keys() {
+            match fs::remove_file(root.join(name)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => result = Err(error),
+                _ => {}
+            }
+        }
+        index.entries.clear();
+        index.bytes = 0;
+        result
+    }
+
     pub fn load(&self, url: &str, edge: u32) -> io::Result<Vec<u8>> {
         let root = self.root.as_ref().ok_or_else(unavailable)?;
         let mut index = self.index.lock().map_err(|_| unavailable())?;

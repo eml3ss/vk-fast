@@ -366,6 +366,22 @@ enum Reply {
     Audio(AudioPage, bool, Option<RefreshedProfile>),
 }
 
+/// Sizes and places of what VK Fast keeps on this computer, for Settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StorageInfo {
+    covers: Option<u64>,
+    covers_path: Option<std::path::PathBuf>,
+    audio_path: Option<std::path::PathBuf>,
+    history: Option<u64>,
+    history_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageAction {
+    Info,
+    ClearCovers,
+}
+
 enum CacheAction {
     Info,
     Apply(u64),
@@ -683,6 +699,27 @@ impl MixSettingsDialog {
             canceled.store(true, Ordering::Release);
         }
         *self = Self::default();
+    }
+}
+
+/// Disk sizes in binary units, like the cache limit.
+fn format_size(bytes: u64, language: Language) -> String {
+    let units = [
+        language.text("Б", "B"),
+        language.text("КБ", "KB"),
+        language.text("МБ", "MB"),
+        language.text("ГБ", "GB"),
+    ];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < units.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", units[0])
+    } else {
+        format!("{value:.1} {}", units[unit])
     }
 }
 
@@ -1159,6 +1196,8 @@ pub struct MusicApp {
     cache_limit_mb: u32,
     cache_stats: Option<CacheStats>,
     cache_pending: Option<Receiver<Result<CacheStats, ()>>>,
+    storage: StorageInfo,
+    storage_pending: Option<Receiver<StorageInfo>>,
     cache_save_at: Option<Instant>,
     cache_error: bool,
     cache_save_failed: bool,
@@ -1215,6 +1254,7 @@ impl MusicApp {
         self.filter = location.filter;
         if opening_settings {
             self.start_cache_job(ctx, CacheAction::Info);
+            self.start_storage_job(ctx, StorageAction::Info);
         }
         if restore_pending
             && !self.settings_open
@@ -1478,6 +1518,8 @@ impl MusicApp {
             cache_limit_mb,
             cache_stats: None,
             cache_pending: None,
+            storage: StorageInfo::default(),
+            storage_pending: None,
             cache_save_at: None,
             cache_error: false,
             cache_save_failed: false,
@@ -3160,8 +3202,15 @@ impl MusicApp {
             crate::mix_settings_ui::Output::Close => self.mix_settings.close(),
             crate::mix_settings_ui::Output::Apply => {
                 let choices = std::mem::take(&mut self.mix_settings.selection);
+                let mix_id = self
+                    .mix_settings
+                    .settings
+                    .as_ref()
+                    .map(|settings| settings.mix_id.clone())
+                    .unwrap_or_else(|| "common".into());
                 self.mix_settings.close();
                 self.mix_tuning = (!choices.is_empty()).then(|| crate::web_audio::MixTuning {
+                    mix_id,
                     id: random_mix_session(),
                     choices,
                 });
@@ -6125,6 +6174,18 @@ impl MusicApp {
                 error: error.as_deref(),
             },
         );
+        // Like My music: a small spinner in the corner while any Home block
+        // (VK's picks, the catalog rows or the library tiles) is loading.
+        if self.home_request.is_some() || self.catalog_request.is_some() || self.pending.is_some() {
+            let area = ui.clip_rect();
+            egui::Spinner::new().size(16.0).paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    area.right_bottom() - egui::vec2(14.0, 14.0),
+                    egui::vec2(16.0, 16.0),
+                ),
+            );
+        }
         let ctx = ui.ctx().clone();
         match action {
             Some(home_ui::Action::OpenLibrary) => self.navigate_music(&ctx, MusicPage::Library),
@@ -7705,7 +7766,211 @@ impl MusicApp {
         }
     }
 
+    /// Measure artwork and history, or clear artwork, off the UI thread.
+    /// Runs when Settings open and after a change, never on a timer.
+    fn start_storage_job(&mut self, ctx: &egui::Context, action: StorageAction) {
+        if self.storage_pending.is_some() {
+            return;
+        }
+        let disk = self.covers.disk();
+        let owner = self.session.as_ref().map(|session| session.profile.id);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        self.workers.retain(|worker| !worker.is_finished());
+        match thread::Builder::new()
+            .name("vk-storage".into())
+            .spawn(move || {
+                if action == StorageAction::ClearCovers {
+                    let _ = disk.clear();
+                }
+                let history_path = owner.and_then(|owner| recent_cache::state_path(owner).ok());
+                let info = StorageInfo {
+                    covers: disk.usage().ok(),
+                    covers_path: disk.root().map(std::path::Path::to_owned),
+                    audio_path: if cfg!(test) {
+                        None
+                    } else {
+                        crate::audio_cache::root_path().ok()
+                    },
+                    history: history_path
+                        .as_ref()
+                        .filter(|_| !cfg!(test))
+                        .map(|path| std::fs::metadata(path).map_or(0, |metadata| metadata.len())),
+                    history_path,
+                };
+                let _ = sender.send(info);
+                ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.storage_pending = Some(receiver);
+            }
+            Err(_) => self.storage = StorageInfo::default(),
+        }
+    }
+
+    /// Settings → Cache: what VK Fast keeps on this computer, where, and how
+    /// to clear each part.
+    fn storage_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let language = self.language;
+        let t = |ru, en| language.text(ru, en);
+        let size = |bytes: Option<u64>| {
+            bytes.map_or_else(|| "—".to_owned(), |bytes| format_size(bytes, language))
+        };
+        let home = (!cfg!(windows))
+            .then(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .flatten()
+            .filter(|home| home.is_absolute());
+        let place = |path: &Option<std::path::PathBuf>| {
+            path.as_ref().map_or_else(
+                || "—".to_owned(),
+                |path| match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
+                    // Paths inside the home folder read like the shell's ~/…
+                    Some(relative) => format!("~/{}", relative.display()),
+                    None => path.display().to_string(),
+                },
+            )
+        };
+        ui.label(
+            RichText::new(t("Хранилище", "Storage"))
+                .size(18.0)
+                .family(theme::semibold()),
+        );
+        ui.add_space(8.0);
+        let audio = self.cache_stats.as_ref().map_or_else(
+            || "—".to_owned(),
+            |stats| {
+                format!(
+                    "{} {} {}",
+                    format_size(stats.used_bytes, language),
+                    t("из", "of"),
+                    format_size(stats.limit_bytes, language)
+                )
+            },
+        );
+        let rows = [
+            (
+                format!(
+                    "{} · {}",
+                    t("Обложки", "Artwork cache"),
+                    size(self.storage.covers)
+                ),
+                format!(
+                    "{} {}",
+                    t("Хранятся в", "Stored in"),
+                    place(&self.storage.covers_path)
+                ),
+                t("Очистить", "Clear"),
+                self.storage_pending.is_none() && self.storage.covers_path.is_some(),
+            ),
+            (
+                format!("{} · {audio}", t("Аудиокэш", "Audio cache")),
+                format!(
+                    "{} {}",
+                    t("Хранится в", "Stored in"),
+                    place(&self.storage.audio_path)
+                ),
+                t("Очистить", "Clear"),
+                self.audio_cache.is_some() && self.cache_pending.is_none(),
+            ),
+            (
+                format!(
+                    "{} · {}",
+                    t("История прослушиваний", "Play history"),
+                    size(self.storage.history)
+                ),
+                format!(
+                    "{} {}. {}",
+                    t(
+                        "Прослушанные здесь треки хранятся в",
+                        "Tracks played here are stored in"
+                    ),
+                    place(&self.storage.history_path),
+                    t(
+                        "Файл никуда не отправляется.",
+                        "This file is never uploaded."
+                    )
+                ),
+                t("Очистить", "Clear"),
+                self.session.is_some() && !self.recent.is_empty(),
+            ),
+        ];
+        // The text column ends before the widest button, plus a gap, so long
+        // paths wrap instead of running under the buttons.
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let button_column = rows
+            .iter()
+            .map(|(_, _, action, _)| {
+                ui.painter()
+                    .layout_no_wrap((*action).to_owned(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+                    + 54.0
+            })
+            .fold(0.0_f32, f32::max)
+            + 16.0;
+        let mut clicked = None;
+        egui::Frame::new()
+            .fill(theme::SURFACE)
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 53, 67)))
+            .corner_radius(12)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (index, (title, description, action, enabled)) in rows.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width() - button_column).max(120.0));
+                            ui.label(RichText::new(title.as_str()).size(15.0));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(description.as_str()).small().color(MUTED),
+                                )
+                                .wrap(),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let widgets = &mut ui.style_mut().visuals.widgets;
+                            widgets.inactive.bg_fill = Color32::from_rgb(35, 41, 50);
+                            widgets.inactive.weak_bg_fill = Color32::from_rgb(35, 41, 50);
+                            widgets.hovered.bg_fill = Color32::from_rgb(45, 53, 65);
+                            widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                            if icons::button(ui, Icon::Trash, action, *enabled).clicked() {
+                                clicked = Some(index);
+                            }
+                        });
+                    });
+                    if index + 1 < rows.len() {
+                        ui.add_space(10.0);
+                    }
+                }
+            });
+        match clicked {
+            Some(0) => self.start_storage_job(ctx, StorageAction::ClearCovers),
+            Some(1) => self.start_cache_job(ctx, CacheAction::Clear),
+            Some(2) => self.clear_history(ctx),
+            _ => {}
+        }
+    }
+
+    fn clear_history(&mut self, ctx: &egui::Context) {
+        self.recent.clear();
+        self.save_recent(ctx);
+        self.storage.history = Some(0);
+    }
+
     fn poll_cache(&mut self, ctx: &egui::Context) {
+        if let Some(receiver) = &self.storage_pending {
+            match receiver.try_recv() {
+                Ok(info) => {
+                    self.storage = info;
+                    self.storage_pending = None;
+                }
+                Err(TryRecvError::Disconnected) => self.storage_pending = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         if let Some(receiver) = &self.cache_pending {
             let result = match receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -8195,7 +8460,7 @@ impl MusicApp {
                     ui.add_space(16.0);
                 }
                 if query.matches(Setting::CacheLimit) {
-                    ui.label(t("Лимит кэша", "Cache limit"));
+                    ui.label(t("Лимит аудиокэша", "Audio cache limit"));
                     let mut gb = self.cache_limit_mb as f32 / 1024.0;
                     ui.horizontal(|ui| {
                         let response = ui.add_enabled(
@@ -8219,31 +8484,9 @@ impl MusicApp {
                         ui.add_space(16.0);
                     }
                 }
-                if query.matches(Setting::CacheStatus) {
-                    let used = self.cache_stats.as_ref().map_or_else(
-                        || format!("{}: —", t("Занято", "Used")),
-                        |stats| {
-                            format!(
-                                "{}: {:.2} {} {:.2} {}",
-                                t("Занято", "Used"),
-                                stats.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                                t("из", "of"),
-                                stats.limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                                t("ГиБ", "GiB")
-                            )
-                        },
-                    );
-                    ui.label(used);
-                }
-                if query.matches(Setting::CacheClear)
-                    && ui
-                        .add_enabled(
-                            self.audio_cache.is_some() && self.cache_pending.is_none(),
-                            egui::Button::new(t("Очистить кэш", "Clear cache")),
-                        )
-                        .clicked()
-                {
-                    self.start_cache_job(&ctx, CacheAction::Clear);
+                if query.matches(Setting::CacheStatus) || query.matches(Setting::CacheClear) {
+                    self.storage_panel(ui, &ctx);
+                    ui.add_space(8.0);
                 }
                 if self.audio_cache.is_none() || self.cache_error || self.cache_save_failed {
                     ui.colored_label(
@@ -9132,6 +9375,8 @@ mod tests {
             cache_limit_mb: preferences::DEFAULT_CACHE_MB,
             cache_stats: None,
             cache_pending: None,
+            storage: StorageInfo::default(),
+            storage_pending: None,
             cache_save_at: None,
             cache_error: false,
             cache_save_failed: false,
@@ -11048,6 +11293,16 @@ mod tests {
         assert!(app.volume_save_at.is_none());
     }
 
+    /// Settings also start a storage measurement; these tests follow only
+    /// the audio cache's own worker.
+    fn cache_workers(app: &MusicApp) -> Vec<std::thread::ThreadId> {
+        app.workers
+            .iter()
+            .filter(|worker| worker.thread().name() == Some("vk-audio-cache"))
+            .map(|worker| worker.thread().id())
+            .collect()
+    }
+
     #[test]
     fn cache_settings_snapshot_is_requested_once_per_open_and_refreshed_on_reopen() {
         let (_directory, ctx, mut app, cache) = cache_schedule_app();
@@ -11059,11 +11314,11 @@ mod tests {
         app.open_settings(&ctx);
         assert!(app.settings_open);
         assert!(app.cache_pending.is_some());
-        assert_eq!(app.workers.len(), 1);
-        let first_worker = app.workers[0].thread().id();
+        assert_eq!(cache_workers(&app).len(), 1);
+        let first_worker = cache_workers(&app)[0];
         app.open_settings(&ctx);
-        assert_eq!(app.workers.len(), 1);
-        assert_eq!(app.workers[0].thread().id(), first_worker);
+        assert_eq!(cache_workers(&app).len(), 1);
+        assert_eq!(cache_workers(&app)[0], first_worker);
         finish_cache_schedule_job(&mut app, &ctx);
         assert_eq!(
             app.cache_stats.as_ref().unwrap().used_bytes,
@@ -11109,8 +11364,8 @@ mod tests {
             app.poll_cache(&ctx);
         }
         assert!(app.cache_pending.is_none());
-        assert_eq!(app.workers.len(), 1);
-        assert_eq!(app.workers[0].thread().id(), first_worker);
+        assert_eq!(cache_workers(&app).len(), 1);
+        assert_eq!(cache_workers(&app)[0], first_worker);
         assert_eq!(
             app.cache_stats.as_ref().unwrap().used_bytes,
             initial.used_bytes
@@ -11139,11 +11394,11 @@ mod tests {
                 .unwrap();
             app.cache_error = true;
             app.start_cache_job(&ctx, action);
-            let operation_worker = app.workers[0].thread().id();
+            let operation_worker = cache_workers(&app)[0];
             app.open_settings(&ctx);
             assert!(app.settings_open);
-            assert_eq!(app.workers.len(), 1);
-            assert_eq!(app.workers[0].thread().id(), operation_worker);
+            assert_eq!(cache_workers(&app).len(), 1);
+            assert_eq!(cache_workers(&app)[0], operation_worker);
             finish_cache_schedule_job(&mut app, &ctx);
             assert!(!app.cache_error);
             let snapshot = app.cache_stats.as_ref().unwrap();
@@ -11156,7 +11411,7 @@ mod tests {
             app.poll_cache(&ctx);
             app.open_settings(&ctx);
             assert!(app.cache_pending.is_none());
-            assert_eq!(app.workers[0].thread().id(), operation_worker);
+            assert_eq!(cache_workers(&app)[0], operation_worker);
             drop(app);
         }
     }
@@ -11168,7 +11423,7 @@ mod tests {
             let (sender, receiver) = mpsc::sync_channel(1);
             app.cache_pending = Some(receiver);
             app.open_settings(&ctx);
-            assert!(app.workers.is_empty());
+            assert!(cache_workers(&app).is_empty());
             if !disconnected {
                 sender.send(Err(())).unwrap();
             }
@@ -11182,7 +11437,7 @@ mod tests {
                 app.poll_cache(&ctx);
                 assert!(app.cache_pending.is_none());
             }
-            assert!(app.workers.is_empty());
+            assert!(cache_workers(&app).is_empty());
             app.settings_open = false;
             app.open_settings(&ctx);
             assert!(app.cache_pending.is_some());
@@ -12866,7 +13121,7 @@ mod tests {
             for label in [
                 language.text("Язык интерфейса", "Interface language"),
                 language.text("Системный заголовок окна", "System title bar"),
-                language.text("Лимит кэша", "Cache limit"),
+                language.text("Лимит аудиокэша", "Audio cache limit"),
                 language.text(
                     "Треки, исполнители, альбомы, плейлисты",
                     "Tracks, artists, albums, playlists",
@@ -12921,7 +13176,7 @@ mod tests {
         for _ in 0..3 {
             output = settings_search_test_frame(&ctx, &mut app, &mut frame, Vec::new());
         }
-        assert!(account_ui_text_rect(&output, "Cache limit").is_some());
+        assert!(account_ui_text_rect(&output, "Audio cache limit").is_some());
         assert!(account_ui_text_rect(&output, "System title bar").is_none());
         assert_eq!(
             app.cache_stats.as_ref().unwrap().used_bytes,
@@ -12949,7 +13204,7 @@ mod tests {
         assert!(app.settings_query.is_empty());
         output = settings_search_test_frame(&ctx, &mut app, &mut frame, Vec::new());
         assert!(account_ui_text_rect(&output, "System title bar").is_some());
-        assert!(account_ui_text_rect(&output, "Cache limit").is_none());
+        assert!(account_ui_text_rect(&output, "Audio cache limit").is_none());
         assert_eq!(app.search.input, "untouched music search");
         assert!(app.settings_section == SettingsSection::Interface);
         assert_eq!(

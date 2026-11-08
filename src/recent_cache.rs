@@ -11,7 +11,7 @@ use crate::{library_cache, model::Track};
 pub const MAX_RECENT: usize = 32;
 const MAX_BYTES: u64 = 256 * 1024;
 
-fn state_path(account_id: i64) -> io::Result<PathBuf> {
+pub(crate) fn state_path(account_id: i64) -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
         if account_id <= 0 {
