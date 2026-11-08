@@ -58,6 +58,8 @@ pub enum Action {
     OpenPlaylist(AlbumRef),
     PlayFriendTrack((i64, i64), (i64, i64)),
     SignIn,
+    /// Open VK Mix settings: mood, familiarity and language.
+    ConfigureMix,
 }
 
 /// One vertical rhythm for Home: the gap above a section heading equals the
@@ -603,32 +605,20 @@ fn cell_width(width: f32, columns: usize) -> f32 {
     ((width - 16.0 * columns.saturating_sub(1) as f32) / columns as f32).max(1.0)
 }
 
-fn gradient(painter: &egui::Painter, rect: egui::Rect) {
-    theme::horizontal_gradient(
-        painter,
-        rect,
-        16.0,
-        Color32::from_rgb(26, 51, 84),
-        Color32::from_rgb(22, 29, 42),
-    );
-    painter.rect_stroke(
-        rect,
-        16.0,
-        Stroke::new(1.0, Color32::from_rgb(44, 61, 83)),
-        egui::StrokeKind::Inside,
-    );
-}
+/// VK Mix's banner: a fixed blend of the "For you" mix cover colors (blue,
+/// magenta, cyan, purple), dimmed slightly so white text stays readable.
+const MIX_COLORS: [Color32; 4] = [
+    Color32::from_rgb(41, 135, 197),
+    Color32::from_rgb(158, 48, 180),
+    Color32::from_rgb(13, 150, 161),
+    Color32::from_rgb(144, 51, 175),
+];
 
 fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 208.0), Sense::hover());
-    gradient(ui.painter(), rect);
-    let show_art = rect.width() >= 620.0;
+    theme::gradient_stops(ui.painter(), rect, 16.0, &MIX_COLORS);
     let inner = rect.shrink(24.0);
-    let text_right = if show_art {
-        inner.right() - 172.0
-    } else {
-        inner.right()
-    };
+    let text_right = inner.right();
     let mut text = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("home-hero-text")
@@ -643,7 +633,7 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
         egui::Label::new(
             RichText::new("VK MIX")
                 .small()
-                .color(Color32::from_rgb(151, 181, 220)),
+                .color(Color32::from_rgba_unmultiplied(255, 255, 255, 200)),
         )
         .selectable(false),
     );
@@ -663,18 +653,12 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
         "Personal music recommendations for you",
     );
     text.add(
-        egui::Label::new(RichText::new(subtitle).color(Color32::from_rgb(174, 187, 205)))
-            .wrap()
-            .selectable(false),
+        egui::Label::new(
+            RichText::new(subtitle).color(Color32::from_rgba_unmultiplied(255, 255, 255, 215)),
+        )
+        .wrap()
+        .selectable(false),
     );
-
-    if show_art {
-        let art = egui::Rect::from_center_size(
-            egui::pos2(inner.right() - 68.0, rect.center().y),
-            egui::vec2(136.0, 136.0),
-        );
-        mix_symbol(ui.painter(), art);
-    }
 
     let mut buttons = ui.new_child(
         egui::UiBuilder::new()
@@ -714,44 +698,33 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
             Action::PlayMix,
         )
     };
-    icons::button(
+    let mut clicked = icons::button(
         &mut buttons,
         icon,
         label,
         !view.connected || !view.mix_loading,
     )
     .clicked()
-    .then_some(action)
-}
-
-fn mix_symbol(painter: &egui::Painter, rect: egui::Rect) {
-    let center = rect.center();
-    painter.circle_filled(center, rect.width() * 0.5, Color32::from_rgb(24, 43, 70));
-    painter.circle_stroke(
-        center,
-        rect.width() * 0.5 - 0.5,
-        Stroke::new(1.0, Color32::from_rgb(48, 79, 122)),
-    );
-    for (ribbon, color) in [
-        Color32::from_rgb(47, 87, 144),
-        Color32::from_rgb(68, 120, 191),
-        Color32::from_rgb(110, 158, 222),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let points = (0..=40)
-            .map(|step| {
-                let fraction = step as f32 / 40.0;
-                let phase = fraction * std::f32::consts::TAU - ribbon as f32 * 0.8;
-                egui::pos2(
-                    rect.left() + rect.width() * (0.15 + fraction * 0.7),
-                    center.y + (ribbon as f32 - 1.0) * 15.0 + phase.sin() * 16.0,
-                )
-            })
-            .collect();
-        painter.add(egui::Shape::line(points, Stroke::new(5.0, color)));
+    .then_some(action);
+    if view.connected {
+        buttons.add_space(8.0);
+        let widgets = &mut buttons.style_mut().visuals.widgets;
+        widgets.inactive.bg_fill = Color32::from_black_alpha(72);
+        widgets.hovered.bg_fill = Color32::from_black_alpha(110);
+        widgets.active.bg_fill = Color32::from_black_alpha(140);
+        widgets.active.bg_stroke = Stroke::NONE;
+        if icons::button(
+            &mut buttons,
+            Icon::Settings,
+            view.language.text("Настроить", "Configure"),
+            true,
+        )
+        .clicked()
+        {
+            clicked = Some(Action::ConfigureMix);
+        }
     }
+    clicked
 }
 
 fn collage(
@@ -1250,6 +1223,17 @@ mod tests {
                 hero_frame(&context, state, language, 4, pointer(target, true));
                 let (_, action) = hero_frame(&context, state, language, 5, pointer(target, false));
                 assert_eq!(action, expected);
+                // Settings sit next to Listen once VK is connected, even while
+                // the mix is loading.
+                let configure = text_position(language.text("Настроить", "Configure"));
+                assert_eq!(configure.is_some(), state.connected);
+                if let Some(target) = configure {
+                    assert!(target.x > text_position(label).unwrap().x);
+                    hero_frame(&context, state, language, 6, pointer(target, true));
+                    let (_, action) =
+                        hero_frame(&context, state, language, 7, pointer(target, false));
+                    assert_eq!(action, Some(Action::ConfigureMix));
+                }
             }
         }
     }

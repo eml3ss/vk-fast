@@ -160,6 +160,50 @@ struct ParsedHome {
 type HomeTracks = (Vec<Track>, HashMap<(i64, i64), StreamInfo>);
 type ParsedArtist = (ArtistPage, HashMap<(i64, i64), StreamInfo>);
 
+/// VK Mix settings as VK's own "Configure VK Mix" dialog shows them:
+/// categories such as mood, familiarity and language, each with options.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MixSettings {
+    pub title: String,
+    pub subtitle: String,
+    pub categories: Vec<MixCategory>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MixCategory {
+    pub id: String,
+    pub title: String,
+    pub options: Vec<MixOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MixOption {
+    pub id: String,
+    pub title: String,
+    /// The option VK currently applies to this account's mix.
+    pub selected: bool,
+}
+
+/// One tuned VK Mix: like VK's player, a random 13-digit id for this set of
+/// choices, sent with every batch, and one option per category.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MixTuning {
+    pub id: u64,
+    pub choices: Vec<(String, String)>,
+}
+
+impl MixTuning {
+    /// `{"id":<id>,"<category>":["<option>"],...}`, as VK's web player sends.
+    fn options(&self) -> String {
+        let mut object = serde_json::Map::new();
+        object.insert("id".into(), Value::from(self.id));
+        for (category, option) in &self.choices {
+            object.insert(category.clone(), Value::from(vec![option.clone()]));
+        }
+        Value::Object(object).to_string()
+    }
+}
+
 /// One fresh server-selected batch from the personalized VK Mix stream.
 pub struct MixPage {
     pub tracks: Vec<Track>,
@@ -298,6 +342,8 @@ enum MixSource {
     Playlist((i64, i64)),
     /// A Home catalog tile; its parameters travel with the request.
     Catalog(u64),
+    /// VK Mix with the user's settings; the id is the tuning's own.
+    Tuned(u64),
 }
 
 impl MixSource {
@@ -312,7 +358,7 @@ impl MixSource {
                 ("mix_id", "playlist_mix".into()),
                 ("entity_id", format!("{owner}_{playlist}")),
             ],
-            Self::Catalog(_) => Vec::new(),
+            Self::Catalog(_) | Self::Tuned(_) => Vec::new(),
         }
     }
 }
@@ -1229,6 +1275,80 @@ impl WebAudioClient {
             canceled,
             |session, params| self.request_stream_mix(session, params),
         )
+    }
+
+    /// VK Mix with the choices from its settings dialog. VK's web player sends
+    /// them as `options` with every batch of the same tuned stream.
+    pub fn vk_mix_tuned(
+        &self,
+        expected_owner: i64,
+        tuning: &MixTuning,
+        canceled: &AtomicBool,
+    ) -> Result<MixPage, WebAudioError> {
+        let options = tuning.options();
+        self.stream_mix_request(
+            expected_owner,
+            MixSource::Tuned(tuning.id),
+            canceled,
+            |session, _| {
+                self.request_stream_mix(
+                    session,
+                    vec![("mix_id", "vk_mix".into()), ("options", options)],
+                )
+            },
+        )
+    }
+
+    /// The categories and options of VK Mix's settings dialog
+    /// (`audio.getStreamMixSettings`, as VK's web player requests them).
+    pub fn vk_mix_settings(
+        &self,
+        expected_owner: i64,
+        canceled: &AtomicBool,
+    ) -> Result<MixSettings, WebAudioError> {
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let cached = {
+            let state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
+            if state.verified_owner != Some(expected_owner) || state.generation != generation {
+                return Err(WebAudioError::Unverified);
+            }
+            state
+                .mix
+                .as_ref()
+                .filter(|mix| mix.expires > now() + 60)
+                .cloned()
+        };
+        let session = match cached {
+            Some(session) => session,
+            None => self.fetch_mix_session(expected_owner, canceled)?,
+        };
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        let response = self
+            .http
+            .post(format!(
+                "https://{}/method/audio.getStreamMixSettings?v=5.289",
+                session.api_host
+            ))
+            .header(ORIGIN, format!("https://{}", self.host))
+            .header(REFERER, format!("https://{}/", self.host))
+            .form(&[
+                ("mix_id", "vk_mix"),
+                ("access_token", session.token.as_str()),
+            ])
+            .send()
+            .map_err(network)?;
+        if response.status().is_redirection() {
+            self.forget_mix_session(expected_owner, generation, &session);
+            return Err(WebAudioError::TokenExpired);
+        }
+        let text = token_body(response)?;
+        parse_mix_settings(&text).inspect_err(|error| {
+            if *error == WebAudioError::TokenExpired {
+                self.forget_mix_session(expected_owner, generation, &session);
+            }
+        })
     }
 
     /// Current first-party Track mix identity sends its source type separately
@@ -3722,6 +3842,74 @@ fn album_stats(value: &Value) -> AlbumStats {
         created_at: timestamp("create_time"),
         updated_at: timestamp("update_time"),
     }
+}
+
+fn parse_mix_settings(text: &str) -> Result<MixSettings, WebAudioError> {
+    let value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
+    if let Some(error) = value.get("error") {
+        return Err(match error.get("error_code").and_then(number) {
+            Some(5 | 27 | 28) => WebAudioError::TokenExpired,
+            _ => WebAudioError::Rejected,
+        });
+    }
+    let settings = value
+        .get("response")
+        .ok_or(WebAudioError::Format)?
+        .get("settings");
+    let Some(settings) = settings.filter(|settings| !settings.is_null()) else {
+        return Ok(MixSettings::default());
+    };
+    let text = |value: &Value, key: &str, limit: usize| {
+        value
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| number(value).map(|n| n.to_string()))
+            })
+            .map(|text| html_escape::decode_html_entities(text.trim()).into_owned())
+            .filter(|text| {
+                !text.is_empty() && text.len() <= limit && !text.chars().any(char::is_control)
+            })
+    };
+    let categories = settings
+        .get("mix_categories")
+        .and_then(Value::as_array)
+        .ok_or(WebAudioError::Format)?
+        .iter()
+        .take(16)
+        .filter_map(|category| {
+            let options: Vec<MixOption> = category
+                .get("options")?
+                .as_array()?
+                .iter()
+                .take(64)
+                .filter_map(|option| {
+                    Some(MixOption {
+                        id: text(option, "id", 256)?,
+                        title: text(option, "title", 256)?,
+                        selected: option
+                            .get("selected")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                })
+                .collect();
+            (!options.is_empty()).then(|| {
+                Some(MixCategory {
+                    id: text(category, "id", 256)?,
+                    title: text(category, "title", 256).unwrap_or_default(),
+                    options,
+                })
+            })?
+        })
+        .collect();
+    Ok(MixSettings {
+        title: text(settings, "title", 512).unwrap_or_default(),
+        subtitle: text(settings, "subtitle", 1024).unwrap_or_default(),
+        categories,
+    })
 }
 
 fn parse_mix_page(text: &str) -> Result<HomeTracks, WebAudioError> {
@@ -6502,6 +6690,55 @@ mod tests {
         assert_eq!(profile.display_name(), "VK 42");
         let profile = profile_from_html("<script>vk.id=42;</script>").unwrap();
         assert_eq!(profile.display_name(), "VK 42");
+    }
+
+    #[test]
+    fn vk_mix_settings_and_tuning_follow_the_web_player_format() {
+        let settings = parse_mix_settings(
+            &json!({"response":{"settings":{
+            "title":"Настроить VK Микс","subtitle":"","multi_select":false,
+            "mix_categories":[
+                {"id":"mood","title":"Настроение","type":"default","options":[
+                    {"id":"happy","title":"Радостно","icon":"https://images.example.test/a.json"},
+                    {"id":"sad","title":"Грустно","selected":true}]},
+                {"id":"language","title":"Язык","options":[
+                    {"id":"ru","title":"Русский"},{"id":"","title":"Broken"}]},
+                {"id":"empty","title":"Empty","options":[]}
+            ]}}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(settings.title, "Настроить VK Микс");
+        assert_eq!(
+            settings
+                .categories
+                .iter()
+                .map(|category| (category.id.as_str(), category.options.len()))
+                .collect::<Vec<_>>(),
+            [("mood", 2), ("language", 1)]
+        );
+        assert!(settings.categories[0].options[1].selected);
+        assert!(!settings.categories[0].options[0].selected);
+        assert_eq!(
+            parse_mix_settings(r#"{"response":{"settings":null}}"#).unwrap(),
+            MixSettings::default()
+        );
+        assert_eq!(
+            parse_mix_settings(r#"{"error":{"error_code":5}}"#),
+            Err(WebAudioError::TokenExpired)
+        );
+        let tuning = MixTuning {
+            id: 1_234_567_890_123,
+            choices: vec![
+                ("mood".into(), "sad".into()),
+                ("language".into(), "ru".into()),
+            ],
+        };
+        let options: Value = serde_json::from_str(&tuning.options()).unwrap();
+        assert_eq!(
+            options,
+            json!({"id":1_234_567_890_123_u64,"mood":["sad"],"language":["ru"]})
+        );
     }
 
     #[test]

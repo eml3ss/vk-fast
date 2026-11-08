@@ -29,6 +29,7 @@ mod library_cache;
 mod lyrics;
 mod lyrics_ui;
 mod media_decoder;
+mod mix_settings_ui;
 mod model;
 mod music_session_store;
 mod owner_ui;

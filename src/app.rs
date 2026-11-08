@@ -665,6 +665,38 @@ impl Drop for MixRequest {
     }
 }
 
+type MixSettingsReceiver = Receiver<Result<crate::web_audio::MixSettings, WebAudioError>>;
+
+/// The "Configure VK Mix" dialog: VK's options load in the background.
+#[derive(Default)]
+struct MixSettingsDialog {
+    open: bool,
+    request: Option<(Arc<AtomicBool>, MixSettingsReceiver)>,
+    settings: Option<crate::web_audio::MixSettings>,
+    selection: Vec<(String, String)>,
+    error: Option<WebAudioError>,
+}
+
+impl MixSettingsDialog {
+    fn close(&mut self) {
+        if let Some((canceled, _)) = self.request.take() {
+            canceled.store(true, Ordering::Release);
+        }
+        *self = Self::default();
+    }
+}
+
+/// VK's player picks a random 13-digit id for a mix session (and for a set
+/// of VK Mix choices) and reuses it for every batch.
+fn random_mix_session() -> u64 {
+    let random = getrandom::u64().unwrap_or_else(|_| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+    });
+    1_000_000_000_000 + random % 9_000_000_000_000
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MixSeed {
     Track((i64, i64)),
@@ -1035,6 +1067,9 @@ pub struct MusicApp {
     home_catalog: crate::web_audio::HomeCatalog,
     catalog_request: Option<CatalogRequest>,
     catalog_mix: Option<(u64, crate::web_audio::CatalogMix)>,
+    /// The user's VK Mix settings, sent with every VK Mix batch.
+    mix_tuning: Option<crate::web_audio::MixTuning>,
+    mix_settings: MixSettingsDialog,
     home_request: Option<HomeRequest>,
     home_requested: bool,
     home_error: Option<WebAudioError>,
@@ -1348,6 +1383,8 @@ impl MusicApp {
             home_catalog: Default::default(),
             catalog_request: None,
             catalog_mix: None,
+            mix_tuning: None,
+            mix_settings: MixSettingsDialog::default(),
             home_request: None,
             home_requested: false,
             home_error: None,
@@ -1626,6 +1663,9 @@ impl MusicApp {
         self.play_order =
             PlaybackOrder::with_modes(self.play_order.shuffle(), self.play_order.repeat());
         self.restoring = false;
+        // VK Mix settings belong to the account that chose them.
+        self.mix_tuning = None;
+        self.mix_settings.close();
         self.pending = None; // Discard any late response from the previous session.
         self.session = None;
         self.avatar_refresh_ready = false;
@@ -2173,6 +2213,7 @@ impl MusicApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if self.qr_open
+            || self.mix_settings.open
             || self.playlist_create_form.is_some()
             || self.playlist_controls.has_modal()
             || egui::Popup::is_any_open(ctx)
@@ -3027,6 +3068,110 @@ impl MusicApp {
         }
     }
 
+    /// Open "Configure VK Mix" and load VK's current options for it.
+    fn open_mix_settings(&mut self, ctx: &egui::Context) {
+        if self.demo {
+            return;
+        }
+        let Some((owner, client)) = self
+            .session
+            .as_ref()
+            .and_then(|session| Some((session.profile.id, session.music.clone()?)))
+        else {
+            return;
+        };
+        self.mix_settings.close();
+        self.mix_settings.open = true;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let repaint = self.repaint_target.with_context(ctx);
+        match thread::Builder::new()
+            .name("vk-mix-settings".into())
+            .spawn(move || {
+                let _ = sender.send(client.vk_mix_settings(owner, &worker_cancel));
+                repaint.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.mix_settings.request = Some((canceled, receiver));
+            }
+            Err(_) => self.mix_settings.error = Some(WebAudioError::Network),
+        }
+    }
+
+    fn poll_mix_settings(&mut self) {
+        let Some((_, receiver)) = &self.mix_settings.request else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        self.mix_settings.request = None;
+        match result {
+            Ok(settings) => {
+                // The current choices: this run's own, else what VK applies.
+                self.mix_settings.selection = match &self.mix_tuning {
+                    Some(tuning) => tuning.choices.clone(),
+                    None => settings
+                        .categories
+                        .iter()
+                        .filter_map(|category| {
+                            let option = category.options.iter().find(|option| option.selected)?;
+                            Some((category.id.clone(), option.id.clone()))
+                        })
+                        .collect(),
+                };
+                self.mix_settings.selection.retain(|(category, option)| {
+                    settings.categories.iter().any(|known| {
+                        known.id == *category
+                            && known.options.iter().any(|known| known.id == *option)
+                    })
+                });
+                self.mix_settings.settings = Some(settings);
+            }
+            Err(error) => self.mix_settings.error = Some(error),
+        }
+    }
+
+    fn mix_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.mix_settings.open {
+            return;
+        }
+        let error = self
+            .mix_settings
+            .error
+            .as_ref()
+            .map(|error| error.localized(self.language));
+        let output = crate::mix_settings_ui::show(
+            ctx,
+            crate::mix_settings_ui::View {
+                language: self.language,
+                settings: self.mix_settings.settings.as_ref(),
+                loading: self.mix_settings.request.is_some(),
+                error: error.as_deref(),
+            },
+            &mut self.mix_settings.selection,
+        );
+        match output {
+            crate::mix_settings_ui::Output::None => {}
+            crate::mix_settings_ui::Output::Close => self.mix_settings.close(),
+            crate::mix_settings_ui::Output::Apply => {
+                let choices = std::mem::take(&mut self.mix_settings.selection);
+                self.mix_settings.close();
+                self.mix_tuning = (!choices.is_empty()).then(|| crate::web_audio::MixTuning {
+                    id: random_mix_session(),
+                    choices,
+                });
+                // Like VK, applying starts VK Mix again with the new choices.
+                self.leave_mix();
+                self.load_mix_from(ctx, true, None);
+            }
+        }
+    }
+
     /// Start a Home genre, mood or artist mix, or toggle the one already playing.
     fn play_catalog_mix(&mut self, ctx: &egui::Context, mix: crate::web_audio::CatalogMix) {
         if self.demo || !self.search_ready() {
@@ -3042,14 +3187,7 @@ impl MusicApp {
             self.toggle_playback(ctx);
             return;
         }
-        // VK's player picks a random 13-digit mix session and reuses it for
-        // every batch of the same mix.
-        let random = getrandom::u64().unwrap_or_else(|_| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos() as u64)
-        });
-        let session = 1_000_000_000_000 + random % 9_000_000_000_000;
+        let session = random_mix_session();
         self.mix_request = None;
         self.track_menu_error = None;
         self.catalog_mix = Some((session, mix));
@@ -3108,6 +3246,7 @@ impl MusicApp {
             }
             _ => None,
         };
+        let tuning = self.mix_tuning.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -3130,7 +3269,10 @@ impl MusicApp {
                     },
                     &worker_cancel,
                 ),
-                (None, _) => client.vk_mix(owner, &worker_cancel),
+                (None, _) => match &tuning {
+                    Some(tuning) => client.vk_mix_tuned(owner, tuning, &worker_cancel),
+                    None => client.vk_mix(owner, &worker_cancel),
+                },
             };
             let _ = sender.send(result);
             repaint.request_repaint();
@@ -5990,6 +6132,7 @@ impl MusicApp {
                 self.navigate_music(&ctx, MusicPage::Recent);
             }
             Some(home_ui::Action::PlayMix) => self.play_mix(&ctx),
+            Some(home_ui::Action::ConfigureMix) => self.open_mix_settings(&ctx),
             Some(home_ui::Action::PlayRecent) => {
                 self.leave_mix();
                 if !self.recent.is_empty() {
@@ -8249,11 +8392,13 @@ impl MusicApp {
                 }
             });
         let _ = self.qr_window(ui.ctx());
+        self.mix_settings_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
         self.audio_upload_window(ui.ctx());
         if !self.system_titlebar
             && !self.qr_open
+            && !self.mix_settings.open
             && !self.audio_upload.has_modal()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
@@ -8344,6 +8489,7 @@ impl MusicApp {
         if ui.ctx().current_pass_index() == 0
             && (!self.settings_open || self.lyrics.fullscreen)
             && !self.qr_open
+            && !self.mix_settings.open
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -8468,6 +8614,7 @@ impl MusicApp {
             self.logged_playback_failure = failure;
         }
         self.poll_qr(ctx);
+        self.poll_mix_settings();
         self.poll_cache(ctx);
         self.publish_system_media();
         self.publish_discord_rpc();
@@ -8893,6 +9040,8 @@ mod tests {
             home_catalog: Default::default(),
             catalog_request: None,
             catalog_mix: None,
+            mix_tuning: None,
+            mix_settings: MixSettingsDialog::default(),
             home_request: None,
             home_requested: false,
             home_error: None,

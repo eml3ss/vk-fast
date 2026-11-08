@@ -86,6 +86,77 @@ pub fn horizontal_gradient(
     }
     painter.add(egui::Shape::mesh(mesh));
 }
+/// A rounded rectangle filled left to right through several evenly spaced
+/// colors. Vertical strips carry the colors; columns are dense inside the
+/// corner arcs, and a thin transparent fringe antialiases the outline.
+pub fn gradient_stops(painter: &egui::Painter, rect: egui::Rect, radius: f32, stops: &[Color32]) {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+        return;
+    };
+    if stops.len() == 1 || !rect.is_positive() {
+        horizontal_gradient(painter, rect, radius, *first, *last);
+        return;
+    }
+    let feather = 0.5 / painter.ctx().pixels_per_point();
+    let radius = radius.min(rect.width().min(rect.height()) * 0.5).max(0.0);
+    let color_at = |x: f32| {
+        let position =
+            ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) * (stops.len() - 1) as f32;
+        let index = (position.floor() as usize).min(stops.len() - 2);
+        let fraction = position - index as f32;
+        let (a, b) = (stops[index].to_array(), stops[index + 1].to_array());
+        let channels = std::array::from_fn::<_, 4, _>(|i| {
+            egui::lerp(f32::from(a[i])..=f32::from(b[i]), fraction).round() as u8
+        });
+        Color32::from_rgba_premultiplied(channels[0], channels[1], channels[2], channels[3])
+    };
+    // Vertical inset of the outline at x, from the corner arcs.
+    let inset = |x: f32| {
+        let from_edge = (x - rect.left()).min(rect.right() - x);
+        if from_edge >= radius {
+            0.0
+        } else {
+            let dx = radius - from_edge.max(0.0);
+            radius - (radius * radius - dx * dx).max(0.0).sqrt()
+        }
+    };
+    let mut columns = Vec::new();
+    let corner_steps = (radius.ceil() as usize).max(1);
+    for step in 0..=corner_steps {
+        columns.push(rect.left() + radius * step as f32 / corner_steps as f32);
+    }
+    let middle = (rect.width() - 2.0 * radius).max(0.0);
+    let middle_steps = ((middle / 8.0).ceil() as usize).max(1);
+    for step in 1..middle_steps {
+        columns.push(rect.left() + radius + middle * step as f32 / middle_steps as f32);
+    }
+    for step in 0..=corner_steps {
+        columns.push(rect.right() - radius + radius * step as f32 / corner_steps as f32);
+    }
+    columns.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    let mut mesh = egui::Mesh::default();
+    for x in &columns {
+        let color = color_at(*x);
+        let dy = inset(*x);
+        let top = rect.top() + dy;
+        let bottom = rect.bottom() - dy;
+        // Per column: outer top, top, bottom, outer bottom.
+        mesh.colored_vertex(egui::pos2(*x, top - feather), Color32::TRANSPARENT);
+        mesh.colored_vertex(egui::pos2(*x, top + feather), color);
+        mesh.colored_vertex(egui::pos2(*x, bottom - feather), color);
+        mesh.colored_vertex(egui::pos2(*x, bottom + feather), Color32::TRANSPARENT);
+    }
+    for column in 0..columns.len().saturating_sub(1) as u32 {
+        let a = column * 4;
+        let b = a + 4;
+        for row in 0..3 {
+            mesh.add_triangle(a + row, b + row, a + row + 1);
+            mesh.add_triangle(a + row + 1, b + row, b + row + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 pub fn semibold() -> FontFamily {
     FontFamily::Name("Inter Semibold".into())
 }
