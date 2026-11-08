@@ -6928,6 +6928,16 @@ impl MusicApp {
         rect: egui::Rect,
         track: &Track,
     ) -> Option<TrackAction> {
+        self.track_popup_in(ui, response, &[rect], track)
+    }
+
+    fn track_popup_in(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        areas: &[egui::Rect],
+        track: &Track,
+    ) -> Option<TrackAction> {
         // Child artist/heart controls own their primary clicks. A secondary
         // click anywhere in the visible track region opens the same menu.
         let requested = ui
@@ -6940,7 +6950,9 @@ impl MusicApp {
             })
             .is_some_and(|point| {
                 ui.is_enabled()
-                    && rect.intersect(ui.clip_rect()).contains(point)
+                    && areas
+                        .iter()
+                        .any(|rect| rect.intersect(ui.clip_rect()).contains(point))
                     && ui.ctx().layer_id_at(point) == Some(ui.layer_id())
             });
         let popup = egui::Popup::context_menu(response)
@@ -7439,6 +7451,7 @@ impl MusicApp {
             side_row.min,
             egui::pos2(metadata_right.max(side_row.left()), side_row.bottom()),
         );
+        let mut menu_areas = Vec::with_capacity(2);
         let metadata_response = ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt("player-metadata")
@@ -7518,6 +7531,7 @@ impl MusicApp {
                                             Sense::hover()
                                         }),
                                 );
+                                menu_areas.push(title_response.rect);
                                 if let Some(key) = track_key
                                     && title_response
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -7534,6 +7548,13 @@ impl MusicApp {
                                 }
                             },
                         );
+                        menu_areas.push(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(
+                                artist_width.min(ui.available_width().max(0.0)),
+                                artist_line_height,
+                            ),
+                        ));
                         if has_track {
                             if let Some(artist) = detail_ui::artist_links_with_font(
                                 ui,
@@ -7583,7 +7604,8 @@ impl MusicApp {
             },
         );
         if let Some(track) = &title_track
-            && let Some(action) = self.track_popup(ui, &metadata_response.response, metadata, track)
+            && let Some(action) =
+                self.track_popup_in(ui, &metadata_response.response, &menu_areas, track)
         {
             metadata_action = Some(action);
         }
@@ -12890,6 +12912,12 @@ mod tests {
                     );
                 }
                 output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+                // In the player only the title and artists open the menu,
+                // not the cover or the heart next to them.
+                if footer && target >= 2 {
+                    assert!(account_ui_text_rect(&output, "Copy link").is_none());
+                    continue;
+                }
                 for label in ["Add to queue", "Go to artist", "Go to album", "Copy link"] {
                     assert!(
                         account_ui_text_rect(&output, label).is_some(),
