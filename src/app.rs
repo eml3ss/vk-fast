@@ -1050,7 +1050,8 @@ struct Library {
     /// The signed-in account. Rows its heart would show as not saved are
     /// kept out: VK's music page can list recently played tracks there.
     owner: Option<i64>,
-    /// Rows VK sent that were kept out, so the shown total matches.
+    /// Rows VK sent that were kept out; once all is loaded, the total
+    /// becomes the shown rows.
     hidden: usize,
 }
 
@@ -1094,8 +1095,10 @@ impl Library {
                 crate::diagnostics::event("library", "unsaved_rows_hidden");
             }
         }
-        let raw_total = page.count.map(|count| count.saturating_sub(self.hidden));
-        self.total = raw_total.or(self.total);
+        // VK's API total already counts only saved tracks; the website's
+        // fallback total may include hidden rows. Until the end is loaded the
+        // total is shown as VK gave it, then it becomes the shown rows.
+        self.total = page.count.or(self.total);
         self.offset = self.offset.saturating_add(received);
         let known_metadata: HashMap<_, _> = self
             .tracks
@@ -1131,10 +1134,7 @@ impl Library {
             self.total = None;
         }
         self.exhausted = page.exhausted.unwrap_or_else(|| {
-            received == 0
-                || self
-                    .total
-                    .is_some_and(|total| self.offset >= total + self.hidden)
+            received == 0 || self.total.is_some_and(|total| self.offset >= total)
         });
         if self.exhausted && self.hidden > 0 {
             self.total = Some(self.tracks.len());

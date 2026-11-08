@@ -291,6 +291,15 @@ fn rows_the_heart_shows_as_not_saved_stay_out_of_my_music() {
     for track in &mut only_played.items {
         track.owner_id = 55;
     }
+    // Partly loaded: VK's API total (saved tracks only) is shown as is.
+    let mut partial = page(3, &[11, 12]);
+    partial.items[0].owner_id = 42;
+    partial.items[1].owner_id = 55;
+    partial.exhausted = Some(false);
+    let mut library = Library::default().for_owner(42);
+    library.refresh(partial);
+    assert_eq!(library.tracks.len(), 1);
+    assert_eq!(library.total, Some(3));
     let mut library = Library::default().for_owner(42);
     library.refresh(only_played);
     assert!(library.tracks.is_empty());
