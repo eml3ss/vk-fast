@@ -285,13 +285,12 @@ fn rows_the_heart_shows_as_not_saved_stay_out_of_my_music() {
     library.refresh(played);
     let ids: Vec<_> = library.tracks.iter().map(|track| track.id).collect();
     assert_eq!(ids, [9, 10]);
-    assert_eq!(library.total, Some(2));
+    assert_eq!(library.total, Some(4), "the counter stays VK's own");
     assert_eq!(library.offset, 4, "VK's offset still counts every row");
     let mut only_played = page(2, &[7, 8]);
     for track in &mut only_played.items {
         track.owner_id = 55;
     }
-    // Partly loaded: VK's API total (saved tracks only) is shown as is.
     let mut partial = page(3, &[11, 12]);
     partial.items[0].owner_id = 42;
     partial.items[1].owner_id = 55;
@@ -303,6 +302,6 @@ fn rows_the_heart_shows_as_not_saved_stay_out_of_my_music() {
     let mut library = Library::default().for_owner(42);
     library.refresh(only_played);
     assert!(library.tracks.is_empty());
-    assert_eq!(library.total, Some(0));
+    assert_eq!(library.total, Some(2));
     assert!(library.exhausted);
 }
