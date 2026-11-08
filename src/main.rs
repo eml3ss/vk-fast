@@ -284,6 +284,8 @@ fn main() -> eframe::Result {
         .any(|arg| arg == "--login" || arg == "--qr-login");
     let system_titlebar = preferences::load_system_titlebar();
     ui_fonts::preload();
+    #[cfg(windows)]
+    let _ = app_icon::tray_icon();
     let options = move || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("VK Fast")

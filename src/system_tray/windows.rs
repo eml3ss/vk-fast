@@ -142,7 +142,7 @@ impl Backend {
             &quit,
         ])
         .map_err(|error| Error(error.to_string()))?;
-        let image = crate::app_icon::native_icon();
+        let image = crate::app_icon::tray_icon();
         let icon = Icon::from_rgba(image.rgba.clone(), image.width, image.height)
             .map_err(|error| Error(error.to_string()))?;
         let icon = TrayIconBuilder::new()

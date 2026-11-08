@@ -22,6 +22,40 @@ pub fn native_icon() -> Arc<IconData> {
     .clone()
 }
 
+/// Prepare before creating the GUI: the tray needs a tightly framed small
+/// image instead of asking the shell to shrink the padded window icon.
+#[cfg(any(windows, test))]
+pub fn tray_icon() -> Arc<IconData> {
+    static ICON: OnceLock<Arc<IconData>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let source = native_icon();
+        let pixels = image::RgbaImage::from_raw(source.width, source.height, source.rgba.clone())
+            .expect("Embedded VK Fast icon must contain RGBA pixels");
+        let (mut left, mut top, mut right, mut bottom) = (source.width, source.height, 0, 0);
+        for (x, y, pixel) in pixels.enumerate_pixels() {
+            if pixel[3] > 16 {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x + 1);
+                bottom = bottom.max(y + 1);
+            }
+        }
+        let cropped = image::imageops::crop_imm(&pixels, left, top, right - left, bottom - top);
+        let pixels = image::imageops::resize(
+            &cropped.to_image(),
+            32,
+            32,
+            image::imageops::FilterType::Lanczos3,
+        );
+        Arc::new(IconData {
+            width: pixels.width(),
+            height: pixels.height(),
+            rgba: pixels.into_raw(),
+        })
+    })
+    .clone()
+}
+
 /// Context memory is copied during window recreation; its old GPU handle is
 /// explicitly discarded before a new renderer uses this texture.
 pub fn rebind(ctx: &egui::Context) {
@@ -50,6 +84,27 @@ pub fn show(ui: &mut egui::Ui, size: f32) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_badge_fills_the_small_canvas_without_changing_the_window_icon() {
+        let window = native_icon();
+        let tray = tray_icon();
+        assert_eq!((tray.width, tray.height), (32, 32));
+        assert_eq!(tray.rgba.len(), 32 * 32 * 4);
+        let alpha = |x: usize, y: usize| tray.rgba[(y * 32 + x) * 4 + 3];
+        for (x, y) in [(0, 16), (31, 16), (16, 0), (16, 31)] {
+            assert!(
+                alpha(x, y) > 128,
+                "Tray badge has an oversized margin at {x},{y}"
+            );
+        }
+        for (x, y) in [(0, 0), (31, 0), (0, 31), (31, 31)] {
+            assert_eq!(alpha(x, y), 0);
+        }
+        assert_eq!((window.width, window.height), (256, 256));
+        assert!(Arc::ptr_eq(&window, &native_icon()));
+        assert!(Arc::ptr_eq(&tray, &tray_icon()));
+    }
 
     #[test]
     fn native_icon_is_square_rgba_with_transparent_exterior_and_a_visible_round_badge() {
