@@ -76,7 +76,11 @@ fn lyrics_open_below_the_queue_and_fullscreen_restores_the_drawer_on_escape() {
             command.viewport_output[&egui::ViewportId::ROOT]
                 .commands
                 .iter()
-                .any(|command| matches!(command, egui::ViewportCommand::Fullscreen(true)))
+                .any(|command| if cfg!(windows) {
+                    matches!(command, egui::ViewportCommand::Maximized(true))
+                } else {
+                    matches!(command, egui::ViewportCommand::Fullscreen(true))
+                })
         );
         for _ in 0..4 {
             output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
@@ -105,7 +109,11 @@ fn lyrics_open_below_the_queue_and_fullscreen_restores_the_drawer_on_escape() {
             command.viewport_output[&egui::ViewportId::ROOT]
                 .commands
                 .iter()
-                .any(|command| matches!(command, egui::ViewportCommand::Fullscreen(false)))
+                .any(|command| if cfg!(windows) {
+                    matches!(command, egui::ViewportCommand::Maximized(false))
+                } else {
+                    matches!(command, egui::ViewportCommand::Fullscreen(false))
+                })
         );
         assert!(!app.lyrics.fullscreen && app.lyrics.open);
         app.toggle_queue(&ctx);

@@ -43,6 +43,20 @@ Portable-архив содержит только `vk-fast.exe` в корне. �
 
 В 0.1.0 механизма обновления ещё нет: один раз установите актуальную версию вручную. Установщик можно запустить поверх прежней установки; portable — распаковать в прежнюю папку после полного закрытия плеера, сохранив существующие `config`/`cache`.
 
+## Сборка на Windows
+
+Нужны официальный Rust 1.95+ с целью `x86_64-pc-windows-msvc`, компоненты Visual Studio **Разработка классических приложений на C++** (MSVC x64/x86 и Windows SDK), Python 3.11+ и Git Bash. Cargo устанавливает Rust-зависимости из `Cargo.lock`; LLVM, cargo-xwin и Wine для нативной сборки не нужны.
+
+Запустите из Git Bash:
+
+```sh
+./scripts/build-windows.sh --output dist
+```
+
+Скрипт автоматически выбирает нативный MSVC и создаёт portable ZIP. Для установщика добавьте `--installer`: закреплённый NSIS скачивается и запускается напрямую в Windows. Python выбирается через `py -3`, а без Python Launcher — из `PATH`. Глобальная установка Python не обязательна: он может лежать в отдельной папке. Чтобы выбрать конкретный интерпретатор, задайте `VK_FAST_PYTHON`, например `export VK_FAST_PYTHON='C:/Program Files/Python311/python.exe'`.
+
+Rust и кэш Cargo можно установить на другой диск: перед запуском `rustup-init.exe` задайте постоянные пользовательские переменные `RUSTUP_HOME` и `CARGO_HOME`. В `PATH` должна быть папка `CARGO_HOME/bin`. Результаты компиляции остаются в `target` проекта, если не задан другой `CARGO_TARGET_DIR`.
+
 ## Сборка на Linux
 
 Для основного приложения нужны официальный Rust 1.95+ с целью `x86_64-pc-windows-msvc`, Cargo, LLVM (`clang-cl`, `lld-link`, `llvm-lib`, `llvm-rc`), Python 3.11+ и [cargo-xwin](https://github.com/rust-cross/cargo-xwin) для загрузки MSVC CRT/Windows SDK. Используйте компилятор и стандартную библиотеку из одного официального toolchain.
