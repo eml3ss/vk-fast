@@ -13,6 +13,7 @@ pub enum Setting {
     SystemTitlebar,
     CompactSeek,
     DoubleClickPlay,
+    SearchOnEnter,
     NormalizeVolume,
     Lyrics,
     MinimizeToTray,
@@ -60,6 +61,9 @@ impl Query {
             }
             Setting::DoubleClickPlay => {
                 "интерфейс воспроизведение запускать трек треки щелчок щелчком клик кликом двойной двойным одинарный одинарным нажатие два раза мышь interface playback play track tracks single double click clicks mouse"
+            }
+            Setting::SearchOnEnter => {
+                "интерфейс поиск искать энтер enter ввод нажатие клавиша сразу при вводе текста interface search enter key press instant typing as you type"
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"

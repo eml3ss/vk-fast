@@ -2419,6 +2419,18 @@ impl WebAudioClient {
         reference: &AlbumRef,
         canceled: &AtomicBool,
     ) -> Result<AlbumPage, WebAudioError> {
+        self.collection_page(expected_owner, reference, canceled)
+            .map(|(page, _)| page)
+    }
+
+    /// Like `album_page`, plus whether VK calls the collection an album or
+    /// single: a `/music/playlist/` link can point at either.
+    pub fn collection_page(
+        &self,
+        expected_owner: i64,
+        reference: &AlbumRef,
+        canceled: &AtomicBool,
+    ) -> Result<(AlbumPage, CollectionKind), WebAudioError> {
         if reference.owner_id == 0 || reference.id == 0 {
             return Err(WebAudioError::Format);
         }
@@ -2443,7 +2455,8 @@ impl WebAudioClient {
         )?;
         let mut page = parse_album_page(&value, reference)?;
         let source = value.get("playlist").unwrap_or(&value);
-        if page.creator.is_none() && collection_kind(source) == CollectionKind::Playlist {
+        let kind = collection_kind(source);
+        if page.creator.is_none() && kind == CollectionKind::Playlist {
             page.creator = self.playlist_creator(expected_owner, generation, &value, canceled)?;
         }
         let mut offset = 0;
@@ -2479,7 +2492,7 @@ impl WebAudioClient {
                 || count.is_some_and(|count| offset as u64 >= count)
                 || (count.is_none() && rows.len() < 100)
             {
-                return Ok(page);
+                return Ok((page, kind));
             }
             if page.tracks.len() == before {
                 return Err(WebAudioError::Pagination);

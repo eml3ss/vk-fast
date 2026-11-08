@@ -53,6 +53,7 @@ pub enum Action {
     OpenCreator(crate::web_audio::PlaylistCreator),
     EditPlaylist,
     ToggleLibraryLike,
+    CopyLink,
     ReloadReleases,
 }
 
@@ -1073,7 +1074,8 @@ fn controls(
             ui.painter()
                 .layout_no_wrap(shuffle_label.into(), font, ui.visuals().text_color());
         let full_width = galley.size().x + 50.0;
-        let follow_room = if follow.is_some() { 46.0 } else { 0.0 };
+        // The heart and the copy-link button each take 36px plus spacing.
+        let follow_room = if follow.is_some() { 92.0 } else { 46.0 };
         let width = if ui.available_width() >= full_width + follow_room {
             full_width
         } else {
@@ -1171,6 +1173,26 @@ fn controls(
                 action = Some(Action::ToggleLibraryLike);
             }
         }
+        let label = language.text("Копировать ссылку", "Copy link");
+        let (rect, copy) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), Sense::click());
+        let visual = ui.style().interact(&copy);
+        ui.painter().rect(
+            rect,
+            8.0,
+            visual.bg_fill,
+            visual.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        icons::paint(
+            ui.painter(),
+            rect.shrink(8.0),
+            Icon::CopyLink,
+            visual.fg_stroke.color,
+        );
+        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if copy.on_hover_text(label).clicked() {
+            action = Some(Action::CopyLink);
+        }
     });
     action
 }
@@ -1233,11 +1255,14 @@ mod tests {
                     })
                     .collect();
                 buttons.sort_by(|a, b| a.left().total_cmp(&b.left()));
-                assert_eq!(buttons.len(), 3, "Three controls must fit at {width}px");
+                assert_eq!(buttons.len(), 4, "Four controls must fit at {width}px");
                 assert_eq!(buttons[2].size(), egui::vec2(36.0, 36.0));
                 assert!((buttons[2].center().y - buttons[0].center().y).abs() < 0.5);
                 assert!((buttons[2].left() - buttons[1].right() - 10.0).abs() < 0.5);
-                assert!(buttons[2].right() <= width);
+                // The copy-link button follows the heart.
+                assert_eq!(buttons[3].size(), egui::vec2(36.0, 36.0));
+                assert!((buttons[3].left() - buttons[2].right() - 10.0).abs() < 0.5);
+                assert!(buttons[3].right() <= width);
                 let point = buttons[2].center();
                 for pressed in [true, false] {
                     draw(vec![

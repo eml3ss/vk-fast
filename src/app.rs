@@ -1235,6 +1235,8 @@ pub struct MusicApp {
     titlebar_save_failed: bool,
     double_click_to_play: bool,
     click_behavior_save_failed: bool,
+    search_on_enter: bool,
+    search_on_enter_save_failed: bool,
     window_reopen: bool,
     /// Outer widths of the navigation and the lyrics/queue panels, as the
     /// user last dragged them. Saved with the window geometry.
@@ -1568,6 +1570,8 @@ impl MusicApp {
             titlebar_save_failed: false,
             double_click_to_play: preferences::load_double_click_to_play(),
             click_behavior_save_failed: false,
+            search_on_enter: preferences::load_search_on_enter(),
+            search_on_enter_save_failed: false,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
@@ -3718,7 +3722,10 @@ impl MusicApp {
             && self.search.hints_for != query
             && self.search.hints_due.is_none()
         {
-            self.search.hints_due = Some(Instant::now() + Duration::from_millis(250));
+            self.search.hints_due = Some(
+                Instant::now()
+                    + Duration::from_millis(if self.search_on_enter { 250 } else { 400 }),
+            );
         }
         if let Some(deadline) = self.search.hints_due {
             if Instant::now() < deadline {
@@ -3726,6 +3733,17 @@ impl MusicApp {
                 return;
             }
             self.search.hints_due = None;
+            if !self.search_on_enter {
+                // Without Enter, a pause in typing starts the search itself.
+                self.page = MusicPage::Search(query.clone());
+                if self.search.results_query != query {
+                    self.search.results = self.search.cache.get(&query).cloned();
+                }
+                self.search.results_query = query;
+                self.search.category = SearchCategory::All;
+                self.start_search_results(ctx, 0);
+                return;
+            }
             self.search.hints_for = query.clone();
             let worker_query = query.clone();
             match self.spawn_search(ctx, query, 0, move |client, owner, cancel| {
@@ -3855,6 +3873,14 @@ impl MusicApp {
         let ctx = ui.ctx().clone();
         let on_search = !self.settings_open && matches!(self.page, MusicPage::Search(_));
         if input.changed {
+            // A pasted VK Music link opens the track or page, not a search.
+            if let Some(target) = crate::link_router::parse(&self.search.input) {
+                self.search.input.clear();
+                self.search.edit();
+                self.pending_link = Some(target);
+                ctx.request_repaint();
+                return;
+            }
             let value = self.search.input.clone();
             if !value.trim().is_empty() && !on_search {
                 self.navigate_music(&ctx, MusicPage::Search(String::new()));
@@ -5619,8 +5645,13 @@ impl MusicApp {
                         .album_page(owner, &album, &worker_cancel)
                         .map(DetailPage::Album),
                     MusicPage::Playlist(playlist) => client
-                        .album_page(owner, &playlist, &worker_cancel)
-                        .map(DetailPage::Playlist),
+                        .collection_page(owner, &playlist, &worker_cancel)
+                        .map(|(page, kind)| match kind {
+                            crate::web_audio::CollectionKind::Album => DetailPage::Album(page),
+                            crate::web_audio::CollectionKind::Playlist => {
+                                DetailPage::Playlist(page)
+                            }
+                        }),
                     MusicPage::Owner(creator) => client
                         .owner_page(owner, &creator, 0, &worker_cancel)
                         .map(DetailPage::Owner),
@@ -5658,7 +5689,7 @@ impl MusicApp {
         };
         // A partial artist page keeps the request open for its discography.
         let partial = matches!(&result, Ok(DetailPage::Artist(page)) if page.releases_pending);
-        let (owner, key, canceled) = (
+        let (owner, mut key, canceled) = (
             request.owner,
             request.key.clone(),
             request.canceled.load(Ordering::Acquire),
@@ -5676,6 +5707,12 @@ impl MusicApp {
         }
         if self.page.detail_key().as_deref() != Some(key.as_str()) {
             return;
+        }
+        // A `/music/playlist/` link can lead to an album or single: show it
+        // as VK describes it.
+        if let (MusicPage::Playlist(reference), Ok(DetailPage::Album(_))) = (&self.page, &result) {
+            self.page = MusicPage::Album(reference.clone());
+            key = self.page.detail_key().unwrap_or(key);
         }
         match result {
             Ok(mut page) => {
@@ -5819,7 +5856,7 @@ impl MusicApp {
                 self.go_back(&ctx);
             }
             ui.label(
-                RichText::new(language.text("МУЗЫКА", "MUSIC"))
+                RichText::new(language.text("Вернуться назад", "Go back"))
                     .small()
                     .color(MUTED),
             );
@@ -6106,6 +6143,23 @@ impl MusicApp {
                     self.toggle_artist_follow(&ctx, artist.clone());
                 } else if let Some(album) = &album {
                     self.toggle_playlist_follow(&ctx, album.clone());
+                }
+            }
+            Some(detail_ui::Action::CopyLink) => {
+                let link = if let Some(artist) = &artist {
+                    crate::model::valid_artist_id(&artist.id)
+                        .then(|| format!("https://vk.ru/artist/{}", artist.id))
+                } else {
+                    album.as_ref().and_then(|album| {
+                        playlist_actions::collection_link(
+                            album,
+                            !matches!(page, MusicPage::Playlist(_)),
+                        )
+                    })
+                };
+                if let Some(link) = link {
+                    ctx.copy_text(link);
+                    self.playlist_notice(self.language.text("Ссылка скопирована", "Link copied"));
                 }
             }
             Some(detail_ui::Action::EditPlaylist) => {
@@ -8585,6 +8639,7 @@ impl MusicApp {
                 Setting::SystemTitlebar,
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
+                Setting::SearchOnEnter,
             ],
             SettingsSection::Playback => &[Setting::NormalizeVolume, Setting::Lyrics],
             SettingsSection::Cache => &[
@@ -8793,6 +8848,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::CompactSeek)
                         || query.matches(Setting::DoubleClickPlay)
+                        || query.matches(Setting::SearchOnEnter)
                     {
                         ui.add_space(16.0);
                     }
@@ -8819,7 +8875,9 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::DoubleClickPlay) {
+                    if query.matches(Setting::DoubleClickPlay)
+                        || query.matches(Setting::SearchOnEnter)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -8842,6 +8900,33 @@ impl MusicApp {
                             t(
                                 "Не удалось сохранить способ запуска треков.",
                                 "Could not save the track click preference.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::SearchOnEnter) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::SearchOnEnter) {
+                    let label = t("Поиск при нажатии Enter", "Search on Enter");
+                    if theme::switch(ui, &mut self.search_on_enter, label).changed() {
+                        self.search_on_enter_save_failed = !cfg!(test)
+                            && preferences::save_search_on_enter(self.search_on_enter).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Выключено — поиск начинается сразу при вводе текста.",
+                            "Off: search starts as you type.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.search_on_enter_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку поиска.",
+                                "Could not save the search preference.",
                             ),
                         );
                     }
@@ -9925,6 +10010,8 @@ mod tests {
             titlebar_save_failed: false,
             double_click_to_play: false,
             click_behavior_save_failed: false,
+            search_on_enter: true,
+            search_on_enter_save_failed: false,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),

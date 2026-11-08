@@ -25,6 +25,7 @@ const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
 const DEFAULT_LOGGING_ENABLED: bool = false;
 const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
 const DEFAULT_AUTO_UPDATES: bool = true;
+const DEFAULT_SEARCH_ON_ENTER: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -56,6 +57,8 @@ struct Preferences {
     discord_rpc_enabled: bool,
     #[serde(deserialize_with = "deserialize_auto_updates")]
     auto_updates: bool,
+    #[serde(deserialize_with = "deserialize_search_on_enter")]
+    search_on_enter: bool,
     /// The browser that receives non-music links while VK Fast handles web
     /// links: a desktop entry id on Linux, a ProgId on Windows.
     #[serde(
@@ -83,6 +86,7 @@ impl Default for Preferences {
             logging_enabled: DEFAULT_LOGGING_ENABLED,
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
             auto_updates: DEFAULT_AUTO_UPDATES,
+            search_on_enter: DEFAULT_SEARCH_ON_ENTER,
             link_browser: String::new(),
             extra: serde_json::Map::new(),
         }
@@ -212,6 +216,14 @@ fn deserialize_auto_updates<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_AUTO_UPDATES))
+}
+
+fn deserialize_search_on_enter<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(DEFAULT_SEARCH_ON_ENTER))
 }
 
 fn invalid() -> io::Error {
@@ -686,6 +698,21 @@ pub fn load_discord_rpc_enabled() -> bool {
 
 pub fn save_discord_rpc_enabled(enabled: bool) -> io::Result<()> {
     save_discord_rpc_at(&preferences_path()?, enabled)
+}
+
+pub fn load_search_on_enter() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_SEARCH_ON_ENTER, |preferences| {
+            preferences.search_on_enter
+        })
+}
+
+pub fn save_search_on_enter(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.search_on_enter = enabled
+    })
 }
 
 #[cfg(any(windows, test))]

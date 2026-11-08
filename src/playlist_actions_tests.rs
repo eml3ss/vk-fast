@@ -236,14 +236,23 @@ fn copy_playlist_link_preserves_the_native_identity_and_encodes_the_share_key() 
     let mut app = search_test_app(&ctx);
     let mut source = reference(9);
     source.access_key = Some("synthetic/key value".into());
-    let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
-        app.playlist_sidebar_action(&ctx, playlist_ui::Action::CopyLink(source.clone()));
-    });
-    assert!(output.platform_output.commands.iter().any(|command| matches!(command,
-        egui::OutputCommand::CopyText(text) if text == "https://vk.ru/music/playlist/42_9_synthetic%2Fkey%20value"
-    )));
-    assert!(app.playing.is_none() && app.playlist_controls.request.is_none());
-    output.textures_delta.clear();
+    for (album, path) in [(false, "playlist"), (true, "album")] {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+            app.playlist_sidebar_action(&ctx, playlist_ui::Action::CopyLink(source.clone(), album));
+        });
+        let expected = format!("https://vk.ru/music/{path}/42_9_synthetic%2Fkey%20value");
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command,
+                    egui::OutputCommand::CopyText(text) if *text == expected
+                ))
+        );
+        assert!(app.playing.is_none() && app.playlist_controls.request.is_none());
+        output.textures_delta.clear();
+    }
 }
 
 #[test]

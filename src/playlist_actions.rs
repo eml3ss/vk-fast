@@ -487,7 +487,7 @@ impl MusicApp {
             .any(|editable| key(editable) == key(reference))
     }
 
-    fn playlist_notice(&mut self, text: &str) {
+    pub(super) fn playlist_notice(&mut self, text: &str) {
         self.track_menu_notice = Some((text.into(), Instant::now() + Duration::from_secs(3)));
     }
 
@@ -566,21 +566,9 @@ impl MusicApp {
                     self.load_mix_from(ctx, true, Some(MixSeed::Playlist(key(&reference))));
                 }
             }
-            playlist_ui::Action::CopyLink(reference) => {
-                if reference.owner_id != 0 && reference.id > 0 {
-                    let access = reference
-                        .access_key
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .map(|value| format!("_{value}"))
-                        .unwrap_or_default();
-                    let mut url = reqwest::Url::parse("https://vk.ru/music/playlist/")
-                        .expect("Static VK playlist URL");
-                    url.path_segments_mut()
-                        .expect("VK URL has path segments")
-                        .pop_if_empty()
-                        .push(&format!("{}_{}{access}", reference.owner_id, reference.id));
-                    ctx.copy_text(url.to_string());
+            playlist_ui::Action::CopyLink(reference, album) => {
+                if let Some(url) = collection_link(&reference, album) {
+                    ctx.copy_text(url);
                     self.playlist_notice(self.language.text("Ссылка скопирована", "Link copied"));
                 }
             }
@@ -1198,4 +1186,29 @@ fn timed_notice(
         ctx.request_repaint_after(until.saturating_duration_since(Instant::now()));
     }
     true
+}
+
+/// VK's own link for a collection: albums and singles open at
+/// `/music/album/`, other playlists at `/music/playlist/`.
+pub(super) fn collection_link(reference: &AlbumRef, album: bool) -> Option<String> {
+    if reference.owner_id == 0 || reference.id <= 0 {
+        return None;
+    }
+    let access = reference
+        .access_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("_{value}"))
+        .unwrap_or_default();
+    let mut url = reqwest::Url::parse(if album {
+        "https://vk.ru/music/album/"
+    } else {
+        "https://vk.ru/music/playlist/"
+    })
+    .ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .pop_if_empty()
+        .push(&format!("{}_{}{access}", reference.owner_id, reference.id));
+    Some(url.to_string())
 }

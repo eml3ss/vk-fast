@@ -35,7 +35,8 @@ pub enum Action {
     Edit(AlbumRef),
     Delete(AlbumRef),
     Mix(AlbumRef),
-    CopyLink(AlbumRef),
+    /// The reference and whether VK calls it an album or single.
+    CopyLink(AlbumRef, bool),
     Reorder {
         playlist: AlbumRef,
         before: Option<AlbumRef>,
@@ -754,7 +755,7 @@ fn playlist_menu(ui: &mut egui::Ui, language: Language, item: &PlaylistItem) -> 
         (
             Icon::CopyLink,
             language.text("Копировать ссылку", "Copy link"),
-            Action::CopyLink(reference.clone()),
+            Action::CopyLink(reference.clone(), item.kind == CollectionKind::Album),
         ),
     ] {
         if menu_row(ui, icon, label, true).clicked() {
@@ -1682,7 +1683,7 @@ mod tests {
             ("Edit details", Action::Edit(item(2).reference)),
             ("Delete", Action::Delete(item(2).reference)),
             ("Go to playlist mix", Action::Mix(item(2).reference)),
-            ("Copy link", Action::CopyLink(item(2).reference)),
+            ("Copy link", Action::CopyLink(item(2).reference, false)),
         ] {
             let mut h = MenuHarness::new(Language::English);
             let output = h.open();
