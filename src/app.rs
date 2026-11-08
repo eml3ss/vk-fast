@@ -9482,13 +9482,19 @@ impl MusicApp {
                                         "Could not update My music",
                                     )
                                 });
-                                dismiss = icons::button(
-                                    ui,
-                                    Icon::Close,
-                                    self.language.text("Закрыть", "Close"),
-                                    true,
-                                )
-                                .clicked();
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(22.0),
+                                        Sense::hover(),
+                                    );
+                                    dismiss = icons::panel_button(
+                                        ui,
+                                        rect,
+                                        Icon::Close,
+                                        self.language.text("Закрыть", "Close"),
+                                    )
+                                    .clicked();
+                                });
                             });
                             ui.label(message);
                         });
