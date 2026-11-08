@@ -9576,6 +9576,11 @@ impl MusicApp {
         self.poll_system_media(ctx, frame);
         self.poll_lyrics(ctx);
         self.poll(ctx);
+        // The saved Home and sidebar are read right after sign-in, before
+        // VK answers anything.
+        if self.session.is_some() {
+            self.start_screen_cache(ctx);
+        }
         self.poll_screen_cache();
         self.poll_home(ctx);
         self.poll_home_catalog();
