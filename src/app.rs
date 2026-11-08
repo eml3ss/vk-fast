@@ -7748,10 +7748,16 @@ impl MusicApp {
                 }
                 let cover_gap = ui.spacing().item_spacing.x;
                 let heart_gap = 12.0;
+                let action_gap = 6.0;
+                let actions_width = 3.0 * 22.0 + 2.0 * action_gap;
                 let max_text_width = (metadata.width()
                     - artwork_size
                     - cover_gap
-                    - if has_track { 22.0 + heart_gap } else { 0.0 })
+                    - if has_track {
+                        actions_width + heart_gap
+                    } else {
+                        0.0
+                    })
                 .max(0.0);
                 let title_job = title_track.as_ref().map_or_else(
                     || {
@@ -7855,25 +7861,40 @@ impl MusicApp {
                     },
                 );
                 if let Some(track) = &title_track {
-                    let (slot, _) =
-                        ui.allocate_exact_size(egui::vec2(22.0, metadata_height), Sense::hover());
+                    let (slot, _) = ui.allocate_exact_size(
+                        egui::vec2(actions_width, metadata_height),
+                        Sense::hover(),
+                    );
                     let middle = (title_line_height * 0.5
                         + title_line_height
                         + 2.0
                         + artist_line_height * 0.5)
                         * 0.5;
-                    let heart = egui::Rect::from_center_size(
+                    let actions = egui::Rect::from_center_size(
                         egui::pos2(slot.center().x, slot.top() + middle),
-                        egui::Vec2::splat(22.0),
+                        egui::vec2(actions_width, 22.0),
                     );
                     ui.scope_builder(
                         egui::UiBuilder::new()
-                            .id_salt("player-heart")
-                            .max_rect(heart)
+                            .id_salt("player-track-actions")
+                            .max_rect(actions)
                             .layout(Layout::left_to_right(Align::Center)),
                         |ui| {
+                            ui.spacing_mut().item_spacing.x = action_gap;
                             if self.like_button(ui, track).clicked() {
                                 metadata_action = Some(TrackAction::ToggleLike(track.clone()));
+                            }
+                            if self.dislike_button(ui, track).clicked() {
+                                metadata_action = Some(TrackAction::Menu(
+                                    track.clone(),
+                                    track_menu::Action::ToggleDislike,
+                                ));
+                            }
+                            if self.track_mix_button(ui).clicked() {
+                                metadata_action = Some(TrackAction::Menu(
+                                    track.clone(),
+                                    track_menu::Action::TrackMix,
+                                ));
                             }
                         },
                     );
