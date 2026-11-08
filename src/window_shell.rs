@@ -25,6 +25,11 @@ pub trait ResidentApp: eframe::App {
         egui::Context::default()
     }
     fn background_logic(&mut self, _ctx: &egui::Context) {}
+    /// Panel widths to save with the window geometry.
+    fn panel_widths(&self) -> Option<[f32; 2]> {
+        None
+    }
+    fn restore_panel_widths(&mut self, _widths: [f32; 2]) {}
 }
 
 impl ResidentApp for MusicApp {
@@ -51,6 +56,12 @@ impl ResidentApp for MusicApp {
     fn background_logic(&mut self, ctx: &egui::Context) {
         self.background_tick(ctx, None);
     }
+    fn panel_widths(&self) -> Option<[f32; 2]> {
+        Some(MusicApp::panel_widths(self))
+    }
+    fn restore_panel_widths(&mut self, widths: [f32; 2]) {
+        MusicApp::restore_panel_widths(self, widths);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,6 +71,7 @@ struct WindowGeometry {
     position_pixels: Option<[i32; 2]>,
     maximized: bool,
     fullscreen: bool,
+    panels: Option<[f32; 2]>,
 }
 
 impl WindowGeometry {
@@ -73,6 +85,7 @@ impl WindowGeometry {
             position_pixels: None,
             maximized: viewport.maximized.unwrap_or(false),
             fullscreen: viewport.fullscreen.unwrap_or(false),
+            panels: None,
         }
     }
 
@@ -110,6 +123,7 @@ impl WindowGeometry {
         self.size = egui::Vec2::from(saved.size);
         self.maximized = saved.maximized;
         self.position_pixels = saved.position_pixels;
+        self.panels = saved.panels;
     }
 
     fn saved(self) -> crate::window_state::SavedWindow {
@@ -117,6 +131,7 @@ impl WindowGeometry {
             size: [self.size.x, self.size.y],
             maximized: self.maximized,
             position_pixels: self.position_pixels,
+            panels: self.panels,
         }
     }
 
@@ -172,6 +187,7 @@ impl<A: ResidentApp> eframe::App for WindowApp<A> {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(app) = &mut self.app {
             app.ui(ui, frame);
+            self.geometry.panels = app.panel_widths().or(self.geometry.panels);
         }
         let zoom = ui.ctx().zoom_factor();
         ui.input(|input| self.geometry.remember(input.viewport(), zoom));
@@ -280,7 +296,11 @@ pub fn run_native<A: ResidentApp + 'static>(
                     app.prepare_reopened_window(&cc.egui_ctx);
                     app
                 } else {
-                    creator.expect("Initial application constructor")(cc)?
+                    let mut app = creator.expect("Initial application constructor")(cc)?;
+                    if let Some(panels) = geometry.panels {
+                        app.restore_panel_widths(panels);
+                    }
+                    app
                 };
                 Ok(Box::new(WindowApp {
                     app: Some(app),

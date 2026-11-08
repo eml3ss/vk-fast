@@ -30,7 +30,7 @@ pub enum Icon {
     Account,
     Heart,
     HeartFilled,
-    /// A struck-through heart: VK's "Не нравится".
+    /// A thumbs-down: VK's "Не нравится".
     Dislike,
     QueueAdd,
     Queue,
@@ -808,8 +808,26 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Dislike => {
-            painter.add(egui::Shape::closed_line(heart_path(rect), stroke));
-            line(&[(3.5, 3.5), (20.5, 20.5)]);
+            // Thumbs down: the hand with its thumb pointing down, and the cuff.
+            line(&[
+                (12.2, 21.0),
+                (16.8, 14.2),
+                (16.8, 3.5),
+                (7.0, 3.5),
+                (3.3, 11.8),
+                (4.9, 13.8),
+                (9.7, 13.8),
+                (8.9, 17.9),
+                (10.3, 21.0),
+                (12.2, 21.0),
+            ]);
+            line(&[
+                (16.8, 3.5),
+                (20.7, 3.5),
+                (20.7, 14.2),
+                (16.8, 14.2),
+                (16.8, 3.5),
+            ]);
         }
     }
 }

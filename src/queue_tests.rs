@@ -219,3 +219,141 @@ fn the_button_left_of_volume_toggles_the_right_drawer_and_clear_only_removes_man
         assert!(!app.queue_ui.open);
     }
 }
+
+#[test]
+fn navigation_and_queue_panels_resize_by_dragging_their_edges_and_stay_open() {
+    fn drag(
+        ctx: &egui::Context,
+        app: &mut MusicApp,
+        size: egui::Vec2,
+        frame: &mut u32,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        account_ui_frame(ctx, app, size, frame, vec![egui::Event::PointerMoved(from)]);
+        account_ui_frame(ctx, app, size, frame, vec![button(from, true)]);
+        for step in 1..=4 {
+            let at = from.lerp(to, step as f32 / 4.0);
+            account_ui_frame(ctx, app, size, frame, vec![egui::Event::PointerMoved(at)]);
+        }
+        account_ui_frame(ctx, app, size, frame, vec![button(to, false)]);
+        for _ in 0..3 {
+            account_ui_frame(ctx, app, size, frame, Vec::new());
+        }
+    }
+    fn queue_left(output: &egui::FullOutput) -> f32 {
+        account_ui_text_rect(output, "Queue").unwrap().left()
+    }
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    app.language = Language::English;
+    app.page = MusicPage::Library;
+    app.queue_ui.open = true;
+    let size = egui::vec2(1280.0, 800.0);
+    let mut frame = 0;
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..5 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    assert_eq!(app.panel_widths(), crate::app::DEFAULT_PANEL_WIDTHS);
+    let before = queue_left(&output);
+
+    let edge = size.x - crate::app::DEFAULT_PANEL_WIDTHS[1];
+    drag(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        egui::pos2(edge, 400.0),
+        egui::pos2(edge - 100.0, 400.0),
+    );
+    output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    assert!(
+        (app.panel_widths()[1] - 440.0).abs() < 2.0,
+        "{:?}",
+        app.panel_widths()
+    );
+    assert!((queue_left(&output) - (before - 100.0)).abs() < 2.0);
+
+    // Dragging past the minimum width only narrows the panel; it stays open.
+    let edge = size.x - app.panel_widths()[1];
+    drag(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        egui::pos2(edge, 400.0),
+        egui::pos2(size.x - 20.0, 400.0),
+    );
+    output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    assert!(app.queue_ui.open);
+    assert_eq!(app.panel_widths()[1], crate::app::RIGHT_PANEL_WIDTHS.0);
+    assert!(account_ui_text_rect(&output, "Queue").is_some());
+
+    let edge = crate::app::DEFAULT_PANEL_WIDTHS[0];
+    drag(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        egui::pos2(edge, 400.0),
+        egui::pos2(edge + 80.0, 400.0),
+    );
+    output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    assert!(
+        (app.panel_widths()[0] - 332.0).abs() < 2.0,
+        "{:?}",
+        app.panel_widths()
+    );
+    let header = account_ui_shapes(&output)
+        .into_iter()
+        .find_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == BACKGROUND
+                    && rect.rect.top() == 0.0
+                    && rect.rect.width() > 300.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!((header.left() - app.panel_widths()[0]).abs() < 1.5);
+
+    // A narrow window squeezes the panels without forgetting the chosen widths.
+    let narrow = egui::vec2(800.0, 540.0);
+    for _ in 0..3 {
+        account_ui_frame(&ctx, &mut app, narrow, &mut frame, Vec::new());
+    }
+    assert!((app.panel_widths()[0] - 332.0).abs() < 2.0);
+    output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    let header = account_ui_shapes(&output)
+        .into_iter()
+        .find_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == BACKGROUND
+                    && rect.rect.top() == 0.0
+                    && rect.rect.width() > 300.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!((header.left() - 332.0).abs() < 2.0, "{header:?}");
+    let mut restored = prepared(&ctx);
+    restored.restore_panel_widths([9999.0, f32::MIN]);
+    assert_eq!(
+        restored.panel_widths(),
+        [
+            crate::app::LEFT_PANEL_WIDTHS.1,
+            crate::app::RIGHT_PANEL_WIDTHS.0
+        ]
+    );
+}

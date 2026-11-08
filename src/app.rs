@@ -74,6 +74,14 @@ use crate::{
 };
 
 const PLAYER_PADDING_Y: i8 = 8;
+/// Default outer widths of the left navigation and the right lyrics/queue panel.
+pub(crate) const DEFAULT_PANEL_WIDTHS: [f32; 2] = [252.0, 340.0];
+/// Allowed outer widths; the central page always keeps `MIN_CONTENT_WIDTH`.
+pub(crate) const LEFT_PANEL_WIDTHS: (f32, f32) = (220.0, 420.0);
+pub(crate) const RIGHT_PANEL_WIDTHS: (f32, f32) = (260.0, 560.0);
+const MIN_CONTENT_WIDTH: f32 = 380.0;
+const LEFT_PANEL_ID: &str = "account";
+pub(crate) const RIGHT_PANEL_ID: &str = "playback-queue-panel";
 const PLAYER_TIME_GAP: f32 = 2.0;
 const PLAYER_COLUMN_GAP: f32 = 16.0;
 const PLAYER_SIDE_MIN_WIDTH: f32 = 224.0;
@@ -1199,6 +1207,9 @@ pub struct MusicApp {
     double_click_to_play: bool,
     click_behavior_save_failed: bool,
     window_reopen: bool,
+    /// Outer widths of the navigation and the lyrics/queue panels, as the
+    /// user last dragged them. Saved with the window geometry.
+    panel_widths: [f32; 2],
     ui_context: egui::Context,
     repaint_target: RepaintTarget,
     instance_activation: Option<crate::single_instance::Activation>,
@@ -1523,6 +1534,7 @@ impl MusicApp {
             double_click_to_play: preferences::load_double_click_to_play(),
             click_behavior_save_failed: false,
             window_reopen: false,
+            panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
             repaint_target: RepaintTarget::new(ctx),
             instance_activation: None,
@@ -8622,6 +8634,82 @@ impl MusicApp {
         }
     }
 
+    pub fn panel_widths(&self) -> [f32; 2] {
+        self.panel_widths
+    }
+
+    pub fn restore_panel_widths(&mut self, widths: [f32; 2]) {
+        self.panel_widths = [
+            widths[0].clamp(LEFT_PANEL_WIDTHS.0, LEFT_PANEL_WIDTHS.1),
+            widths[1].clamp(RIGHT_PANEL_WIDTHS.0, RIGHT_PANEL_WIDTHS.1),
+        ];
+    }
+
+    /// Start each frame from the chosen width, unless the user is dragging
+    /// the edge right now: egui then owns the size until the drag ends.
+    pub(super) fn seed_panel_width(&self, ctx: &egui::Context, index: usize, id: &str) {
+        let id = egui::Id::new(id);
+        if ctx
+            .read_response(id.with("__resize"))
+            .is_some_and(|response| response.dragged())
+        {
+            return;
+        }
+        let state = egui::containers::panel::PanelState {
+            outer_rect: egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(self.panel_widths[index], 1.0),
+            ),
+        };
+        ctx.data_mut(|data| data.insert_persisted(id, state));
+    }
+
+    /// Keep a width only from the user's own drag: a window that is briefly
+    /// too narrow squeezes the panel without forgetting the chosen width.
+    pub(super) fn remember_panel_width(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        id: &str,
+        width: f32,
+    ) {
+        let dragged = ctx
+            .read_response(egui::Id::new(id).with("__resize"))
+            .is_some_and(|response| response.dragged() || response.drag_stopped());
+        if dragged && width.is_finite() {
+            let (min, max) = [LEFT_PANEL_WIDTHS, RIGHT_PANEL_WIDTHS][index];
+            self.panel_widths[index] = width.clamp(min, max);
+        }
+    }
+
+    /// The right lyrics/queue panel: resizable from its left edge, keeping
+    /// the central page at least `MIN_CONTENT_WIDTH` wide.
+    pub(super) fn right_side_panel(&self, ui: &egui::Ui) -> egui::Panel {
+        self.seed_panel_width(ui.ctx(), 1, RIGHT_PANEL_ID);
+        let max = (ui.available_width() - MIN_CONTENT_WIDTH)
+            .clamp(RIGHT_PANEL_WIDTHS.0, RIGHT_PANEL_WIDTHS.1);
+        egui::Panel::right(RIGHT_PANEL_ID)
+            .resizable(true)
+            // Neither a drag nor a double click on the edge closes the panel;
+            // its own close button does.
+            .drag_to_open(false)
+            .default_size(self.panel_widths[1])
+            .size_range(RIGHT_PANEL_WIDTHS.0..=max)
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(SURFACE)
+                    .inner_margin(12)
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 6,
+                        bottom: 6,
+                    })
+                    .corner_radius(14),
+            )
+    }
+
     fn render(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
         self.poll_lyrics(ui.ctx());
@@ -8673,9 +8761,12 @@ impl MusicApp {
             self.render_overlays_and_shortcuts(ui);
             return;
         }
-        egui::Panel::left("account")
-            .exact_size(252.0)
-            .resizable(false)
+        let left_max = (ui.available_width() * 0.4).clamp(LEFT_PANEL_WIDTHS.0, LEFT_PANEL_WIDTHS.1);
+        self.seed_panel_width(ui.ctx(), 0, LEFT_PANEL_ID);
+        let left = egui::Panel::left(LEFT_PANEL_ID)
+            .resizable(true)
+            .default_size(self.panel_widths[0])
+            .size_range(LEFT_PANEL_WIDTHS.0..=left_max)
             .show_separator_line(false)
             .frame(Frame::new().fill(SURFACE).inner_margin(egui::Margin {
                 left: 18,
@@ -8690,6 +8781,7 @@ impl MusicApp {
                     self.sidebar(ui);
                 }
             });
+        self.remember_panel_width(ui.ctx(), 0, LEFT_PANEL_ID, left.response.rect.width());
         egui::Panel::top("header")
             .resizable(false)
             .show_separator_line(false)
@@ -9462,6 +9554,7 @@ mod tests {
             double_click_to_play: false,
             click_behavior_save_failed: false,
             window_reopen: false,
+            panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
             repaint_target: RepaintTarget::new(ctx),
             instance_activation: None,

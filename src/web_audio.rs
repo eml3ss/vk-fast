@@ -890,8 +890,23 @@ impl WebAudioClient {
     pub fn page(&self, owner_id: i64, offset: usize) -> Result<AudioPage, WebAudioError> {
         let page = self.catalog_batch(owner_id, offset, LOGICAL_PAGE_SIZE, 1, |params| {
             self.request_catalog(owner_id, params)
-        })?;
+        });
+        let page = self.empty_library_on_format(owner_id, offset, page)?;
         self.page_with_library_total(owner_id, offset, page)
+    }
+
+    /// An account without saved tracks gets a music page without a track
+    /// list. Treat it as an empty library only when VK's own count confirms
+    /// zero; any other unreadable page stays a format error.
+    fn empty_library_on_format(
+        &self,
+        owner_id: i64,
+        offset: usize,
+        page: Result<AudioPage, WebAudioError>,
+    ) -> Result<AudioPage, WebAudioError> {
+        empty_library_page(offset, page, || {
+            self.library_count(owner_id, &AtomicBool::new(false))
+        })
     }
 
     /// Return one logical page even when VK supplies smaller continuations.
@@ -907,7 +922,8 @@ impl WebAudioClient {
         }
         let page = self.catalog_batch(owner_id, offset, limit, MAX_BATCH_REQUESTS, |params| {
             self.request_catalog(owner_id, params)
-        })?;
+        });
+        let page = self.empty_library_on_format(owner_id, offset, page)?;
         self.page_with_library_total(owner_id, offset, page)
     }
 
@@ -4588,6 +4604,33 @@ fn number(value: &Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_str()?.parse().ok())
 }
 
+fn empty_library_page(
+    offset: usize,
+    page: Result<AudioPage, WebAudioError>,
+    count: impl FnOnce() -> Result<usize, WebAudioError>,
+) -> Result<AudioPage, WebAudioError> {
+    match page {
+        Err(WebAudioError::Format) if offset == 0 => match count() {
+            Ok(0) => {
+                crate::diagnostics::event("library", "empty_library confirmed_by_count");
+                Ok(AudioPage {
+                    count: Some(0),
+                    items: Vec::new(),
+                    exhausted: Some(true),
+                })
+            }
+            Err(
+                error @ (WebAudioError::WrongAccount
+                | WebAudioError::Unverified
+                | WebAudioError::Canceled
+                | WebAudioError::Expired),
+            ) => Err(error),
+            _ => Err(WebAudioError::Format),
+        },
+        other => other,
+    }
+}
+
 fn opaque(value: Option<&Value>) -> Result<Option<String>, WebAudioError> {
     match value {
         None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
@@ -7463,6 +7506,38 @@ mod library_count_tests {
         assert_eq!(cursor.offset, 17);
         assert_eq!(cursor.next.as_deref(), Some("opaque"));
         assert!(state.streams.is_empty() && state.mix.is_none());
+    }
+
+    #[test]
+    fn an_unreadable_first_page_is_an_empty_library_only_when_vk_counts_zero() {
+        let unreadable = || Err(WebAudioError::Format);
+        let empty = empty_library_page(0, unreadable(), || Ok(0)).unwrap();
+        assert_eq!(empty.count, Some(0));
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.exhausted, Some(true));
+        assert_eq!(
+            empty_library_page(0, unreadable(), || Ok(12)).unwrap_err(),
+            WebAudioError::Format
+        );
+        assert_eq!(
+            empty_library_page(0, unreadable(), || Err(WebAudioError::Network)).unwrap_err(),
+            WebAudioError::Format
+        );
+        assert_eq!(
+            empty_library_page(0, unreadable(), || Err(WebAudioError::WrongAccount)).unwrap_err(),
+            WebAudioError::WrongAccount
+        );
+        // Continuations and other errors never ask for the count.
+        assert_eq!(
+            empty_library_page(100, unreadable(), || panic!("no count")).unwrap_err(),
+            WebAudioError::Format
+        );
+        assert_eq!(
+            empty_library_page(0, Err(WebAudioError::Rejected), || panic!("no count")).unwrap_err(),
+            WebAudioError::Rejected
+        );
+        let parse_error = parse_page(r#"{"payload":[0,["",{"sectionId":"x"}]]}"#);
+        assert_eq!(parse_error.err(), Some(WebAudioError::Format));
     }
 
     #[test]

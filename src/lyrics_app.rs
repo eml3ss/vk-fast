@@ -211,30 +211,23 @@ impl MusicApp {
             self.queue_panel(ui);
             return;
         }
+        // The edge only resizes: a drag or double click must not close it.
         let mut open = self.lyrics.open;
-        let width = (ui.available_width() * 0.44).clamp(260.0, 340.0);
         let mut action = None;
-        egui::Panel::right("playback-queue-panel")
-            .exact_size(width)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(
-                Frame::new()
-                    .fill(SURFACE)
-                    .inner_margin(12)
-                    .outer_margin(egui::Margin {
-                        left: 8,
-                        right: 8,
-                        top: 6,
-                        bottom: 6,
-                    })
-                    .corner_radius(14),
-            )
+        let shown = self
+            .right_side_panel(ui)
             .show_collapsible(ui, &mut open, |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 action = self.lyrics_contents(ui, false);
             });
-        self.lyrics.open = open;
+        if let Some(shown) = shown {
+            self.remember_panel_width(
+                ui.ctx(),
+                1,
+                super::RIGHT_PANEL_ID,
+                shown.response.rect.width(),
+            );
+        }
         if let Some(action) = action {
             self.handle_lyrics_action(ui.ctx(), action);
         }

@@ -114,28 +114,13 @@ impl MusicApp {
             };
             panel.stamp = Some(stamp);
         }
-        let width = (ui.available_width() * 0.44).clamp(260.0, 340.0);
         let mut open = panel.open;
         let mut close = false;
         let mut action = None;
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
-        egui::Panel::right("playback-queue-panel")
-            .exact_size(width)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(
-                Frame::new()
-                    .fill(SURFACE)
-                    .inner_margin(12)
-                    .outer_margin(egui::Margin {
-                        left: 8,
-                        right: 8,
-                        top: 6,
-                        bottom: 6,
-                    })
-                    .corner_radius(14),
-            )
+        let shown = self
+            .right_side_panel(ui)
             .show_collapsible(ui, &mut open, |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 ui.horizontal(|ui| {
@@ -257,8 +242,17 @@ impl MusicApp {
                     );
                 }
             });
-        panel.open = open && !close;
+        // The edge only resizes: a drag or double click must not close it.
+        panel.open &= !close;
         self.queue_ui = panel;
+        if let Some(shown) = shown {
+            self.remember_panel_width(
+                ui.ctx(),
+                1,
+                super::RIGHT_PANEL_ID,
+                shown.response.rect.width(),
+            );
+        }
         let ctx = ui.ctx();
         match action {
             Some(Action::Play(index))

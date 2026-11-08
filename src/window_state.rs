@@ -17,6 +17,8 @@ pub struct SavedWindow {
     pub maximized: bool,
     /// Outer position in physical desktop pixels; negative monitor origins are valid.
     pub position_pixels: Option<[i32; 2]>,
+    /// Outer widths of the left navigation and the right lyrics/queue panel.
+    pub panels: Option<[f32; 2]>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -27,6 +29,8 @@ struct StoredWindow {
     maximized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     position_pixels: Option<[i32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    panels: Option<[f32; 2]>,
 }
 
 fn invalid() -> io::Error {
@@ -41,6 +45,11 @@ fn valid(window: SavedWindow) -> bool {
             position
                 .iter()
                 .all(|value| (-1_000_000..=1_000_000).contains(value))
+        })
+        && window.panels.is_none_or(|panels| {
+            panels
+                .iter()
+                .all(|value| value.is_finite() && (100.0..=4096.0).contains(value))
         })
 }
 
@@ -136,6 +145,7 @@ fn load_from(path: &Path) -> io::Result<Option<SavedWindow>> {
         size: stored.size,
         maximized: stored.maximized,
         position_pixels: stored.position_pixels,
+        panels: stored.panels,
     };
     if stored.format_version != 1 || !valid(window) {
         return Err(invalid());
@@ -164,6 +174,7 @@ fn save_to(path: &Path, window: SavedWindow) -> io::Result<()> {
         size: window.size,
         maximized: window.maximized,
         position_pixels: window.position_pixels,
+        panels: window.panels,
     })
     .map_err(|_| invalid())?;
     if bytes.len() as u64 > MAX_BYTES {
@@ -233,13 +244,14 @@ mod tests {
                 size: [1184.5, 742.25],
                 maximized,
                 position_pixels: Some([-1680, 120]),
+                panels: Some([300.5, 420.0]),
             };
             save_to(&path, window).unwrap();
             assert_eq!(load_from(&path).unwrap(), Some(window));
         }
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["format_version"], 1);
-        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value.as_object().unwrap().len(), 5);
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
     }
 
@@ -251,10 +263,12 @@ mod tests {
             size: [1040.0, 720.0],
             maximized: true,
             position_pixels: None,
+            panels: None,
         };
         save_to(&path, old).unwrap();
         let before = fs::read(&path).unwrap();
         assert!(!String::from_utf8_lossy(&before).contains("position_pixels"));
+        assert!(!String::from_utf8_lossy(&before).contains("panels"));
         assert_eq!(load_from(&path).unwrap(), Some(old));
         for position in [[i32::MIN, 0], [0, i32::MAX], [1_000_001, 0]] {
             assert!(
@@ -262,6 +276,19 @@ mod tests {
                     &path,
                     SavedWindow {
                         position_pixels: Some(position),
+                        ..old
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        for panels in [[f32::NAN, 300.0], [252.0, 0.0], [252.0, 5000.0]] {
+            assert!(
+                save_to(
+                    &path,
+                    SavedWindow {
+                        panels: Some(panels),
                         ..old
                     }
                 )
@@ -279,6 +306,7 @@ mod tests {
             size: [1040.0, 720.0],
             maximized: false,
             position_pixels: None,
+            panels: None,
         };
         save_to(&path, saved).unwrap();
         let before = fs::read(&path).unwrap();
@@ -297,6 +325,7 @@ mod tests {
                         size,
                         maximized: true,
                         position_pixels: None,
+                        panels: None,
                     }
                 )
                 .is_err()
@@ -316,6 +345,7 @@ mod tests {
                 size: [800.0, 540.0],
                 maximized: true,
                 position_pixels: None,
+                panels: None,
             },
         )
         .unwrap();
@@ -342,6 +372,7 @@ mod tests {
             size: [900.0, 600.0],
             maximized: false,
             position_pixels: None,
+            panels: None,
         };
         save_to(&path, saved).unwrap();
         assert_eq!(
