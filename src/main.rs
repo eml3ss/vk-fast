@@ -65,6 +65,7 @@ mod ui_fonts;
 mod updater;
 mod web_audio;
 mod web_session;
+mod window_focus;
 mod window_shell;
 mod window_state;
 
@@ -230,6 +231,14 @@ fn main() -> eframe::Result {
     } else {
         None
     };
+    // The launcher's Wayland activation token lets a running instance come
+    // forward on desktops that ignore a window's own focus request.
+    #[cfg(target_os = "linux")]
+    let activation_token = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .filter(|token| window_focus::valid_token(token));
+    #[cfg(not(target_os = "linux"))]
+    let activation_token: Option<String> = None;
     // Helpers and CLI checks above remain independent. Claim the GUI instance
     // before touching preferences, sessions, audio or diagnostic files.
     let instance = match single_instance::acquire(
@@ -240,6 +249,7 @@ fn main() -> eframe::Result {
             let _ = process_id;
         },
         open_link.as_deref(),
+        activation_token.as_deref(),
     )
     .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
     {

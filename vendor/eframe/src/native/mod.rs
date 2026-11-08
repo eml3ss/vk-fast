@@ -6,6 +6,8 @@ pub mod run;
 mod ui_frame_clock;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod windows_focus;
+#[cfg(target_os = "linux")]
+pub(crate) mod activation_token;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_menu;
 #[cfg(any(target_os = "windows", test))]

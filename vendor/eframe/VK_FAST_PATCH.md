@@ -131,3 +131,10 @@ cargo test --manifest-path vendor/eframe/Cargo.toml --target-dir target \
   --no-default-features --features default_fonts,glow,wayland,x11 \
   --lib background_
 ```
+
+- Linux: `set_wayland_activation_token(token)` stores the activation token of
+  the application that launched a second VK Fast process. The next native
+  Glow window is created with it through winit's safe startup-notify API
+  (`WindowAttributesExtStartupNotify::with_activation_token`), so KWin,
+  Mutter and other Wayland compositors focus the re-created window. No unsafe
+  code and no new dependencies.

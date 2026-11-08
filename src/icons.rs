@@ -34,6 +34,8 @@ pub enum Icon {
     Dislike,
     /// Two stacked sheets: copy text.
     Copy,
+    /// Two horizontal sliders with knobs: tune something.
+    Sliders,
     QueueAdd,
     Queue,
     Lyrics,
@@ -797,6 +799,14 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 (17.0, 11.0),
             ]);
         }
+        Icon::Sliders => {
+            line(&[(3.5, 8.0), (13.5, 8.0)]);
+            line(&[(18.5, 8.0), (20.5, 8.0)]);
+            line(&[(16.0, 5.0), (16.0, 11.0)]);
+            line(&[(3.5, 16.0), (5.5, 16.0)]);
+            line(&[(10.5, 16.0), (20.5, 16.0)]);
+            line(&[(8.0, 13.0), (8.0, 19.0)]);
+        }
         Icon::Copy => {
             line(&[
                 (9.0, 9.0),
@@ -1122,6 +1132,7 @@ mod tests {
             Icon::Album,
             Icon::CopyLink,
             Icon::Copy,
+            Icon::Sliders,
             Icon::Edit,
             Icon::Trash,
             Icon::RemoveFromLibrary,

@@ -50,12 +50,44 @@ impl MusicApp {
     }
 
     pub(super) fn show_application(&mut self, ctx: &egui::Context) {
+        // The token of the application that launched a second VK Fast, if any.
+        let token = self
+            .instance_activation
+            .as_ref()
+            .and_then(crate::single_instance::Activation::take_token);
+        #[cfg(target_os = "linux")]
+        let give_token = |token: Option<String>| {
+            if let Some(token) = token {
+                eframe::set_wayland_activation_token(token);
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let give_token = |_: Option<String>| {};
         if self.tray.native_hidden {
+            give_token(token);
             self.tray.native_hidden = false;
             self.tray.hidden = false;
             self.window_reopen = true;
             crate::diagnostics::event("tray", "restore: recreate_closed_surface");
             ctx.request_repaint();
+            return;
+        }
+        if self.tray.wayland
+            && !self.tray.hidden
+            && !self.tray.quitting
+            && !ctx.input(|input| input.focused)
+            && let Some(compositor) = crate::window_focus::compositor()
+        {
+            // niri, Hyprland and sway focus the existing window in place;
+            // re-creating it below would make the tiling layout place it again.
+            let pid = std::process::id();
+            let _ = thread::Builder::new()
+                .name("vk-window-focus".into())
+                .spawn(move || {
+                    if !crate::window_focus::focus(compositor, pid) {
+                        crate::diagnostics::event("window", "compositor_focus: failed");
+                    }
+                });
             return;
         }
         let recreate = self.tray.wayland
@@ -66,6 +98,8 @@ impl MusicApp {
             // Wayland has no generic unminimize/focus operation in winit.
             // Reuse the resident-window handoff: audio and account state stay
             // alive while a fresh, visible native surface replaces this one.
+            // A launcher's token makes KDE, GNOME and others focus it.
+            give_token(token);
             self.window_reopen = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;

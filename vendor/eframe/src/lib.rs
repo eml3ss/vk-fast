@@ -184,6 +184,14 @@ pub fn allow_foreground_activation(process_id: u32) -> bool {
     }
 }
 
+/// Give the next native window the activation token of the application that
+/// launched a second process (its `XDG_ACTIVATION_TOKEN`), so a Wayland
+/// compositor focuses that window. Uses winit's safe startup-notify API.
+#[cfg(target_os = "linux")]
+pub fn set_wayland_activation_token(token: String) {
+    native::activation_token::set(token);
+}
+
 /// Request activation of a live window belonging to this process, without
 /// generating keyboard input or bypassing Windows' foreground restrictions.
 #[cfg(target_os = "windows")]

@@ -1168,10 +1168,15 @@ impl GlutinWindowContext {
             //
             // The justification for FallbackEgl over PreferEgl is at https://github.com/emilk/egui/pull/2526#issuecomment-1400229576 .
             .with_preference(glutin_winit::ApiPreference::FallbackEgl)
-            .with_window_attributes(Some(egui_winit::apply_monitor_to_window_attributes(
-                egui_winit::create_winit_window_attributes(egui_ctx, construction_builder.clone()),
-                &construction_builder,
-                event_loop,
+            .with_window_attributes(Some(activation_token(
+                egui_winit::apply_monitor_to_window_attributes(
+                    egui_winit::create_winit_window_attributes(
+                        egui_ctx,
+                        construction_builder.clone(),
+                    ),
+                    &construction_builder,
+                    event_loop,
+                ),
             )));
 
         let (window, gl_config) = {
@@ -1364,14 +1369,14 @@ impl GlutinWindowContext {
             };
             #[cfg(not(target_os = "windows"))]
             let construction_builder = viewport.builder.clone();
-            let window_attributes = egui_winit::apply_monitor_to_window_attributes(
+            let window_attributes = activation_token(egui_winit::apply_monitor_to_window_attributes(
                 egui_winit::create_winit_window_attributes(
                     &self.egui_ctx,
                     construction_builder.clone(),
                 ),
                 &construction_builder,
                 event_loop,
-            );
+            ));
             if window_attributes.transparent()
                 && self.gl_config.supports_transparency() == Some(false)
                 && !cfg!(target_os = "windows")
@@ -1925,4 +1930,16 @@ fn save_screenshot_and_exit(
 
     #[expect(clippy::exit)]
     std::process::exit(0);
+}
+
+/// VK Fast patch: a launcher's activation token for the next window.
+fn activation_token(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "linux")]
+    {
+        super::activation_token::apply(attributes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        attributes
+    }
 }

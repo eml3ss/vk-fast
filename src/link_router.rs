@@ -247,14 +247,87 @@ mod linux {
         {
             return Err(RouterError::UnsupportedPath);
         }
+        // xdg-mime cannot resolve a quoted program, so quote only when the
+        // path needs it.
+        let program = if path.contains(char::is_whitespace) {
+            format!("\"{path}\"")
+        } else {
+            path.to_owned()
+        };
         Ok(format!(
-            "[Desktop Entry]\nType=Application\nName=VK Fast\nComment=Opens VK Music links in VK Fast\nComment[ru]=Открывает ссылки VK Музыки в VK Fast\nExec=\"{path}\" --open-url %u\nIcon={}\nTerminal=false\nNoDisplay=true\nMimeType={};\n",
+            "[Desktop Entry]\nType=Application\nName=VK Fast\nComment=Opens VK Music links in VK Fast\nComment[ru]=Открывает ссылки VK Музыки в VK Fast\nExec={program} --open-url %u\nIcon={}\nTerminal=false\nNoDisplay=true\nMimeType={};\n",
             crate::app_icon::APP_ID,
             SCHEMES.join(";"),
         ))
     }
 
+    /// The first `[Default Applications]` entry for `scheme` in the user's
+    /// and system `mimeapps.list` files, desktop-specific ones first.
+    pub(super) fn listed_default(
+        dirs: &[PathBuf],
+        desktops: &[String],
+        scheme: &str,
+    ) -> Option<String> {
+        for dir in dirs {
+            for prefix in desktops
+                .iter()
+                .map(|desktop| format!("{}-", desktop.to_lowercase()))
+                .chain([String::new()])
+            {
+                let Ok(text) = fs::read_to_string(dir.join(format!("{prefix}mimeapps.list")))
+                else {
+                    continue;
+                };
+                let mut in_defaults = false;
+                for line in text.lines() {
+                    let line = line.trim();
+                    if line.starts_with('[') {
+                        in_defaults = line == "[Default Applications]";
+                    } else if in_defaults
+                        && let Some((key, value)) = line.split_once('=')
+                        && key.trim() == scheme
+                    {
+                        if let Some(id) =
+                            value.split(';').map(str::trim).find(|id| valid_handler(id))
+                        {
+                            return Some(id.to_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn config_dirs() -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = absolute("XDG_CONFIG_HOME")
+            .or_else(|| absolute("HOME").map(|home| home.join(".config")))
+            .into_iter()
+            .collect();
+        let system = std::env::var("XDG_CONFIG_DIRS")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "/etc/xdg".into());
+        dirs.extend(
+            system
+                .split(':')
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
+        );
+        dirs
+    }
+
     fn query_default(scheme: &str) -> Option<String> {
+        let desktops: Vec<String> = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|desktop| !desktop.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if let Some(id) = listed_default(&config_dirs(), &desktops, scheme) {
+            return Some(id);
+        }
         let output = Command::new("xdg-mime")
             .args(["query", "default", scheme])
             .stdin(Stdio::null())
@@ -798,6 +871,8 @@ mod tests {
         use std::path::Path;
         let entry = desktop_entry(Path::new("/home/user/Apps/VK Fast.AppImage")).unwrap();
         assert!(entry.contains("Exec=\"/home/user/Apps/VK Fast.AppImage\" --open-url %u\n"));
+        let plain = desktop_entry(Path::new("/home/user/bin/vk-fast")).unwrap();
+        assert!(plain.contains("Exec=/home/user/bin/vk-fast --open-url %u\n"));
         assert!(entry.contains(
             "MimeType=x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/vkfast;"
         ));
@@ -851,5 +926,39 @@ mod tests {
         );
         assert_eq!(find_desktop(&dirs, "../org/example.desktop"), None);
         assert_eq!(find_desktop(&dirs, "missing.desktop"), None);
+
+        // The user's desktop-specific list wins, then the plain one; other
+        // sections and other schemes are ignored.
+        let config = [root.path().join("config"), root.path().join("xdg")];
+        std::fs::create_dir_all(&config[0]).unwrap();
+        std::fs::create_dir_all(&config[1]).unwrap();
+        std::fs::write(
+            config[0].join("mimeapps.list"),
+            "[Added Associations]\nx-scheme-handler/https=other.desktop;\n[Default Applications]\nx-scheme-handler/http=b.desktop\nx-scheme-handler/https=vk-fast-links.desktop;helium.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config[1].join("mimeapps.list"),
+            "[Default Applications]\nx-scheme-handler/https=system.desktop\n",
+        )
+        .unwrap();
+        let none: [String; 0] = [];
+        assert_eq!(
+            listed_default(&config, &none, "x-scheme-handler/https").as_deref(),
+            Some("vk-fast-links.desktop")
+        );
+        std::fs::write(
+            config[0].join("niri-mimeapps.list"),
+            "[Default Applications]\nx-scheme-handler/https=niri.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(
+            listed_default(&config, &["niri".to_owned()], "x-scheme-handler/https").as_deref(),
+            Some("niri.desktop")
+        );
+        assert_eq!(
+            listed_default(&config, &none, "x-scheme-handler/vkfast"),
+            None
+        );
     }
 }

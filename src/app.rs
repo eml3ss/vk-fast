@@ -574,6 +574,11 @@ fn link_page(target: crate::link_router::Target) -> MusicPage {
     }
 }
 
+struct LinkTrackRequest {
+    canceled: Arc<AtomicBool>,
+    receiver: Receiver<Result<Track, WebAudioError>>,
+}
+
 type LinkHandlerReply = (
     Option<Result<(), crate::link_router::RouterError>>,
     crate::link_router::Status,
@@ -1203,6 +1208,8 @@ pub struct MusicApp {
     link_handler_error: Option<crate::link_router::RouterError>,
     /// A VK Music link from the system, opened once music is connected.
     pending_link: Option<crate::link_router::Target>,
+    /// A linked track being looked up before it starts playing.
+    link_track: Option<LinkTrackRequest>,
     #[cfg(any(windows, test))]
     updater: update_app::State,
     playing: Option<Track>,
@@ -1532,6 +1539,7 @@ impl MusicApp {
             link_handler_pending: None,
             link_handler_error: None,
             pending_link: None,
+            link_track: None,
             #[cfg(any(windows, test))]
             updater: if cfg!(test) {
                 update_app::State::default()
@@ -1750,6 +1758,10 @@ impl MusicApp {
     }
 
     fn reset(&mut self) {
+        if let Some(request) = self.link_track.take() {
+            request.canceled.store(true, Ordering::Release);
+        }
+        self.pending_link = None;
         self.audio_upload = audio_upload_app::State::default();
         self.cancel_qr();
         self.stop_playback();
@@ -8006,10 +8018,67 @@ impl MusicApp {
         let Some(target) = self.pending_link.take() else {
             return;
         };
+        if let crate::link_router::Target::Track(key) = target {
+            self.play_linked_track(ctx, key);
+            return;
+        }
         if self.lyrics.fullscreen {
             self.set_lyrics_fullscreen(ctx, false);
         }
         self.navigate_music(ctx, link_page(target));
+    }
+
+    /// A track link plays the track itself, as its own one-track queue.
+    fn play_linked_track(&mut self, ctx: &egui::Context, key: (i64, i64)) {
+        if let Some(request) = self.link_track.take() {
+            request.canceled.store(true, Ordering::Release);
+        }
+        let Some(session) = &self.session else { return };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        self.workers.retain(|worker| !worker.is_finished());
+        match thread::Builder::new()
+            .name("vk-link-track".into())
+            .spawn(move || {
+                let result = client
+                    .tracks_metadata(owner, &[key], &worker_cancel)
+                    .and_then(|tracks| tracks.into_iter().next().ok_or(WebAudioError::NoStream));
+                let _ = sender.send(result);
+                ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.link_track = Some(LinkTrackRequest { canceled, receiver });
+            }
+            Err(_) => self.track_menu_error = Some(WebAudioError::Network),
+        }
+    }
+
+    fn poll_link_track(&mut self, ctx: &egui::Context) {
+        let Some(request) = &self.link_track else {
+            return;
+        };
+        let result = match request.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        self.link_track = None;
+        match result {
+            Ok(track) => {
+                let origin = format!("link:{}_{}", track.owner_id, track.id);
+                self.leave_mix();
+                self.start_queue_from(ctx, vec![track], origin);
+            }
+            Err(WebAudioError::Canceled) => {}
+            Err(error) => self.track_menu_error = Some(error),
+        }
     }
 
     fn link_handler_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -9203,6 +9272,7 @@ impl MusicApp {
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
         self.poll_links(ctx);
+        self.poll_link_track(ctx);
         self.poll_link_handler();
         self.poll_system_media(ctx, frame);
         self.poll_lyrics(ctx);
@@ -9768,6 +9838,7 @@ mod tests {
             link_handler_pending: None,
             link_handler_error: None,
             pending_link: None,
+            link_track: None,
             #[cfg(any(windows, test))]
             updater: update_app::State::default(),
             playing: None,
@@ -12219,6 +12290,47 @@ mod tests {
             link_page(crate::link_router::Target::Artist(artist.clone()))
                 == MusicPage::Artist(artist)
         );
+    }
+
+    #[test]
+    fn a_linked_track_plays_as_its_own_queue_instead_of_opening_its_release() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        app.library.tracks = page(2, &[1, 2]).items;
+        let mut linked = page(1, &[7]).items.remove(0);
+        linked.owner_id = -2001;
+        linked.title = "Linked track".into();
+        let page_before = app.page.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.link_track = Some(LinkTrackRequest {
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        app.poll_link_track(&ctx);
+        assert!(app.link_track.is_some(), "waits for the lookup");
+        sender.send(Ok(linked.clone())).unwrap();
+        app.poll_link_track(&ctx);
+        assert!(app.link_track.is_none());
+        assert_eq!(app.playing.as_ref().map(Track::key), Some(linked.key()));
+        assert_eq!(
+            app.play_queue
+                .as_deref()
+                .map(|queue| queue.iter().map(Track::key).collect::<Vec<_>>()),
+            Some(vec![linked.key()])
+        );
+        assert_eq!(app.queue_origin.as_deref(), Some("link:-2001_7"));
+        assert!(app.page == page_before, "the page stays where it was");
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.link_track = Some(LinkTrackRequest {
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        sender.send(Err(WebAudioError::NoStream)).unwrap();
+        app.poll_link_track(&ctx);
+        assert_eq!(app.track_menu_error, Some(WebAudioError::NoStream));
+        assert_eq!(app.playing.as_ref().map(Track::key), Some(linked.key()));
     }
 
     #[test]

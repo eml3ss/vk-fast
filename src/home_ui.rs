@@ -715,7 +715,7 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
         widgets.active.bg_stroke = Stroke::NONE;
         if icons::button(
             &mut buttons,
-            Icon::Settings,
+            Icon::Sliders,
             view.language.text("Настроить", "Configure"),
             true,
         )

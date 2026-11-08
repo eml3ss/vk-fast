@@ -16,6 +16,9 @@ use crate::repaint_target::RepaintTarget;
 const ACTIVATE: &[u8] = b"VKFAST_ACTIVATE_V1";
 /// Activation that also carries one link to open, followed by the link.
 const OPEN_LINK: &[u8] = b"VKFAST_OPENLINK_V1";
+/// Activation with the launcher's Wayland activation token, then `\n` and
+/// an optional link.
+const TOKEN: &[u8] = b"VKFAST_ACTTOKEN_V1";
 const MAX_LINKS: usize = 8;
 const CONNECT_BUDGET: Duration = Duration::from_secs(3);
 const RETRY: Duration = Duration::from_millis(10);
@@ -29,6 +32,7 @@ pub enum Acquisition {
 struct ActivationState {
     pending: AtomicBool,
     links: Mutex<VecDeque<String>>,
+    token: Mutex<Option<String>>,
     repaint: Mutex<Option<RepaintTarget>>,
 }
 
@@ -70,9 +74,35 @@ impl Activation {
         self.notify();
     }
 
+    /// The newest launcher activation token, for showing the window.
+    pub fn take_token(&self) -> Option<String> {
+        self.0
+            .token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+
     /// Handle one activation message; false for an unknown one.
     fn receive(&self, message: &[u8]) -> bool {
-        if message == ACTIVATE {
+        if let Some(payload) = message.strip_prefix(TOKEN)
+            && let Ok(payload) = std::str::from_utf8(payload)
+            && let Some((token, link)) = payload.split_once('\n')
+            && crate::window_focus::valid_token(token)
+            && link.len() <= crate::link_router::MAX_URL
+        {
+            *self
+                .0
+                .token
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(token.to_owned());
+            if link.is_empty() {
+                self.notify();
+            } else {
+                self.open_link(link);
+            }
+            true
+        } else if message == ACTIVATE {
             self.notify();
             true
         } else if let Some(link) = message.strip_prefix(OPEN_LINK)
@@ -147,19 +177,35 @@ impl Drop for Primary {
 
 /// Windows calls the supplied foreground-permission grant with the real server
 /// PID before sending activation. Linux does not need that policy handoff.
-/// `link` travels to an already running instance with its activation.
-pub fn acquire(grant_foreground: impl Fn(u32), link: Option<&str>) -> io::Result<Acquisition> {
+/// `link` and the launcher's activation `token` travel to an already running
+/// instance with its activation.
+pub fn acquire(
+    grant_foreground: impl Fn(u32),
+    link: Option<&str>,
+    token: Option<&str>,
+) -> io::Result<Acquisition> {
     platform::acquire(
         &platform::default_address()?,
         &grant_foreground,
-        &message(link),
+        &message(link, token),
     )
 }
 
-fn message(link: Option<&str>) -> Vec<u8> {
-    match link.filter(|link| !link.is_empty() && link.len() <= crate::link_router::MAX_URL) {
-        Some(link) => [OPEN_LINK, link.as_bytes()].concat(),
-        None => ACTIVATE.to_vec(),
+fn message(link: Option<&str>, token: Option<&str>) -> Vec<u8> {
+    let link = link.filter(|link| !link.is_empty() && link.len() <= crate::link_router::MAX_URL);
+    match (
+        token.filter(|token| crate::window_focus::valid_token(token)),
+        link,
+    ) {
+        (Some(token), link) => [
+            TOKEN,
+            token.as_bytes(),
+            b"\n",
+            link.unwrap_or_default().as_bytes(),
+        ]
+        .concat(),
+        (None, Some(link)) => [OPEN_LINK, link.as_bytes()].concat(),
+        (None, None) => ACTIVATE.to_vec(),
     }
 }
 
@@ -338,7 +384,7 @@ mod platform {
                         },
                         move |activation, stopping| {
                             let mut message =
-                                vec![0_u8; OPEN_LINK.len() + crate::link_router::MAX_URL];
+                                vec![0_u8; TOKEN.len() + 512 + crate::link_router::MAX_URL];
                             while !stopping.load(Ordering::Acquire) {
                                 match receive.recv(&mut message) {
                                     Ok(length) if !stopping.load(Ordering::Acquire) => {
@@ -452,13 +498,12 @@ mod platform {
 
     /// The pipe carries a header, then for a link its u16 length and bytes.
     fn framed(message: &[u8]) -> Vec<u8> {
-        match message.strip_prefix(OPEN_LINK) {
-            Some(link) => {
-                let length = u16::try_from(link.len()).unwrap_or(u16::MAX);
-                [OPEN_LINK, length.to_le_bytes().as_slice(), link].concat()
-            }
-            None => message.to_vec(),
+        if message.len() <= ACTIVATE.len() {
+            return message.to_vec();
         }
+        let (header, payload) = message.split_at(ACTIVATE.len());
+        let length = u16::try_from(payload.len()).unwrap_or(u16::MAX);
+        [header, length.to_le_bytes().as_slice(), payload].concat()
     }
 
     pub(super) fn activate_existing(
@@ -546,19 +591,22 @@ mod platform {
                                 if read(&mut stream, &mut header).is_err() {
                                     continue;
                                 }
-                                let accepted = if header.as_slice() == OPEN_LINK {
+                                let accepted = if header.as_slice() == OPEN_LINK
+                                    || header.as_slice() == TOKEN
+                                {
                                     let mut length = [0; 2];
                                     let length = read(&mut stream, &mut length)
                                         .ok()
                                         .map(|()| usize::from(u16::from_le_bytes(length)))
                                         .filter(|length| {
-                                            (1..=crate::link_router::MAX_URL).contains(length)
+                                            (1..=crate::link_router::MAX_URL + 512).contains(length)
                                         });
                                     length.is_some_and(|length| {
                                         let mut link = vec![0; length];
                                         read(&mut stream, &mut link).is_ok()
-                                            && activation
-                                                .receive(&[OPEN_LINK, link.as_slice()].concat())
+                                            && activation.receive(
+                                                &[header.as_slice(), link.as_slice()].concat(),
+                                            )
                                     })
                                 } else {
                                     activation.receive(&header)
@@ -693,11 +741,14 @@ mod tests {
         );
         let action = std::env::var("VK_FAST_INSTANCE_TEST_ACTION").unwrap();
         let link = "https://vk.ru/music/album/-2000_1_ab";
-        let message = message((action == "link").then_some(link));
+        let message = message(
+            matches!(action.as_str(), "link" | "token").then_some(link),
+            (action == "token").then_some("launcher-token_1"),
+        );
         let acquired =
             platform::acquire(&address(directory.to_str().unwrap()), &|_| {}, &message).unwrap();
         match (action.as_str(), acquired) {
-            ("signal" | "link", Acquisition::AlreadyRunning) => (),
+            ("signal" | "link" | "token", Acquisition::AlreadyRunning) => (),
             ("hold", Acquisition::Primary(_primary)) => {
                 fs::write(directory.join("ready"), b"ready").unwrap();
                 loop {
@@ -737,6 +788,38 @@ mod tests {
             activation.take_links(),
             ["https://vk.ru/music/album/-2000_1_ab"]
         );
+        assert!(activation.take_links().is_empty());
+        assert_eq!(activation.take_token(), None);
+        // A launcher's activation token travels with the link.
+        let mut child = self::child(&namespace, "token");
+        wait(|| child.0.try_wait().unwrap().is_some());
+        assert!(child.0.wait().unwrap().success());
+        wait(|| activation.0.pending.load(Ordering::Acquire));
+        assert!(activation.take_pending());
+        assert_eq!(activation.take_token().as_deref(), Some("launcher-token_1"));
+        assert_eq!(
+            activation.take_links(),
+            ["https://vk.ru/music/album/-2000_1_ab"]
+        );
+        assert!(!activation.receive(b"VKFAST_ACTTOKEN_V1bad token\n"));
+        assert!(activation.receive(b"VKFAST_ACTTOKEN_V1ok\n"));
+        assert_eq!(activation.take_token().as_deref(), Some("ok"));
+        assert!(activation.take_links().is_empty());
+        assert_eq!(activation.take_token(), None);
+        // A launcher's activation token travels with the link.
+        let mut child = self::child(&namespace, "token");
+        wait(|| child.0.try_wait().unwrap().is_some());
+        assert!(child.0.wait().unwrap().success());
+        wait(|| activation.0.pending.load(Ordering::Acquire));
+        assert!(activation.take_pending());
+        assert_eq!(activation.take_token().as_deref(), Some("launcher-token_1"));
+        assert_eq!(
+            activation.take_links(),
+            ["https://vk.ru/music/album/-2000_1_ab"]
+        );
+        assert!(!activation.receive(b"VKFAST_ACTTOKEN_V1bad token\n"));
+        assert!(activation.receive(b"VKFAST_ACTTOKEN_V1ok\n"));
+        assert_eq!(activation.take_token().as_deref(), Some("ok"));
         assert!(activation.take_links().is_empty());
         // Unknown or oversized messages are ignored; the queue stays bounded.
         assert!(!activation.receive(b"VKFAST_OPENLINK_V1"));
