@@ -32,6 +32,9 @@ pub struct HomeView<'a> {
     pub mix_loading: bool,
     pub mix_playing: bool,
     pub collections: &'a [Collection],
+    /// The collection whose queue is current, and one loading to autoplay.
+    pub active_collection: Option<&'a str>,
+    pub pending_collection: Option<&'a str>,
     pub catalog: &'a HomeCatalog,
     /// The Home catalog mix that is current, and whether it is audible.
     pub active_mix: Option<&'a CatalogMix>,
@@ -145,15 +148,32 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         if view.collections.is_empty() {
             empty_collections(ui, &view);
         } else {
+            // Two full rows that slide together: the first half on top.
             let columns = columns(ui.available_width());
             let width = cell_width(ui.available_width(), columns);
-            for collections in view.collections.chunks(columns) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 16.0;
-                    for collection in collections {
+            let top = view.collections.len().div_ceil(2);
+            let spans = fixed_spans(top, width);
+            carousel(
+                ui,
+                "home-collections",
+                &spans,
+                COLLECTION_HEIGHT * 2.0 + 8.0,
+                view.language,
+                |ui, column| {
+                    for index in [column, column + top] {
+                        let Some(collection) = view.collections.get(index) else {
+                            continue;
+                        };
                         ui.push_id(("home-collection", &collection.id), |ui| {
-                            let (body, play_clicked) =
-                                collection_card(ui, covers, collection, width, view.language);
+                            let state = PlayState::of_collection(&view, &collection.id);
+                            let (body, play_clicked) = collection_card(
+                                ui,
+                                covers,
+                                collection,
+                                width,
+                                view.language,
+                                state,
+                            );
                             if play_clicked {
                                 action = Some(Action::PlayCollection(collection.id.clone()));
                             } else if body.clicked() {
@@ -161,9 +181,8 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                             }
                         });
                     }
-                });
-                ui.add_space(8.0);
-            }
+                },
+            );
         }
         action = catalog_sections(ui, covers, &view).or(action.take());
         ui.add_space(8.0);
@@ -171,25 +190,181 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
     action
 }
 
+const CARD_GAP: f32 = 16.0;
+const COLLECTION_HEIGHT: f32 = 194.0;
+const CAROUSEL_SECONDS: f32 = 0.32;
+
+fn fixed_spans(count: usize, width: f32) -> Vec<(f32, f32)> {
+    (0..count)
+        .map(|index| (index as f32 * (width + CARD_GAP), width))
+        .collect()
+}
+
+/// The next stop starts at the first item not fully visible.
+fn next_stop(spans: &[(f32, f32)], target: f32, visible: f32, max: f32) -> f32 {
+    spans
+        .iter()
+        .find(|(x, width)| x + width > target + visible + 0.5)
+        .map_or(max, |(x, _)| x.min(max))
+}
+
+/// The previous stop shows the page that ends just before the current one:
+/// the first item from which everything up to the current stop fits.
+fn previous_stop(spans: &[(f32, f32)], target: f32, visible: f32) -> f32 {
+    let gap = match spans {
+        [(x, width), (next, _), ..] => (next - x - width).max(0.0),
+        _ => 0.0,
+    };
+    let wanted = target - visible - gap;
+    spans
+        .iter()
+        .map(|(x, _)| *x)
+        .find(|x| *x >= wanted - 0.5 && *x < target - 0.5)
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// One horizontally sliding Home row. The scroll target lives in egui memory
+/// and the drawn offset eases toward it. Like VK's sliders, round edge
+/// arrows appear while the pointer is over the row.
+fn carousel(
+    ui: &mut egui::Ui,
+    key: &str,
+    spans: &[(f32, f32)],
+    height: f32,
+    language: Language,
+    mut item: impl FnMut(&mut egui::Ui, usize),
+) {
+    let visible = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(visible, height), Sense::hover());
+    let content = spans.last().map_or(0.0, |(x, width)| x + width);
+    let max = (content - visible).max(0.0);
+    let id = egui::Id::new(("home-carousel", key));
+    let target = ui
+        .data(|data| data.get_temp::<f32>(id))
+        .unwrap_or(0.0)
+        .clamp(0.0, max);
+    let offset = ui
+        .ctx()
+        .animate_value_with_time(id.with("offset"), target, CAROUSEL_SECONDS);
+    // Keep card outlines and focus rings, but never draw past the row ends.
+    let clip = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() - 2.0),
+        egui::pos2(rect.right(), rect.bottom() + 2.0),
+    )
+    .intersect(ui.clip_rect());
+    for (index, (x, width)) in spans.iter().enumerate() {
+        let left = rect.left() + x - offset;
+        if left + width < rect.left() || left > rect.right() {
+            continue;
+        }
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt((key, index))
+                .max_rect(egui::Rect::from_min_size(
+                    egui::pos2(left, rect.top()),
+                    egui::vec2(*width, height),
+                ))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        child.set_clip_rect(clip);
+        item(&mut child, index);
+    }
+
+    let hovered = ui.rect_contains_pointer(rect);
+    let mut moved = None;
+    for (next, available) in [(false, target > 0.5), (true, target < max - 0.5)] {
+        if !available {
+            continue;
+        }
+        let x = if next {
+            rect.right() - 20.0
+        } else {
+            rect.left() + 20.0
+        };
+        let button =
+            egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(28.0, 28.0));
+        let response = ui.interact(button, id.with(("arrow", next)), Sense::click());
+        let label = if next {
+            language.text("Дальше", "Next")
+        } else {
+            language.text("Назад", "Back")
+        };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if hovered || response.has_focus() {
+            arrow(ui, button, next, response.hovered() || response.has_focus());
+        }
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            moved = Some(if next {
+                next_stop(spans, target, visible, max)
+            } else {
+                previous_stop(spans, target, visible)
+            });
+        }
+    }
+    if let Some(stop) = moved {
+        ui.data_mut(|data| data.insert_temp(id, stop));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// A round chevron button drawn over the row's edge.
+fn arrow(ui: &egui::Ui, rect: egui::Rect, next: bool, hovered: bool) {
+    let painter = ui.painter();
+    let center = rect.center();
+    let fill = if hovered {
+        Color32::from_rgb(52, 60, 74)
+    } else {
+        Color32::from_rgba_unmultiplied(36, 42, 52, 238)
+    };
+    painter.circle_filled(center, 13.0, fill);
+    painter.circle_stroke(
+        center,
+        13.0,
+        Stroke::new(1.0, Color32::from_rgb(64, 73, 88)),
+    );
+    let direction = if next { 1.0 } else { -1.0 };
+    let tip = center + egui::vec2(2.5 * direction, 0.0);
+    let stroke = Stroke::new(1.8, Color32::from_rgb(226, 232, 240));
+    painter.line_segment([tip + egui::vec2(-4.5 * direction, -5.0), tip], stroke);
+    painter.line_segment([tip, tip + egui::vec2(-4.5 * direction, 5.0)], stroke);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MixState {
+enum PlayState {
     Idle,
     Pending,
     Playing,
     Paused,
 }
 
-impl MixState {
-    fn of(view: &HomeView<'_>, mix: &CatalogMix) -> Self {
-        if view.pending_mix == Some(mix) {
-            Self::Pending
-        } else if view.active_mix != Some(mix) {
-            Self::Idle
-        } else if view.active_mix_playing {
-            Self::Playing
-        } else {
-            Self::Paused
+impl PlayState {
+    fn new(pending: bool, active: bool, playing: bool) -> Self {
+        match (pending, active, playing) {
+            (true, _, _) => Self::Pending,
+            (false, false, _) => Self::Idle,
+            (false, true, true) => Self::Playing,
+            (false, true, false) => Self::Paused,
         }
+    }
+
+    fn of(view: &HomeView<'_>, mix: &CatalogMix) -> Self {
+        Self::new(
+            view.pending_mix == Some(mix),
+            view.active_mix == Some(mix),
+            view.active_mix_playing,
+        )
+    }
+
+    fn of_collection(view: &HomeView<'_>, id: &str) -> Self {
+        Self::new(
+            view.pending_collection == Some(id),
+            view.active_collection == Some(id),
+            view.active_mix_playing,
+        )
     }
 
     fn icon(self) -> Icon {
@@ -208,13 +383,15 @@ fn catalog_sections(
 ) -> Option<Action> {
     let mut action = None;
     let language = view.language;
-    for (icon, title, tiles) in [
+    for (key, icon, title, tiles) in [
         (
+            "home-genres",
             Icon::Album,
             language.text("Жанры", "Genres"),
             &view.catalog.genres,
         ),
         (
+            "home-moods",
             Icon::Heart,
             language.text("Настроения и занятия", "Moods and activities"),
             &view.catalog.moods,
@@ -226,37 +403,24 @@ fn catalog_sections(
         ui.add_space(SECTION_GAP);
         section_heading(ui, icon, title, None, true);
         ui.add_space(SECTION_GAP);
-        // Explicit rows: a chip never widens the page past the viewport.
-        let available = ui.available_width();
-        let mut rows: Vec<Vec<_>> = Vec::new();
-        let mut used = f32::INFINITY;
-        for tile in tiles {
-            let width = chip_width(ui, &tile.title);
-            if used + CHIP_GAP + width > available {
-                rows.push(Vec::new());
-                used = width;
-            } else {
-                used += CHIP_GAP + width;
-            }
-            if let Some(row) = rows.last_mut() {
-                row.push(tile);
-            }
-        }
-        for (index, row) in rows.iter().enumerate() {
-            if index > 0 {
-                ui.add_space(CHIP_GAP);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = CHIP_GAP;
-                for tile in row {
-                    ui.push_id(("home-mix-tile", &tile.id), |ui| {
-                        if mix_chip(ui, &tile.title, MixState::of(view, &tile.mix)).clicked() {
-                            action = Some(Action::PlayCatalogMix(tile.mix.clone()));
-                        }
-                    });
+        let mut x = 0.0;
+        let spans: Vec<(f32, f32)> = tiles
+            .iter()
+            .map(|tile| {
+                let width = chip_width(ui, &tile.title);
+                let span = (x, width);
+                x += width + CHIP_GAP;
+                span
+            })
+            .collect();
+        carousel(ui, key, &spans, 36.0, language, |ui, index| {
+            let tile = &tiles[index];
+            ui.push_id(("home-mix-tile", &tile.id), |ui| {
+                if mix_chip(ui, &tile.title, PlayState::of(view, &tile.mix)).clicked() {
+                    action = Some(Action::PlayCatalogMix(tile.mix.clone()));
                 }
             });
-        }
+        });
     }
 
     if !view.catalog.friends.is_empty() {
@@ -269,24 +433,25 @@ fn catalog_sections(
             true,
         );
         ui.add_space(SECTION_GAP);
-        let columns = columns(ui.available_width());
-        let width = cell_width(ui.available_width(), columns);
-        for (row, friends) in view.catalog.friends.chunks(columns).enumerate() {
-            if row > 0 {
-                ui.add_space(8.0);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for friend in friends {
-                    let key = (friend.playlist.owner_id, friend.playlist.id);
-                    ui.push_id(("home-friend", key), |ui| {
-                        if let Some(intent) = friend_card(ui, covers, friend, width, language) {
-                            action = Some(intent);
-                        }
-                    });
-                }
-            });
-        }
+        let friends = &view.catalog.friends;
+        let width = cell_width(ui.available_width(), columns(ui.available_width()));
+        let height = friends.iter().map(friend_card_height).fold(0.0, f32::max);
+        carousel(
+            ui,
+            "home-friends",
+            &fixed_spans(friends.len(), width),
+            height,
+            language,
+            |ui, index| {
+                let friend = &friends[index];
+                let key = (friend.playlist.owner_id, friend.playlist.id);
+                ui.push_id(("home-friend", key), |ui| {
+                    if let Some(intent) = friend_card(ui, covers, friend, width, language) {
+                        action = Some(intent);
+                    }
+                });
+            },
+        );
     }
 
     if !view.catalog.artist_mixes.is_empty() {
@@ -299,24 +464,24 @@ fn catalog_sections(
             true,
         );
         ui.add_space(SECTION_GAP);
-        let columns = columns(ui.available_width());
-        let width = cell_width(ui.available_width(), columns);
-        for (row, mixes) in view.catalog.artist_mixes.chunks(columns).enumerate() {
-            if row > 0 {
-                ui.add_space(8.0);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for (column, mix) in mixes.iter().enumerate() {
-                    ui.push_id(("home-artist-mix", row, column), |ui| {
-                        let state = MixState::of(view, &mix.mix);
-                        if artist_mix_card(ui, covers, mix, width, state).clicked() {
-                            action = Some(Action::PlayCatalogMix(mix.mix.clone()));
-                        }
-                    });
-                }
-            });
-        }
+        let mixes = &view.catalog.artist_mixes;
+        let width = cell_width(ui.available_width(), columns(ui.available_width()));
+        carousel(
+            ui,
+            "home-artist-mixes",
+            &fixed_spans(mixes.len(), width),
+            COLLECTION_HEIGHT,
+            language,
+            |ui, index| {
+                let mix = &mixes[index];
+                ui.push_id(("home-artist-mix", index), |ui| {
+                    let state = PlayState::of(view, &mix.mix);
+                    if artist_mix_card(ui, covers, mix, width, state).clicked() {
+                        action = Some(Action::PlayCatalogMix(mix.mix.clone()));
+                    }
+                });
+            },
+        );
     }
     action
 }
@@ -338,7 +503,7 @@ fn chip_width(ui: &egui::Ui, title: &str) -> f32 {
 
 /// A compact genre or mood pill: the app's surface, a blue play disc and the
 /// accent outline while its mix is the current one.
-fn mix_chip(ui: &mut egui::Ui, title: &str, state: MixState) -> Response {
+fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
     let text_color = ui.visuals().text_color();
     let galley = chip_galley(ui, title);
     let disc = CHIP_DISC;
@@ -348,7 +513,7 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: MixState) -> Response {
         response.request_focus();
     }
     let hovered = response.hovered() || response.has_focus();
-    let active = state != MixState::Idle;
+    let active = state != PlayState::Idle;
     let fill = if active {
         theme::SELECTED
     } else if hovered {
@@ -403,6 +568,13 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: MixState) -> Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+const FRIEND_HEADER: f32 = 84.0;
+const FRIEND_ROW: f32 = 44.0;
+
+fn friend_card_height(friend: &FriendPlaylist) -> f32 {
+    FRIEND_HEADER + 6.0 + FRIEND_ROW * friend.tracks.len().min(3) as f32 + 6.0
+}
+
 fn friend_card(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
@@ -410,12 +582,10 @@ fn friend_card(
     width: f32,
     language: Language,
 ) -> Option<Action> {
-    const HEADER: f32 = 84.0;
-    const ROW: f32 = 44.0;
     let rows = friend.tracks.len().min(3);
-    let height = HEADER + 6.0 + ROW * rows as f32 + 6.0;
+    let height = friend_card_height(friend);
     let (rect, response) = card(ui, egui::vec2(width, height), &friend.playlist.title);
-    let header = egui::Rect::from_min_size(rect.min, egui::vec2(width, HEADER));
+    let header = egui::Rect::from_min_size(rect.min, egui::vec2(width, FRIEND_HEADER));
     if let Some([red, green, blue]) = friend.color {
         ui.painter().rect_filled(
             header,
@@ -480,9 +650,9 @@ fn friend_card(
         let row = egui::Rect::from_min_size(
             egui::pos2(
                 rect.left() + 6.0,
-                header.bottom() + 6.0 + ROW * index as f32,
+                header.bottom() + 6.0 + FRIEND_ROW * index as f32,
             ),
-            egui::vec2(width - 12.0, ROW),
+            egui::vec2(width - 12.0, FRIEND_ROW),
         );
         let hit = ui.interact(row, ui.id().with(("friend-track", index)), Sense::click());
         if hit.hovered() {
@@ -544,10 +714,10 @@ fn artist_mix_card(
     covers: &mut CoverCache,
     mix: &ArtistMix,
     width: f32,
-    state: MixState,
+    state: PlayState,
 ) -> Response {
     let (rect, response) = card(ui, egui::vec2(width, 194.0), &mix.title);
-    if state != MixState::Idle {
+    if state != PlayState::Idle {
         ui.painter().rect_stroke(
             rect,
             12.0,
@@ -985,8 +1155,17 @@ fn collection_card(
     collection: &Collection,
     width: f32,
     language: Language,
+    state: PlayState,
 ) -> (Response, bool) {
     let (rect, response) = card(ui, egui::vec2(width, 194.0), &collection.title);
+    if state != PlayState::Idle {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
     let art =
         egui::Rect::from_min_size(rect.min + egui::vec2(14.0, 14.0), egui::vec2(112.0, 112.0));
     if collection.cover_url.is_some() {
@@ -1022,7 +1201,7 @@ fn collection_card(
     icons::paint(
         ui.painter(),
         play_rect.shrink(10.0),
-        Icon::Play,
+        state.icon(),
         theme::BACKGROUND,
     );
     if play.has_focus() {
@@ -1130,7 +1309,7 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Copy)]
-    struct MixState {
+    struct PlayState {
         connected: bool,
         loading: bool,
         playing: bool,
@@ -1138,7 +1317,7 @@ mod tests {
 
     fn hero_frame(
         context: &egui::Context,
-        state: MixState,
+        state: PlayState,
         language: Language,
         tick: u32,
         events: Vec<egui::Event>,
@@ -1168,6 +1347,8 @@ mod tests {
                         mix_loading: state.loading,
                         mix_playing: state.playing,
                         collections: &[],
+                        active_collection: None,
+                        pending_collection: None,
                         catalog: &HomeCatalog::default(),
                         active_mix: None,
                         active_mix_playing: false,
@@ -1186,7 +1367,7 @@ mod tests {
         for language in [Language::Russian, Language::English] {
             for (state, label, expected) in [
                 (
-                    MixState {
+                    PlayState {
                         connected: false,
                         loading: true,
                         playing: false,
@@ -1195,7 +1376,7 @@ mod tests {
                     Some(Action::SignIn),
                 ),
                 (
-                    MixState {
+                    PlayState {
                         connected: true,
                         loading: false,
                         playing: false,
@@ -1204,7 +1385,7 @@ mod tests {
                     Some(Action::PlayMix),
                 ),
                 (
-                    MixState {
+                    PlayState {
                         connected: true,
                         loading: false,
                         playing: true,
@@ -1213,7 +1394,7 @@ mod tests {
                     Some(Action::PlayMix),
                 ),
                 (
-                    MixState {
+                    PlayState {
                         connected: true,
                         loading: true,
                         playing: false,
@@ -1289,6 +1470,8 @@ mod tests {
                         mix_loading: false,
                         mix_playing: false,
                         collections: std::slice::from_ref(collection),
+                        active_collection: None,
+                        pending_collection: None,
                         catalog: &HomeCatalog::default(),
                         active_mix: None,
                         active_mix_playing: false,
@@ -1335,6 +1518,8 @@ mod tests {
                         mix_loading: false,
                         mix_playing: false,
                         collections: &[],
+                        active_collection: None,
+                        pending_collection: None,
                         catalog,
                         active_mix: catalog.genres.first().map(|tile| &tile.mix),
                         active_mix_playing: true,
@@ -1463,6 +1648,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn carousel_stops_page_by_whole_items_and_keep_the_last_page_full() {
+        // Four cards of 200 with 16 gaps; three are visible in 632.
+        let spans = fixed_spans(8, 200.0);
+        let visible = 632.0;
+        let max = spans.last().map(|(x, w)| x + w).unwrap() - visible;
+        assert_eq!(next_stop(&spans, 0.0, visible, max), 648.0);
+        assert_eq!(next_stop(&spans, 648.0, visible, max), max);
+        assert_eq!(next_stop(&spans, max, visible, max), max);
+        assert_eq!(previous_stop(&spans, max, visible), 432.0);
+        assert_eq!(previous_stop(&spans, 648.0, visible), 0.0);
+        assert_eq!(previous_stop(&spans, 0.0, visible), 0.0);
+
+        // Variable chip widths stop at the first chip cut by the edge.
+        let chips = [(0.0, 90.0), (98.0, 120.0), (226.0, 70.0), (304.0, 140.0)];
+        assert_eq!(next_stop(&chips, 0.0, 300.0, 144.0), 144.0_f32.min(226.0));
+        assert_eq!(next_stop(&chips, 0.0, 400.0, 44.0), 44.0);
+    }
+
+    #[test]
+    fn hovering_a_row_shows_an_edge_arrow_that_slides_to_the_next_cards() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let collections: Vec<Collection> = (0..8)
+            .map(|index| Collection {
+                id: format!("c{index}"),
+                title: format!("Collection {index}"),
+                subtitle: String::new(),
+                cover_url: None,
+                tracks: Vec::new(),
+            })
+            .collect();
+        let mut frame = |tick: u32, events: Vec<egui::Event>| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(660.0, 1100.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        &mut covers,
+                        HomeView {
+                            language: Language::Russian,
+                            library: &[],
+                            library_total: None,
+                            recent: &[],
+                            playing: None,
+                            connected: true,
+                            loading: false,
+                            mix_loading: false,
+                            mix_playing: false,
+                            collections: &collections,
+                            active_collection: None,
+                            pending_collection: None,
+                            catalog: &HomeCatalog::default(),
+                            active_mix: None,
+                            active_mix_playing: false,
+                            pending_mix: None,
+                            error: None,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let arrows = |output: &egui::FullOutput| -> Vec<egui::Pos2> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Circle(circle)
+                        if circle.radius == 13.0 && circle.fill != Color32::TRANSPARENT =>
+                    {
+                        Some(circle.center)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let output = frame(1, Vec::new());
+        assert!(
+            arrows(&output).is_empty(),
+            "arrows stay hidden without hover"
+        );
+        let first = text_center(&output, "Collection 0");
+        let hidden = |output: &egui::FullOutput| {
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text() == "Collection 3"
+                        && text.visual_bounding_rect().right() <= 660.0)
+            })
+        };
+        assert!(!hidden(&output), "the fourth column starts off screen");
+        let output = frame(2, vec![egui::Event::PointerMoved(first)]);
+        let shown = arrows(&output);
+        assert_eq!(shown.len(), 1, "only the next arrow on the first page");
+        let next = shown[0];
+        assert!(next.x > 600.0);
+        frame(3, pointer(next, true));
+        frame(4, pointer(next, false));
+        let mut output = frame(5, Vec::new());
+        for tick in 6..20 {
+            output = frame(tick, Vec::new());
+        }
+        assert!(hidden(&output), "the row slid to the next cards");
+        let output = frame(
+            20,
+            vec![egui::Event::PointerMoved(text_center(
+                &output,
+                "Collection 3",
+            ))],
+        );
+        assert_eq!(arrows(&output).len(), 1, "only the back arrow at the end");
+        assert!(arrows(&output)[0].x < 300.0);
+    }
+
     fn pointer(position: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
         vec![
             egui::Event::PointerMoved(position),
@@ -1519,6 +1828,8 @@ mod tests {
                             mix_loading: false,
                             mix_playing: false,
                             collections: &[],
+                            active_collection: None,
+                            pending_collection: None,
                             catalog: &HomeCatalog::default(),
                             active_mix: None,
                             active_mix_playing: false,
@@ -1657,6 +1968,8 @@ mod tests {
                                     mix_loading: false,
                                     mix_playing: false,
                                     collections: &[],
+                                    active_collection: None,
+                                    pending_collection: None,
                                     catalog: &HomeCatalog::default(),
                                     active_mix: None,
                                     active_mix_playing: false,

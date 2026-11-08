@@ -4682,14 +4682,9 @@ impl MusicApp {
 
     fn open_collection(&mut self, ctx: &egui::Context, id: String, reload: bool) {
         self.home_autoplay = None;
-        let Some(source) = self
-            .home_sources
-            .iter()
-            .find(|source| source.id == id)
-            .cloned()
-        else {
+        if !self.home_sources.iter().any(|source| source.id == id) {
             return;
-        };
+        }
         self.navigate_music(ctx, MusicPage::Collection(id.clone()));
         self.home_error = None;
         if !reload
@@ -4700,6 +4695,49 @@ impl MusicApp {
         {
             return;
         }
+        self.load_collection_tracks(ctx, id);
+    }
+
+    /// Home's play button: start the collection, or toggle it when it is the
+    /// current queue. Missing tracks load in place; it never opens the page.
+    fn play_home_collection(&mut self, ctx: &egui::Context, id: String) {
+        let origin = format!("collection:{id}");
+        if !self.mix_active
+            && self.playing.is_some()
+            && self.queue_origin.as_deref() == Some(origin.as_str())
+        {
+            self.toggle_playback(ctx);
+            return;
+        }
+        self.leave_mix();
+        let tracks = self
+            .home_collections
+            .iter()
+            .find(|collection| collection.id == id)
+            .map(|collection| collection.tracks.clone())
+            .unwrap_or_default();
+        if !tracks.is_empty() {
+            self.start_queue_from(ctx, tracks, origin);
+        } else {
+            self.home_error = None;
+            self.load_collection_tracks(ctx, id.clone());
+            if self.home_request.is_some() {
+                self.home_autoplay = Some(id);
+                self.advance_on_load = false;
+            }
+        }
+    }
+
+    /// Fetch a Home collection's tracks in the background, wherever the user is.
+    fn load_collection_tracks(&mut self, ctx: &egui::Context, id: String) {
+        let Some(source) = self
+            .home_sources
+            .iter()
+            .find(|source| source.id == id)
+            .cloned()
+        else {
+            return;
+        };
         self.home_request = None;
         let Some(session) = &self.session else {
             return;
@@ -5998,6 +6036,15 @@ impl MusicApp {
                 loading: self.home_request.is_some()
                     || (!self.home_requested && self.pending.is_some() && self.session.is_some()),
                 collections: &self.home_collections,
+                active_collection: self
+                    .queue_origin
+                    .as_deref()
+                    .filter(|_| !self.mix_active && self.playing.is_some())
+                    .and_then(|origin| origin.strip_prefix("collection:")),
+                pending_collection: self
+                    .home_autoplay
+                    .as_deref()
+                    .filter(|_| self.home_request.is_some()),
                 catalog: &self.home_catalog,
                 active_mix: catalog_mix
                     .filter(|_| self.mix_active)
@@ -6044,24 +6091,7 @@ impl MusicApp {
                 }
             }
             Some(home_ui::Action::OpenCollection(id)) => self.open_collection(&ctx, id, false),
-            Some(home_ui::Action::PlayCollection(id)) => {
-                self.leave_mix();
-                let tracks = self
-                    .home_collections
-                    .iter()
-                    .find(|collection| collection.id == id)
-                    .map(|collection| collection.tracks.clone())
-                    .unwrap_or_default();
-                if !tracks.is_empty() {
-                    self.start_queue_from(&ctx, tracks, format!("collection:{id}"));
-                } else {
-                    self.open_collection(&ctx, id.clone(), false);
-                    if self.home_request.is_some() {
-                        self.home_autoplay = Some(id);
-                        self.advance_on_load = false;
-                    }
-                }
-            }
+            Some(home_ui::Action::PlayCollection(id)) => self.play_home_collection(&ctx, id),
             Some(home_ui::Action::PlayCatalogMix(mix)) => self.play_catalog_mix(&ctx, mix),
             Some(home_ui::Action::OpenPlaylist(reference)) => {
                 self.navigate_music(&ctx, MusicPage::Playlist(reference));
@@ -9504,6 +9534,41 @@ mod tests {
             assert_eq!(app.library.tracks.len(), 3);
             assert_eq!(app.adjacent_track(true), Some((1, 10)));
         }
+    }
+
+    #[test]
+    fn home_play_button_starts_a_collection_without_opening_its_page() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.page = MusicPage::Home;
+        app.home_sources.push(crate::web_audio::HomeCollection {
+            id: "unloaded".into(),
+            owner_id: 42,
+            playlist_id: 5,
+            title: "Unloaded playlist".into(),
+            subtitle: String::new(),
+            cover_url: None,
+            access_key: None,
+            tracks: Vec::new(),
+        });
+        app.home_collections.push(home_ui::Collection {
+            id: "unloaded".into(),
+            title: "Unloaded playlist".into(),
+            subtitle: String::new(),
+            cover_url: None,
+            tracks: Vec::new(),
+        });
+        app.play_home_collection(&ctx, "unloaded".into());
+        assert!(
+            app.page == MusicPage::Home,
+            "play must not open the playlist"
+        );
+
+        app.home_collections[0].tracks = page(2, &[7, 8]).items;
+        app.play_home_collection(&ctx, "unloaded".into());
+        assert!(app.page == MusicPage::Home);
+        assert_eq!(app.queue_origin.as_deref(), Some("collection:unloaded"));
+        assert_eq!(app.play_queue.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
