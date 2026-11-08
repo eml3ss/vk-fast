@@ -66,8 +66,8 @@ rustup run stable ./scripts/build-windows.sh --installer --output dist
 
 Результат с `--installer`:
 
-- `VK-Fast-0.3.0-windows-x86_64-setup.exe` — установщик с выбором папок, ярлыками и деинсталлятором.
-- `VK-Fast-0.3.0-windows-x86_64.zip` — только `vk-fast.exe` в корне; папки данных создаются при запуске.
+- `VK-Fast-0.4.0-windows-x86_64-setup.exe` — установщик с выбором папок, ярлыками и деинсталлятором.
+- `VK-Fast-0.4.0-windows-x86_64.zip` — только `vk-fast.exe` в корне; папки данных создаются при запуске.
 
 
 Для автоматической установки поддерживаются `/S`, `/CONFIG=appdata|portable`, `/CACHE=appdata|portable` и стандартный NSIS `/D=`. Последний параметр задаётся в конце командной строки без кавычек, даже если путь содержит пробелы:
