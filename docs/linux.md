@@ -13,15 +13,15 @@ AppImage и tar.gz содержат приложение со встроенны
 GTK 3 и остальные зависимости устанавливаются вместе с WebKitGTK. Графические драйверы и шрифты также берутся из системы. При отсутствии библиотек загрузчик покажет сообщение со списком недостающих компонентов.
 
 ```sh
-chmod +x VK-Fast-0.2.1-linux-x86_64.AppImage
-./VK-Fast-0.2.1-linux-x86_64.AppImage
+chmod +x VK-Fast-0.3.0-linux-x86_64.AppImage
+./VK-Fast-0.3.0-linux-x86_64.AppImage
 ```
 
 Если FUSE недоступен, используйте `--appimage-extract-and-run` или tar.gz:
 
 ```sh
-tar -xzf VK-Fast-0.2.1-linux-x86_64.tar.gz
-./VK-Fast-0.2.1-linux-x86_64/vk-fast
+tar -xzf VK-Fast-0.3.0-linux-x86_64.tar.gz
+./VK-Fast-0.3.0-linux-x86_64/vk-fast
 ```
 
 Настройки и кэши находятся в обычных XDG-каталогах. Пакеты не содержат пользовательские данные. Звук декодируется внутри приложения.
