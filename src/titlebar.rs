@@ -137,6 +137,9 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
     .rect
 }
 
+const DOUBLE_PRESS_SECONDS: f64 = 0.45;
+const DOUBLE_PRESS_DISTANCE: f32 = 8.0;
+
 /// Register only a blank caption area, before placing interactive header
 /// widgets on it. Movement begins on the press frame, not a later drag frame.
 pub fn drag_region(ui: &egui::Ui, rect: Rect, id: Id) -> Response {
@@ -144,14 +147,31 @@ pub fn drag_region(ui: &egui::Ui, rect: Rect, id: Id) -> Response {
     if !ui.is_enabled() || ui.input(|input| input.viewport().fullscreen == Some(true)) {
         return response;
     }
-    if response.double_clicked_by(egui::PointerButton::Primary) {
-        let maximized = ui.input(|input| input.viewport().maximized == Some(true));
-        send_once(ui.ctx(), egui::ViewportCommand::Maximized(!maximized));
-    } else if response.is_pointer_button_down_on()
+    if response.is_pointer_button_down_on()
         && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
     {
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let maximized = ui.input(|input| input.viewport().maximized == Some(true));
+        // Count presses, not egui's clicks: the window drag that starts on a
+        // press can swallow releases, and egui then reads a quick double
+        // click as a triple one. Each double press is consumed, so a third
+        // press starts over instead of cancelling it.
+        let now = ui.input(|input| input.time);
+        let last_key = id.with("last-press");
+        let last: Option<(f64, egui::Pos2)> = ui.ctx().data(|data| data.get_temp(last_key));
+        let double = last.zip(pointer).is_some_and(|((at, from), point)| {
+            now - at <= DOUBLE_PRESS_SECONDS && from.distance(point) <= DOUBLE_PRESS_DISTANCE
+        });
+        if double {
+            ui.ctx()
+                .data_mut(|data| data.remove::<(f64, egui::Pos2)>(last_key));
+            send_once(ui.ctx(), egui::ViewportCommand::Maximized(!maximized));
+            return response;
+        }
+        if let Some(point) = pointer {
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(last_key, (now, point)));
+        }
         if maximized
             || pointer
                 .is_none_or(|point| resize_direction(ui.ctx().viewport_rect(), point).is_none())
@@ -319,9 +339,38 @@ mod tests {
         let press = frame(&ctx, 2, pointer(point, true), false, false, render);
         assert_eq!(commands(&press), [egui::ViewportCommand::StartDrag]);
         frame(&ctx, 3, pointer(point, false), false, false, render);
-        frame(&ctx, 4, pointer(point, true), false, false, render);
+        // The second press toggles at once, without another drag.
+        let second = frame(&ctx, 4, pointer(point, true), false, false, render);
+        assert_eq!(commands(&second), [egui::ViewportCommand::Maximized(true)]);
         let release = frame(&ctx, 5, pointer(point, false), false, false, render);
-        assert_eq!(commands(&release), [egui::ViewportCommand::Maximized(true)]);
+        assert!(commands(&release).is_empty());
+        // A quick third press starts over instead of undoing the toggle.
+        let third = frame(&ctx, 6, pointer(point, true), true, false, render);
+        assert_eq!(commands(&third), [egui::ViewportCommand::StartDrag]);
+        frame(&ctx, 7, pointer(point, false), true, false, render);
+    }
+
+    #[test]
+    fn caption_double_press_toggles_even_when_the_drag_swallowed_a_release() {
+        let ctx = Context::default();
+        let render = |ui: &mut egui::Ui| {
+            drag_region(
+                ui,
+                Rect::from_min_size(egui::pos2(20.0, 10.0), egui::vec2(300.0, 38.0)),
+                Id::new("test-caption"),
+            );
+        };
+        frame(&ctx, 1, Vec::new(), false, false, render);
+        let point = egui::pos2(100.0, 20.0);
+        let press = frame(&ctx, 2, pointer(point, true), false, false, render);
+        assert_eq!(commands(&press), [egui::ViewportCommand::StartDrag]);
+        // The native move loop kept the release; the next event is a press.
+        let second = frame(&ctx, 3, pointer(point, true), false, false, render);
+        assert_eq!(commands(&second), [egui::ViewportCommand::Maximized(true)]);
+        // Presses farther apart in time are two separate drags.
+        frame(&ctx, 4, pointer(point, false), true, false, render);
+        let late = frame(&ctx, 12, pointer(point, true), true, false, render);
+        assert_eq!(commands(&late), [egui::ViewportCommand::StartDrag]);
     }
 
     #[test]

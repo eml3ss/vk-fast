@@ -1040,7 +1040,19 @@ impl WebAudioClient {
             .map_err(|_| WebAudioError::Unverified)?
             .generation;
         let total = match count() {
-            Ok(0) if !page.items.is_empty() => None,
+            // A saved track is always the account's own copy. VK's music
+            // page can list recently played tracks for an empty library; when
+            // the API confirms zero and none of the rows is the account's own,
+            // those rows are not the library.
+            Ok(0) if page.items.iter().all(|track| track.owner_id != owner_id) => {
+                if !page.items.is_empty() {
+                    crate::diagnostics::event("library", "foreign_rows_dropped empty_by_count");
+                }
+                page.items.clear();
+                page.exhausted = Some(true);
+                Some(0)
+            }
+            Ok(0) => None,
             Ok(total) => Some(total),
             Err(
                 error @ (WebAudioError::WrongAccount
@@ -7661,6 +7673,32 @@ mod library_count_tests {
             .unwrap();
         let (empty, confirmed) = client.enrich_library_total(42, 0, empty, || Ok(0)).unwrap();
         assert_eq!(empty.count, Some(0));
+        assert_eq!(confirmed, Some(0));
+    }
+
+    #[test]
+    fn recently_played_rows_of_an_empty_library_are_not_shown_as_saved_tracks() {
+        let client = client();
+        let list = json!([
+            [7, -100, "", "Played", "Artist", 180],
+            [8, 55, "", "Also played", "Artist", 120]
+        ]);
+        let mut parsed = Some(
+            parse_page(
+                &json!({"payload":[0,["",{"sectionId":"library","next_from":"more",
+                "playlist":{"totalCount":2,"list":list}}]]})
+                .to_string(),
+            )
+            .unwrap(),
+        );
+        let page = client
+            .catalog_batch(42, 0, 100, 1, |_| Ok(parsed.take().unwrap()))
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        let (page, confirmed) = client.enrich_library_total(42, 0, page, || Ok(0)).unwrap();
+        assert!(page.items.is_empty());
+        assert_eq!(page.count, Some(0));
+        assert_eq!(page.exhausted, Some(true));
         assert_eq!(confirmed, Some(0));
     }
 

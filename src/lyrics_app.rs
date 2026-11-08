@@ -230,7 +230,7 @@ impl MusicApp {
             .right_side_panel(ui)
             .show_collapsible(ui, &mut open, |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
-                action = self.lyrics_contents(ui, false);
+                action = self.lyrics_contents(ui, false, true);
             });
         if let Some(shown) = shown {
             self.remember_panel_width(
@@ -313,7 +313,7 @@ impl MusicApp {
                             .max_rect(bottom),
                         |ui| {
                             ui.set_clip_rect(clip.intersect(bottom));
-                            self.lyrics_contents(ui, false)
+                            self.lyrics_contents(ui, false, false)
                         },
                     )
                     .inner;
@@ -337,6 +337,7 @@ impl MusicApp {
         &mut self,
         ui: &mut egui::Ui,
         fullscreen: bool,
+        show_track: bool,
     ) -> Option<lyrics_ui::Action> {
         let snapshot = self.playback_snapshot();
         let retry_allowed = self
@@ -357,12 +358,13 @@ impl MusicApp {
                 playing: matches!(snapshot.state, PlaybackState::Playing),
                 fullscreen,
                 retry_allowed,
+                show_track,
             },
         )
     }
 
     pub(super) fn lyrics_fullscreen(&mut self, ui: &mut egui::Ui) {
-        if let Some(action) = self.lyrics_contents(ui, true) {
+        if let Some(action) = self.lyrics_contents(ui, true, true) {
             self.handle_lyrics_action(ui.ctx(), action);
         }
     }
@@ -479,6 +481,25 @@ impl MusicApp {
         if source != status.source {
             self.lyrics.status = Some(Status { source, ..status });
             self.configure_lyrics(&ctx, ConfigAction::Source(source));
+        }
+        if let Some(other) = source.other() {
+            let mut fallback_other = status.fallback_to_other;
+            let label = match other {
+                Source::Musixmatch => t(
+                    "Искать в Musixmatch, если текст недоступен",
+                    "Fallback to Musixmatch",
+                ),
+                _ => t("Искать в VK, если текст недоступен", "Fallback to VK"),
+            };
+            if ui
+                .add_enabled(
+                    !self.lyrics.settings_busy && self.lyrics.status.is_some(),
+                    egui::Checkbox::new(&mut fallback_other, label),
+                )
+                .changed()
+            {
+                self.configure_lyrics(&ctx, ConfigAction::FallbackOther(fallback_other));
+            }
         }
         let mut fallback = status.fallback_to_genius;
         if ui

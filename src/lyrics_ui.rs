@@ -33,6 +33,9 @@ pub struct View<'a> {
     pub playing: bool,
     pub fullscreen: bool,
     pub retry_allowed: bool,
+    /// The cover, title and artists above the lines. Hidden under the
+    /// queue, which already shows the playing track.
+    pub show_track: bool,
 }
 struct Row {
     galley: Arc<egui::Galley>,
@@ -239,7 +242,7 @@ pub fn show(
             }
         }
         content.min.x = artwork.right() + gap;
-    } else if let Some(track) = view.track {
+    } else if let Some(track) = view.track.filter(|_| view.show_track) {
         let metadata = Rect::from_min_size(content.min, egui::vec2(content.width(), 52.0));
         let cover = Rect::from_min_size(metadata.min, egui::vec2(40.0, 40.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(cover), |ui| {
@@ -729,6 +732,7 @@ mod tests {
                                 playing: false,
                                 fullscreen,
                                 retry_allowed: true,
+                                show_track: true,
                             },
                         );
                     },

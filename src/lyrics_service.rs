@@ -18,6 +18,8 @@ pub enum ConfigAction {
     Mode(Mode),
     Source(Source),
     Fallback(bool),
+    /// Fall back between VK and Musixmatch.
+    FallbackOther(bool),
     ApiKey(Zeroizing<String>),
     Generate,
 }
@@ -169,6 +171,7 @@ impl Service {
                             (Ok(provider), Ok(config)) => {
                                 let result = resolve_sources(
                                     config.source,
+                                    config.fallback_to_other,
                                     config.fallback_to_genius,
                                     &stop,
                                     |source| {
@@ -287,29 +290,33 @@ impl Service {
     }
 }
 
+/// The chosen source, then the other synced one (VK or Musixmatch), then
+/// Genius, each only when enabled. The chosen source's error is reported.
 fn resolve_sources(
     source: Source,
-    fallback: bool,
+    other: bool,
+    genius: bool,
     canceled: &impl Fn() -> bool,
     mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
 ) -> Result<Arc<Lyrics>, Error> {
-    if canceled() {
-        return Err(Error::Canceled);
-    }
-    match fetch(source) {
-        Err(Error::Canceled) => Err(Error::Canceled),
-        Err(error) if fallback && source != Source::Genius => {
-            if canceled() {
-                return Err(Error::Canceled);
-            }
-            match fetch(Source::Genius) {
-                Ok(lyrics) => Ok(lyrics),
-                Err(Error::Canceled) => Err(Error::Canceled),
-                Err(_) => Err(error),
-            }
+    let fallbacks = [
+        source.other().filter(|_| other),
+        (genius && source != Source::Genius).then_some(Source::Genius),
+    ];
+    let mut first = None;
+    for source in std::iter::once(source).chain(fallbacks.into_iter().flatten()) {
+        if canceled() {
+            return Err(Error::Canceled);
         }
-        result => result,
+        match fetch(source) {
+            Err(Error::Canceled) => return Err(Error::Canceled),
+            Err(error) => {
+                first.get_or_insert(error);
+            }
+            result => return result,
+        }
     }
+    Err(first.unwrap_or(Error::NotFound))
 }
 
 fn fetch_source(
@@ -445,6 +452,12 @@ fn configure(
             store::save(&candidate)?;
             *config = candidate;
         }
+        ConfigAction::FallbackOther(enabled) => {
+            let mut candidate = config.clone();
+            candidate.fallback_to_other = enabled;
+            store::save(&candidate)?;
+            *config = candidate;
+        }
         ConfigAction::Mode(mode) => {
             let mut candidate = config.clone();
             candidate.mode = mode;
@@ -479,7 +492,7 @@ mod tests {
     #[test]
     fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
         let mut calls = Vec::new();
-        let result = resolve_sources(Source::Vk, true, &|| false, |source| {
+        let result = resolve_sources(Source::Vk, false, true, &|| false, |source| {
             calls.push(source);
             match source {
                 Source::Vk => Err(Error::NotFound),
@@ -496,7 +509,7 @@ mod tests {
         ] {
             calls.clear();
             assert_eq!(
-                resolve_sources(source, fallback, &|| false, |source| {
+                resolve_sources(source, false, fallback, &|| false, |source| {
                     calls.push(source);
                     Err(error)
                 })
@@ -506,12 +519,45 @@ mod tests {
             assert_eq!(calls, expected);
         }
         assert_eq!(
-            resolve_sources(Source::Vk, true, &|| true, |_| panic!(
+            resolve_sources(Source::Vk, true, true, &|| true, |_| panic!(
                 "canceled work must not fetch"
             ))
             .unwrap_err(),
             Error::Canceled
         );
+    }
+
+    #[test]
+    fn vk_and_musixmatch_fall_back_to_each_other_before_genius() {
+        for (source, other) in [
+            (Source::Vk, Source::Musixmatch),
+            (Source::Musixmatch, Source::Vk),
+        ] {
+            let mut calls = Vec::new();
+            let found = resolve_sources(source, true, true, &|| false, |source| {
+                calls.push(source);
+                if source == other {
+                    Ok(Arc::new(super::super::test_data(2, true)))
+                } else {
+                    Err(Error::NotFound)
+                }
+            })
+            .unwrap();
+            assert!(found.synced);
+            assert_eq!(calls, [source, other]);
+            calls.clear();
+            let error = resolve_sources(source, true, true, &|| false, |source| {
+                calls.push(source);
+                Err(if source == other {
+                    Error::Network
+                } else {
+                    Error::NotFound
+                })
+            })
+            .unwrap_err();
+            assert_eq!(error, Error::NotFound);
+            assert_eq!(calls, [source, other, Source::Genius]);
+        }
     }
 
     #[test]

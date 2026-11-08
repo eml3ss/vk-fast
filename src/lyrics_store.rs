@@ -26,6 +26,15 @@ pub enum Source {
     Genius,
 }
 impl Source {
+    /// The other synced source a lookup can fall back to.
+    pub fn other(self) -> Option<Self> {
+        match self {
+            Self::Vk => Some(Self::Musixmatch),
+            Self::Musixmatch => Some(Self::Vk),
+            Self::Genius => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Musixmatch => "Musixmatch",
@@ -43,6 +52,9 @@ pub(super) struct Config {
     /// On for a new install; an explicit choice in Settings is kept.
     #[serde(default = "genius_fallback_default")]
     pub fallback_to_genius: bool,
+    /// VK falls back to Musixmatch and Musixmatch to VK. On by default.
+    #[serde(default = "genius_fallback_default")]
+    pub fallback_to_other: bool,
     #[serde(default)]
     pub genius_retry_after: u64,
     #[serde(default)]
@@ -75,6 +87,7 @@ impl Default for Config {
         Self {
             source: Source::default(),
             fallback_to_genius: genius_fallback_default(),
+            fallback_to_other: genius_fallback_default(),
             genius_retry_after: 0,
             vk_retry_after: 0,
             mode: Mode::default(),
@@ -101,6 +114,7 @@ impl Drop for Config {
 pub struct Status {
     pub source: Source,
     pub fallback_to_genius: bool,
+    pub fallback_to_other: bool,
     pub mode: Mode,
     pub key_ready: bool,
     pub token_ready: bool,
@@ -113,21 +127,33 @@ impl Config {
         Status {
             source: self.source,
             fallback_to_genius: self.fallback_to_genius,
+            fallback_to_other: self.fallback_to_other,
             mode: self.mode,
             key_ready: !self.api_key.is_empty(),
             token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
-            request_retry_after: if self.fallback_to_genius && self.source != Source::Genius {
-                self.source_retry_after().min(self.genius_retry_after)
-            } else {
-                self.source_retry_after()
+            request_retry_after: {
+                let mut retry = self.source_retry_after();
+                if self.fallback_to_other
+                    && let Some(other) = self.source.other()
+                {
+                    retry = retry.min(self.retry_after(other));
+                }
+                if self.fallback_to_genius && self.source != Source::Genius {
+                    retry = retry.min(self.genius_retry_after);
+                }
+                retry
             },
         }
     }
 
     pub fn source_retry_after(&self) -> u64 {
-        match self.source {
+        self.retry_after(self.source)
+    }
+
+    fn retry_after(&self, source: Source) -> u64 {
+        match source {
             Source::Vk => self.vk_retry_after,
             Source::Genius => self.genius_retry_after,
             Source::Musixmatch => match self.mode {
