@@ -117,8 +117,8 @@ impl WebAudioError {
                 "The VK website rejected the music request. Check that music is available in your normal browser.",
             ),
             Self::Format => language.text(
-                "Формат музыкальной страницы VK не распознан. Возможно, сайт изменился.",
-                "The VK music page format was not recognized. The website may have changed.",
+                "VK прислал неожиданный ответ. Повторите попытку.",
+                "VK sent an unexpected response. Try again.",
             ),
             Self::TooLarge => language.text("Ответ сайта VK слишком большой.", "The VK website response is too large."),
             Self::Pagination => language.text(
@@ -389,6 +389,8 @@ pub struct WebAudioClient {
     state: Arc<Mutex<State>>,
     page_gate: Arc<Mutex<()>>,
     mix_gate: Arc<Mutex<()>>,
+    /// Parallel requests refresh an expired music key once, not each.
+    key_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -648,6 +650,7 @@ impl WebAudioClient {
             state: Arc::new(Mutex::new(State::default())),
             page_gate: Arc::new(Mutex::new(())),
             mix_gate: Arc::new(Mutex::new(())),
+            key_gate: Arc::new(Mutex::new(())),
         })
     }
 
@@ -1686,58 +1689,54 @@ impl WebAudioClient {
         query: &str,
         offset: usize,
         canceled: &AtomicBool,
-        mut request: impl FnMut(
-            u64,
-            &'static str,
-            Vec<(&'static str, String)>,
-        ) -> Result<Value, WebAudioError>,
+        request: impl Fn(u64, &'static str, Vec<(&'static str, String)>) -> Result<Value, WebAudioError>
+        + Sync,
     ) -> Result<SearchResults, WebAudioError> {
         let generation = self.home_owner(owner, canceled)?;
         let query = search_query(query)?;
         if offset >= MAX_QUEUED_TRACKS {
             return Err(WebAudioError::TooLarge);
         }
-        let response = request(
-            generation,
-            "audio.search",
-            vec![
-                ("q", query.into()),
-                ("count", "100".into()),
-                ("offset", offset.to_string()),
-            ],
-        )?;
-        let (mut page, streams) = parse_search_tracks(&response, offset)?;
-        if offset == 0 {
-            let artists = request(
+        let section = |method: &'static str, count: &str, offset: usize| {
+            request(
                 generation,
-                "audio.searchArtists",
+                method,
                 vec![
                     ("q", query.into()),
-                    ("count", "12".into()),
-                    ("offset", "0".into()),
+                    ("count", count.into()),
+                    ("offset", offset.to_string()),
                 ],
-            )?;
-            (page.artists, page.artist_images) = parse_search_artists(&artists)?;
-            let albums = request(
-                generation,
-                "audio.searchAlbums",
-                vec![
-                    ("q", query.into()),
-                    ("count", "12".into()),
-                    ("offset", "0".into()),
-                ],
-            )?;
-            page.albums = parse_search_albums(&albums)?;
-            let playlists = request(
-                generation,
-                "audio.searchPlaylists",
-                vec![
-                    ("q", query.into()),
-                    ("count", "20".into()),
-                    ("offset", "0".into()),
-                ],
-            )?;
-            page.playlists = parse_search_playlists(&playlists)?;
+            )
+        };
+        if offset > 0 {
+            let (page, streams) =
+                parse_search_tracks(&section("audio.search", "100", offset)?, offset)?;
+            self.commit_home_streams(owner, generation, streams, canceled)?;
+            return Ok(page);
+        }
+        // Like VK's own search page, the sections load at the same time
+        // instead of one after another.
+        let (tracks, artists, albums, playlists) = thread::scope(|scope| {
+            let artists = scope.spawn(|| section("audio.searchArtists", "12", 0));
+            let albums = scope.spawn(|| section("audio.searchAlbums", "12", 0));
+            let playlists = scope.spawn(|| section("audio.searchPlaylists", "20", 0));
+            let tracks = section("audio.search", "100", 0);
+            let join = |handle: thread::ScopedJoinHandle<'_, Result<Value, WebAudioError>>| {
+                handle.join().unwrap_or(Err(WebAudioError::Network))
+            };
+            (tracks, join(artists), join(albums), join(playlists))
+        });
+        let (mut page, streams) = parse_search_tracks(&tracks?, 0)?;
+        // Artists, albums and playlists only add to the found tracks: one of
+        // them failing or carrying an unexpected row must not hide the rest.
+        if let Some(artists) = search_section(artists, parse_search_artists)? {
+            (page.artists, page.artist_images) = artists;
+        }
+        if let Some(albums) = search_section(albums, parse_search_albums)? {
+            page.albums = albums;
+        }
+        if let Some(playlists) = search_section(playlists, parse_search_playlists)? {
+            page.playlists = playlists;
         }
         self.commit_home_streams(owner, generation, streams, canceled)?;
         Ok(page)
@@ -2589,18 +2588,29 @@ impl WebAudioClient {
         let mut retried = false;
         loop {
             self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
-            let cached = self
-                .state
-                .lock()
-                .map_err(|_| WebAudioError::Unverified)?
-                .mix
-                .as_ref()
-                .filter(|session| session.expires > now() + 60)
-                .cloned();
-            let session = match cached {
+            let cached = || {
+                self.state
+                    .lock()
+                    .map_err(|_| WebAudioError::Unverified)
+                    .map(|state| {
+                        state
+                            .mix
+                            .as_ref()
+                            .filter(|session| session.expires > now() + 60)
+                            .cloned()
+                    })
+            };
+            let session = match cached()? {
                 Some(session) => session,
                 None => {
-                    let session = fetch()?;
+                    let _key = self
+                        .key_gate
+                        .lock()
+                        .map_err(|_| WebAudioError::Unverified)?;
+                    let session = match cached()? {
+                        Some(session) => session,
+                        None => fetch()?,
+                    };
                     let mut state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
                     if canceled.load(Ordering::Acquire) {
                         return Err(WebAudioError::Canceled);
@@ -3158,9 +3168,19 @@ fn parse_search_tracks(value: &Value, offset: usize) -> Result<ParsedSearch, Web
     if rows.len() > 100 {
         return Err(WebAudioError::TooLarge);
     }
-    let (mut tracks, streams) = home_tracks(rows)?;
-    for track in &mut tracks {
+    // A single row VK formats differently is skipped, not the whole search.
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    let mut streams = HashMap::new();
+    for raw in rows {
+        let Ok(mut track) = parse_track(raw) else {
+            continue;
+        };
+        streams.insert(track.key(), stream_info(raw, track.key()));
         track.url = None;
+        if seen.insert(track.key()) {
+            tracks.push(track);
+        }
     }
     let next_offset = offset
         .checked_add(rows.len())
@@ -3226,11 +3246,49 @@ fn parse_search_albums(value: &Value) -> Result<Vec<AlbumRef>, WebAudioError> {
 fn parse_search_playlists(value: &Value) -> Result<Vec<UserPlaylist>, WebAudioError> {
     // The native search returns the same playlist metadata as getPlaylists,
     // including the original owner/id and temporary access key for opening it.
-    Ok(parse_user_playlists(value)?
-        .items
-        .into_iter()
-        .take(20)
-        .collect())
+    // Unlike the library, a found playlist VK describes oddly is just skipped.
+    let rows = value["items"].as_array().ok_or(WebAudioError::Format)?;
+    if rows.len() > 100 {
+        return Err(WebAudioError::TooLarge);
+    }
+    let mut single = value.clone();
+    let mut seen = HashSet::new();
+    let mut playlists = Vec::new();
+    for row in rows {
+        single["items"] = Value::Array(vec![row.clone()]);
+        let Ok(page) = parse_user_playlists(&single) else {
+            continue;
+        };
+        for playlist in page.items {
+            if playlists.len() < 20 && seen.insert((playlist.album.owner_id, playlist.album.id)) {
+                playlists.push(playlist);
+            }
+        }
+    }
+    Ok(playlists)
+}
+
+/// An optional search section: account and cancellation errors still stop
+/// the search, anything else leaves only that section empty.
+fn search_section<T>(
+    result: Result<Value, WebAudioError>,
+    parse: impl FnOnce(&Value) -> Result<T, WebAudioError>,
+) -> Result<Option<T>, WebAudioError> {
+    match result.and_then(|value| parse(&value)) {
+        Ok(section) => Ok(Some(section)),
+        Err(
+            error @ (WebAudioError::Canceled
+            | WebAudioError::NoSession
+            | WebAudioError::Expired
+            | WebAudioError::TokenExpired
+            | WebAudioError::WrongAccount
+            | WebAudioError::Unverified),
+        ) => Err(error),
+        Err(_) => {
+            crate::diagnostics::event("search", "optional_section_skipped");
+            Ok(None)
+        }
+    }
 }
 
 fn detail_method_is_readonly(method: &str) -> bool {
@@ -9673,24 +9731,29 @@ mod search_tests {
     }
 
     #[test]
-    fn search_playlist_empty_results_are_valid_but_malformed_or_oversized_lists_fail() {
+    fn search_playlist_empty_results_and_invalid_rows_are_skipped_but_malformed_or_oversized_lists_fail()
+     {
         assert!(
             parse_search_playlists(&json!({"count":0,"items":[]}))
                 .unwrap()
                 .is_empty()
         );
-        for value in [
-            json!({}),
-            json!({"items":{}}),
-            json!({"count":"bad","items":[]}),
-            json!({"items":[{"owner_id":0,"id":7,"title":"Invalid"}]}),
-            json!({"items":[{"owner_id":-42,"id":0,"title":"Invalid"}]}),
-            json!({"items":[{"owner_id":-42,"id":7,"title":""}]}),
-        ] {
+        for value in [json!({}), json!({"items":{}})] {
             assert!(matches!(
                 parse_search_playlists(&value),
                 Err(WebAudioError::Format)
             ));
+        }
+        for row in [
+            json!({"owner_id":0,"id":7,"title":"Invalid"}),
+            json!({"owner_id":-42,"id":0,"title":"Invalid"}),
+            json!({"owner_id":-42,"id":7,"title":""}),
+        ] {
+            assert!(
+                parse_search_playlists(&json!({"items":[row]}))
+                    .unwrap()
+                    .is_empty()
+            );
         }
         assert!(matches!(
             parse_search_playlists(
@@ -9725,9 +9788,9 @@ mod search_tests {
             ..Default::default()
         });
         let canceled = AtomicBool::new(false);
-        let mut calls = Vec::new();
+        let calls = Mutex::new(Vec::new());
         let first=client.search_request(42,"  query  ",0,&canceled,|_,method,params|{
-            calls.push(method);
+            calls.lock().unwrap().push(method);
             assert!(params.contains(&("q","query".into())));
             assert!(params.contains(&("offset","0".into())));
             match method {
@@ -9740,12 +9803,14 @@ mod search_tests {
                 _=>panic!("Unexpected search method"),
             }
         }).unwrap();
+        let mut calls = calls.into_inner().unwrap();
+        calls.sort_unstable();
         assert_eq!(
             calls,
             [
                 "audio.search",
-                "audio.searchArtists",
                 "audio.searchAlbums",
+                "audio.searchArtists",
                 "audio.searchPlaylists"
             ]
         );
@@ -9757,16 +9822,16 @@ mod search_tests {
             ),
             (-77, 9)
         );
-        let mut next_calls = 0;
+        let next_calls = std::sync::atomic::AtomicUsize::new(0);
         let next = client
             .search_request(42, "query", 100, &canceled, |_, method, params| {
-                next_calls += 1;
+                next_calls.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(method, "audio.search");
                 assert!(params.contains(&("offset", "100".into())));
                 Ok(json!({"count":101,"items":[track(2)]}))
             })
             .unwrap();
-        assert_eq!(next_calls, 1);
+        assert_eq!(next_calls.into_inner(), 1);
         assert!(next.playlists.is_empty());
         let state = client.state.lock().unwrap();
         assert_eq!(state.cursor.as_ref().unwrap().offset, 17);
@@ -9778,7 +9843,7 @@ mod search_tests {
     }
 
     #[test]
-    fn failed_or_stale_playlist_search_cannot_commit_the_partial_track_response() {
+    fn stale_search_cannot_commit_tracks_but_a_failed_extra_section_keeps_them() {
         let client = WebAudioClient::new(vec![SessionCookie {
             domain: "vk.ru".into(),
             path: "/".into(),
@@ -9790,26 +9855,42 @@ mod search_tests {
         .unwrap();
         client.accept_profile(42).unwrap();
         let canceled = AtomicBool::new(false);
-        for stale in [false, true] {
-            let result =
-                client.search_request(42, "query", 0, &canceled, |_, method, _| match method {
-                    "audio.search" => Ok(json!({"count":1,"items":[track(1)]})),
-                    "audio.searchPlaylists" => {
-                        if stale {
-                            client.state.lock().unwrap().generation += 1;
-                            Ok(json!({"items":[]}))
-                        } else {
-                            Err(WebAudioError::Network)
-                        }
-                    }
-                    _ => Ok(json!({"items":[]})),
-                });
-            assert!(matches!(
-                result,
-                Err(WebAudioError::Network | WebAudioError::Unverified)
-            ));
-            assert!(client.state.lock().unwrap().streams.is_empty());
-        }
+        let stale = client.search_request(42, "query", 0, &canceled, |_, method, _| match method {
+            "audio.search" => Ok(json!({"count":1,"items":[track(1)]})),
+            "audio.searchPlaylists" => {
+                client.state.lock().unwrap().generation += 1;
+                Ok(json!({"items":[]}))
+            }
+            _ => Ok(json!({"items":[]})),
+        });
+        assert!(matches!(stale, Err(WebAudioError::Unverified)));
+        assert!(client.state.lock().unwrap().streams.is_empty());
+
+        client.accept_profile(42).unwrap();
+        let found = client
+            .search_request(42, "query", 0, &canceled, |_, method, _| match method {
+                // One malformed track and one odd playlist are skipped.
+                "audio.search" => Ok(json!({"count":2,"items":[track(1), {"id":"bad"}]})),
+                "audio.searchArtists" => Err(WebAudioError::Timeout),
+                "audio.searchAlbums" => Ok(json!({"unexpected":true})),
+                _ => Ok(json!({"items":[
+                    {"owner_id":-77,"id":9,"title":""},
+                    {"owner_id":-77,"id":10,"title":"Kept playlist"}
+                ]})),
+            })
+            .unwrap();
+        assert_eq!(found.tracks.len(), 1);
+        assert_eq!(found.next_offset, 2);
+        assert!(found.artists.is_empty() && found.albums.is_empty());
+        assert_eq!(found.playlists.len(), 1);
+        assert_eq!(found.playlists[0].album.id, 10);
+
+        let expired =
+            client.search_request(42, "query", 0, &canceled, |_, method, _| match method {
+                "audio.searchAlbums" => Err(WebAudioError::TokenExpired),
+                _ => Ok(json!({"items":[]})),
+            });
+        assert!(matches!(expired, Err(WebAudioError::TokenExpired)));
     }
 
     #[test]
