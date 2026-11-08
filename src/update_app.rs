@@ -443,13 +443,20 @@ impl State {
                 ui.horizontal(|ui| {
                     ui.heading(language.text("Обновление VK Fast", "VK Fast update"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(
-                            ui,
-                            Icon::Close,
-                            language.text("Закрыть", "Close"),
-                            !matches!(self.phase, Phase::Starting | Phase::Installing),
-                        )
-                        .clicked()
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::hover());
+                        let closable = !matches!(self.phase, Phase::Starting | Phase::Installing);
+                        if ui
+                            .add_enabled_ui(closable, |ui| {
+                                icons::panel_button(
+                                    ui,
+                                    rect,
+                                    Icon::Close,
+                                    language.text("Закрыть", "Close"),
+                                )
+                            })
+                            .inner
+                            .clicked()
                         {
                             self.open = false;
                         }
