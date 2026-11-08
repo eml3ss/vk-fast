@@ -44,6 +44,8 @@ struct Row {
     gap: bool,
 }
 pub struct State {
+    scroll_epoch: u64,
+    scroll_ids: [Option<egui::Id>; 2],
     stamp: Option<(usize, u32, u32)>,
     rows: Vec<Row>,
     height: f32,
@@ -55,6 +57,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            scroll_epoch: 0,
+            scroll_ids: [None; 2],
             stamp: None,
             rows: Vec::new(),
             height: 0.0,
@@ -67,7 +71,11 @@ impl Default for State {
 }
 impl State {
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            scroll_epoch: self.scroll_epoch.wrapping_add(1),
+            scroll_ids: self.scroll_ids,
+            ..Self::default()
+        };
     }
 }
 
@@ -495,10 +503,12 @@ fn lines(
     let should_follow = state.follow && active != state.last_active;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(rect));
-        theme::scroll_viewport(
+        // A fresh identity also discards the previous track's animated target
+        // and kinetic scrolling, which setting only the offset would retain.
+        let shown = theme::scroll_viewport(
             ui,
             egui::ScrollArea::vertical()
-                .id_salt(("lyric-lines", fullscreen))
+                .id_salt(("lyric-lines", fullscreen, state.scroll_epoch))
                 .auto_shrink([false, false]),
             |ui, viewport| {
                 let width = ui.available_width().max(1.0);
@@ -607,6 +617,12 @@ fn lines(
                 }
             },
         );
+        if let Some(previous) = state.scroll_ids[usize::from(fullscreen)].replace(shown.id)
+            && previous != shown.id
+        {
+            ui.ctx()
+                .data_mut(|data| data.remove::<egui::scroll_area::State>(previous));
+        }
     });
     action
 }
@@ -669,6 +685,65 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    #[test]
+    fn reset_clears_previous_timed_scroll_before_showing_plain_lyrics() {
+        for fullscreen in [false, true] {
+            let ctx = egui::Context::default();
+            let mut state = State::default();
+            let synced = crate::lyrics::test_data(40, true);
+            let plain = crate::lyrics::test_data(40, false);
+            let frame = |state: &mut State, data: &Lyrics, position: f64, time: f64| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(300.0, 260.0),
+                        )),
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        lines(
+                            ui,
+                            state,
+                            ui.available_rect_before_wrap(),
+                            data,
+                            position,
+                            18.0,
+                            fullscreen,
+                            false,
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+            };
+            for tick in 0..12 {
+                frame(&mut state, &synced, 150.0, f64::from(tick) * 0.1);
+            }
+            let previous = state.scroll_ids[usize::from(fullscreen)].unwrap();
+            assert!(
+                egui::scroll_area::State::load(&ctx, previous)
+                    .unwrap()
+                    .offset
+                    .y
+                    > 200.0
+            );
+
+            state.reset();
+            frame(&mut state, &plain, 0.0, 2.0);
+            let current = state.scroll_ids[usize::from(fullscreen)].unwrap();
+            assert_ne!(current, previous);
+            assert_eq!(
+                egui::scroll_area::State::load(&ctx, current)
+                    .unwrap()
+                    .offset
+                    .y,
+                0.0
+            );
+            assert!(egui::scroll_area::State::load(&ctx, previous).is_none());
+        }
     }
 
     #[test]
