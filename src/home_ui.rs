@@ -224,13 +224,13 @@ fn catalog_sections(
     for (key, icon, title, tiles) in [
         (
             "home-genres",
-            Icon::Album,
+            Icon::Genres,
             language.text("Жанры", "Genres"),
             &view.catalog.genres,
         ),
         (
             "home-moods",
-            Icon::Heart,
+            Icon::Mood,
             language.text("Настроения и занятия", "Moods and activities"),
             &view.catalog.moods,
         ),
@@ -265,7 +265,7 @@ fn catalog_sections(
         ui.add_space(SECTION_GAP);
         section_heading(
             ui,
-            Icon::Account,
+            Icon::Friends,
             language.text("Слушайте друг друга", "Listen with friends"),
             None,
             true,

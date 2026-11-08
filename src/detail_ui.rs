@@ -476,6 +476,8 @@ pub struct ReleasesView<'a> {
     pub discography: &'a [Release],
     pub incomplete: bool,
     pub loading: bool,
+    /// The full discography is still loading behind the latest releases.
+    pub pending: bool,
     pub playback: Playback,
     pub related: &'a [crate::web_audio::RelatedArtist],
 }
@@ -510,6 +512,10 @@ pub fn artist_releases(
             ReleaseTab::Singles,
             view.language.text("Синглы и EP", "Singles & EPs"),
         );
+        if view.pending {
+            ui.add_space(4.0);
+            ui.spinner();
+        }
     });
     ui.ctx().data_mut(|data| data.insert_temp(id, tab));
     ui.add_space(10.0);
@@ -585,6 +591,9 @@ pub fn artist_releases(
         if expand_button(ui, view.language, expanded) {
             ui.ctx()
                 .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+            // Re-lay out this frame: the page height changes at once, and the
+            // half-drawn frame (old grid, new scroll range) would flicker.
+            ui.ctx().request_discard("discography expanded or hidden");
         }
     }
     if let Some(intent) = related_artists(
@@ -608,7 +617,7 @@ const LINK_GAP: f32 = 8.0;
 
 /// "Show all" / "Hide" under a shortened grid: a compact link with equal
 /// space above and below. Returns true when clicked.
-fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> bool {
+pub fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> bool {
     ui.add_space(LINK_GAP);
     theme::inset_heading(ui, |ui| {
         let label = if expanded {
@@ -1946,6 +1955,7 @@ mod tests {
                                 discography: &discography,
                                 incomplete: false,
                                 loading: false,
+                                pending: false,
                                 playback: Playback::default(),
                                 related: &[],
                             },
@@ -2031,6 +2041,7 @@ mod tests {
                             discography: &discography,
                             incomplete: false,
                             loading: false,
+                            pending: false,
                             playback: Playback::default(),
                             related: &related,
                         },
@@ -2155,6 +2166,7 @@ mod tests {
                         discography: std::slice::from_ref(&single),
                         incomplete: false,
                         loading: false,
+                        pending: false,
                         playback: Playback::default(),
                         related: &related,
                     },

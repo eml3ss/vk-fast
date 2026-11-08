@@ -5497,14 +5497,18 @@ impl MusicApp {
         let page = self.page.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
-        let (sender, receiver) = mpsc::sync_channel(1);
+        // Two slots: an artist page arrives first without its full discography.
+        let (sender, receiver) = mpsc::sync_channel(2);
         let ctx = self.repaint_target.with_context(ctx);
         match thread::Builder::new()
             .name("vk-artist-album".into())
             .spawn(move || {
                 let result = match page {
                     MusicPage::Artist(artist) => client
-                        .artist_page(owner, &artist, &worker_cancel)
+                        .artist_page_progressive(owner, &artist, &worker_cancel, |first| {
+                            let _ = sender.try_send(Ok(DetailPage::Artist(first)));
+                            ctx.request_repaint();
+                        })
                         .map(DetailPage::Artist),
                     MusicPage::Album(album) => client
                         .album_page(owner, &album, &worker_cancel)
@@ -5547,23 +5551,32 @@ impl MusicApp {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
         };
-        let request = self.detail_request.take().expect("Active detail request");
-        if request.canceled.load(Ordering::Acquire)
+        // A partial artist page keeps the request open for its discography.
+        let partial = matches!(&result, Ok(DetailPage::Artist(page)) if page.releases_pending);
+        let (owner, key, canceled) = (
+            request.owner,
+            request.key.clone(),
+            request.canceled.load(Ordering::Acquire),
+        );
+        if !partial {
+            self.detail_request = None;
+        }
+        if canceled
             || self
                 .session
                 .as_ref()
-                .is_none_or(|session| session.profile.id != request.owner)
+                .is_none_or(|session| session.profile.id != owner)
         {
             return;
         }
-        if self.page.detail_key().as_deref() != Some(request.key.as_str()) {
+        if self.page.detail_key().as_deref() != Some(key.as_str()) {
             return;
         }
         match result {
             Ok(mut page) => {
                 if let DetailPage::Owner(batch) = &mut page {
                     if batch.offset > 0 {
-                        if let Some(cached) = self.details.get_mut(&request.key)
+                        if let Some(cached) = self.details.get_mut(&key)
                             && let DetailPage::Owner(cached) = Arc::make_mut(cached)
                         {
                             cached.append(batch.clone());
@@ -5572,7 +5585,7 @@ impl MusicApp {
                         return;
                     }
                     if batch.playlists_error.is_some()
-                        && let Some(cached) = self.details.get(&request.key)
+                        && let Some(cached) = self.details.get(&key)
                         && let DetailPage::Owner(cached) = cached.as_ref()
                     {
                         batch.playlists = cached.playlists.clone();
@@ -5582,7 +5595,7 @@ impl MusicApp {
                 }
                 if let DetailPage::Artist(fresh) = &mut page
                     && fresh.releases_error.is_some()
-                    && let Some(old) = self.details.get(&request.key)
+                    && let Some(old) = self.details.get(&key)
                     && let DetailPage::Artist(old) = old.as_ref()
                 {
                     let present: HashSet<_> = fresh
@@ -5599,7 +5612,7 @@ impl MusicApp {
                             .cloned(),
                     );
                 }
-                if self.details.len() >= 32 && !self.details.contains_key(&request.key) {
+                if self.details.len() >= 32 && !self.details.contains_key(&key) {
                     let retained: HashSet<_> = self
                         .back_history
                         .iter()
@@ -5616,7 +5629,7 @@ impl MusicApp {
                         self.details.remove(&key);
                     }
                 }
-                self.details.insert(request.key.clone(), Arc::new(page));
+                self.details.insert(key.clone(), Arc::new(page));
                 self.detail_error = None;
             }
             Err(error @ WebAudioError::WrongAccount) => {
@@ -5738,6 +5751,10 @@ impl MusicApp {
             .and_then(|key| self.details.get(&key))
             .cloned();
         let data = stored.as_deref();
+        // A partial artist page is shown; only its discography is loading.
+        let releases_pending =
+            matches!(data, Some(DetailPage::Artist(artist)) if artist.releases_pending);
+        let loading = loading && !releases_pending;
         let can_edit_playlist =
             matches!(&page, MusicPage::Playlist(reference) if self.can_edit_playlist(reference));
         let tracks = data.map_or(&[][..], DetailPage::tracks);
@@ -5939,21 +5956,15 @@ impl MusicApp {
                 if let Some(DetailPage::Album(release) | DetailPage::Playlist(release)) = data {
                     release_info::show(ui, language, tracks, &release.stats);
                 }
+                // The same blue "Show all" link as under the discography.
                 if artist.is_some()
                     && tracks.len() > 6
-                    && ui
-                        .add(
-                            egui::Button::new(if expanded {
-                                language.text("Свернуть", "Show less")
-                            } else {
-                                language.text("Показать все", "Show all")
-                            })
-                            .frame(false),
-                        )
-                        .clicked()
+                    && detail_ui::expand_button(ui, language, expanded)
                 {
                     ui.ctx()
                         .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+                    ui.ctx()
+                        .request_discard("popular tracks expanded or hidden");
                 }
                 if let Some(DetailPage::Artist(artist_page)) = data
                     && let Some(intent) = detail_ui::artist_releases(
@@ -5966,6 +5977,7 @@ impl MusicApp {
                             discography: &artist_page.discography,
                             incomplete: artist_page.releases_error.is_some(),
                             loading,
+                            pending: releases_pending,
                             playback: cover_playback,
                             related: &artist_page.related,
                         },
@@ -14027,6 +14039,7 @@ mod tests {
                 latest_releases: Vec::new(),
                 discography: Vec::new(),
                 releases_error: None,
+                releases_pending: false,
                 related: Vec::new(),
             })),
         );

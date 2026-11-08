@@ -555,6 +555,7 @@ mod tests {
             latest_releases: Vec::new(),
             discography: Vec::new(),
             releases_error: None,
+            releases_pending: false,
             related: Vec::new(),
         }
     }

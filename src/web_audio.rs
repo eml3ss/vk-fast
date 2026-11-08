@@ -187,6 +187,9 @@ pub struct ArtistPage {
     pub latest_releases: Vec<crate::artist_releases::Release>,
     pub discography: Vec<crate::artist_releases::Release>,
     pub releases_error: Option<WebAudioError>,
+    /// The banner, popular tracks and latest releases are shown while the
+    /// full discography is still loading.
+    pub releases_pending: bool,
     /// VK's "You may also like" artists, in VK's order.
     pub related: Vec<RelatedArtist>,
 }
@@ -2093,6 +2096,19 @@ impl WebAudioClient {
         reference: &ArtistRef,
         canceled: &AtomicBool,
     ) -> Result<ArtistPage, WebAudioError> {
+        self.artist_page_progressive(expected_owner, reference, canceled, |_| {})
+    }
+
+    /// Like `artist_page`, but hands over the first response (banner, popular
+    /// tracks, latest releases, related artists) before the discography's
+    /// continuation requests, so the page can appear immediately.
+    pub fn artist_page_progressive(
+        &self,
+        expected_owner: i64,
+        reference: &ArtistRef,
+        canceled: &AtomicBool,
+        first: impl FnOnce(ArtistPage),
+    ) -> Result<ArtistPage, WebAudioError> {
         let generation = self.home_owner(expected_owner, canceled)?;
         let reference = if reference.id.is_empty() {
             if reference.name.trim().is_empty() || reference.name.len() > 4096 {
@@ -2123,6 +2139,10 @@ impl WebAudioClient {
         )?;
         let (mut page, streams) = parse_artist_page(&value, &reference)?;
         self.commit_home_streams(expected_owner, generation, streams, canceled)?;
+        first(ArtistPage {
+            releases_pending: true,
+            ..page.clone()
+        });
         if let Err(error) =
             crate::artist_catalog::load(&mut page, &value, canceled, |method, params| {
                 self.detail_request(expected_owner, generation, method, params, canceled)
@@ -2405,7 +2425,24 @@ impl WebAudioClient {
                 }
             };
             self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
-            let result = request(&session);
+            let mut result = request(&session);
+            // VK allows only a few API calls per second; artist pages and Home
+            // can briefly exceed it. Read-only calls wait and try again.
+            let mut pause = Duration::from_millis(350);
+            while result == Err(WebAudioError::Temporary)
+                && detail_method_is_readonly(method)
+                && pause <= Duration::from_millis(1400)
+            {
+                let until = Instant::now() + pause;
+                while Instant::now() < until {
+                    if canceled.load(Ordering::Acquire) {
+                        return Err(WebAudioError::Canceled);
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                pause *= 2;
+                result = request(&session);
+            }
             self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
             if result == Err(WebAudioError::TokenExpired) {
                 self.forget_mix_session(owner, generation, &session);
@@ -3025,6 +3062,8 @@ fn detail_response(text: &str) -> Result<Value, WebAudioError> {
     if let Some(error) = value.get("error") {
         return Err(match error.get("error_code").and_then(number) {
             Some(5 | 27 | 28) => WebAudioError::TokenExpired,
+            // "Too many requests per second": a pause, not a refusal.
+            Some(6) => WebAudioError::Temporary,
             _ => WebAudioError::Rejected,
         });
     }
@@ -3260,6 +3299,7 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
             discography: latest_releases.clone(),
             latest_releases,
             releases_error: None,
+            releases_pending: false,
             related,
         },
         streams,
@@ -7687,6 +7727,49 @@ mod library_action_tests {
             state.mix.as_ref().unwrap().token.as_str(),
             "replacement-key"
         );
+    }
+
+    #[test]
+    fn too_many_requests_waits_and_retries_reads_but_never_writes() {
+        assert_eq!(
+            detail_response(r#"{"error":{"error_code":6}}"#),
+            Err(WebAudioError::Temporary)
+        );
+        let client = client();
+        let generation = client.state.lock().unwrap().generation;
+        let mut requested = 0;
+        let result = client.detail_request_with(
+            42,
+            generation,
+            "catalog.getAudioArtist",
+            &AtomicBool::new(false),
+            || panic!("the cached key stays valid"),
+            |_| {
+                requested += 1;
+                if requested < 3 {
+                    Err(WebAudioError::Temporary)
+                } else {
+                    Ok(json!({"items":[]}))
+                }
+            },
+        );
+        assert_eq!(result.unwrap(), json!({"items":[]}));
+        assert_eq!(requested, 3);
+
+        let mut writes = 0;
+        let result = client.detail_request_with(
+            42,
+            generation,
+            "audio.add",
+            &AtomicBool::new(false),
+            || panic!("the cached key stays valid"),
+            |_| {
+                writes += 1;
+                Err(WebAudioError::Temporary)
+            },
+        );
+        assert_eq!(result, Err(WebAudioError::Temporary));
+        assert_eq!(writes, 1, "a write is never repeated");
     }
 
     #[test]

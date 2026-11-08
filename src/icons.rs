@@ -40,6 +40,12 @@ pub enum Icon {
     PlaylistAdd,
     Radio,
     Album,
+    /// Two beamed notes, for music genres.
+    Genres,
+    /// Two people side by side, for listening with friends.
+    Friends,
+    /// A smiling face, for moods and activities.
+    Mood,
     CopyLink,
     Edit,
     Trash,
@@ -732,6 +738,35 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 arc((12.0, 12.0), radius, -45.0, 45.0);
                 arc((12.0, 12.0), radius, 135.0, 225.0);
             }
+        }
+        Icon::Genres => {
+            // Filled heads, stems and one beam: a quaver pair.
+            painter.circle_filled(point(7.2, 17.6), 2.7 * scale, color);
+            painter.circle_filled(point(16.7, 15.6), 2.7 * scale, color);
+            line(&[(9.6, 17.6), (9.6, 6.4)]);
+            line(&[(19.1, 15.6), (19.1, 4.4)]);
+            polygon(&[(9.0, 5.6), (19.7, 3.4), (19.7, 6.6), (9.0, 8.8)], 0.6);
+        }
+        Icon::Friends => {
+            // The front person is complete; the second stands behind.
+            painter.circle_stroke(point(9.0, 8.6), 3.3 * scale, stroke);
+            line(&[
+                (2.8, 20.5),
+                (3.3, 17.8),
+                (5.6, 15.4),
+                (9.0, 14.6),
+                (12.4, 15.4),
+                (14.7, 17.8),
+                (15.2, 20.5),
+            ]);
+            arc((16.2, 7.6), 2.9, -120.0, 150.0);
+            line(&[(16.4, 13.4), (19.0, 14.1), (20.9, 16.3), (21.4, 19.0)]);
+        }
+        Icon::Mood => {
+            painter.circle_stroke(point(12.0, 12.0), 9.0 * scale, stroke);
+            painter.circle_filled(point(9.0, 10.0), 1.15 * scale, color);
+            painter.circle_filled(point(15.0, 10.0), 1.15 * scale, color);
+            arc((12.0, 12.2), 4.4, 25.0, 155.0);
         }
         Icon::Album => {
             painter.circle_stroke(point(12.0, 12.0), 9.0 * scale, stroke);
