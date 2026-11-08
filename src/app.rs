@@ -8031,14 +8031,23 @@ impl MusicApp {
                 } else {
                     format!("{}: {:.0}%", t("Громкость", "Volume"), volume * 100.0)
                 });
-                let (volume_icon, _) =
-                    ui.allocate_exact_size(egui::Vec2::splat(32.0), Sense::hover());
-                icons::paint(
-                    ui.painter(),
-                    egui::Rect::from_center_size(volume_icon.center(), egui::Vec2::splat(20.0)),
+                let mute = icons::toggle_button_sized(
+                    ui,
                     Icon::volume(volume),
-                    MUTED,
+                    if volume > 0.0 {
+                        t("Выключить звук", "Mute")
+                    } else {
+                        t("Включить звук", "Unmute")
+                    },
+                    true,
+                    false,
+                    32.0,
                 );
+                release_pointer_focus(&mute);
+                if mute.clicked() {
+                    self.player.toggle_mute();
+                    self.volume_save_at = Some(Instant::now() + Duration::from_millis(500));
+                }
                 let queue = icons::toggle_button_sized(
                     ui,
                     Icon::Queue,

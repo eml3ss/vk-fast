@@ -153,6 +153,7 @@ pub struct Player {
     commands: Sender<Command>,
     state: Arc<Mutex<Snapshot>>,
     volume: Arc<AtomicU32>,
+    unmuted_volume: AtomicU32,
     normalize: Arc<AtomicBool>,
     normalization_profiles: VecDeque<(CacheKey, Arc<normalization::Profile>)>,
     control: Arc<Control>,
@@ -182,6 +183,7 @@ impl Player {
                     volume: DEFAULT_VOLUME,
                 })),
                 volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
+                unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
                 normalize: Arc::new(AtomicBool::new(false)),
                 normalization_profiles: VecDeque::new(),
                 control,
@@ -214,6 +216,7 @@ impl Player {
             commands,
             state,
             volume,
+            unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
             normalize,
             normalization_profiles: VecDeque::new(),
             control,
@@ -323,8 +326,20 @@ impl Player {
         self.send(Command::Stop(epoch));
     }
     pub fn set_volume(&self, volume: f32) {
-        self.volume
-            .store(normal_volume(volume).to_bits(), Ordering::Relaxed);
+        let volume = normal_volume(volume);
+        if volume > 0.0 {
+            self.unmuted_volume
+                .store(volume.to_bits(), Ordering::Relaxed);
+        }
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
+    }
+    pub fn toggle_mute(&self) {
+        let volume = f32::from_bits(self.volume.load(Ordering::Relaxed));
+        self.set_volume(if volume > 0.0 {
+            0.0
+        } else {
+            f32::from_bits(self.unmuted_volume.load(Ordering::Relaxed))
+        });
     }
     pub fn set_normalize_volume(&self, enabled: bool) {
         if self.normalize.swap(enabled, Ordering::Relaxed) != enabled {
@@ -2284,6 +2299,7 @@ mod tests {
             commands,
             state: Arc::new(Mutex::new(snapshot)),
             volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
+            unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
             normalize: Arc::new(AtomicBool::new(false)),
             normalization_profiles: VecDeque::new(),
             control: Arc::new(Control::default()),
@@ -2292,6 +2308,39 @@ mod tests {
         };
         (player, receiver)
     }
+    #[test]
+    fn mute_restores_the_last_nonzero_volume_without_changing_transport() {
+        let (player, commands) = queued_player(
+            Snapshot {
+                state: PlaybackState::Paused,
+                position: 27.0,
+                ..Snapshot::default()
+            },
+            Some(200),
+        );
+        for volume in [0.001, 0.35, 1.0] {
+            player.set_volume(volume);
+            player.toggle_mute();
+            assert_eq!(player.snapshot().volume, 0.0);
+            player.toggle_mute();
+            let snapshot = player.snapshot();
+            assert_eq!(snapshot.volume, volume);
+            assert_eq!(snapshot.state, PlaybackState::Paused);
+            assert_eq!(snapshot.position, 27.0);
+        }
+        player.toggle_mute();
+        player.set_volume(0.42); // A slider, shortcut or system media command.
+        player.set_volume(0.0);
+        player.toggle_mute();
+        assert_eq!(player.snapshot().volume, 0.42);
+        assert!(commands.try_recv().is_err());
+
+        let (silent, _commands) = queued_player(Snapshot::default(), None);
+        silent.set_volume(0.0);
+        silent.toggle_mute();
+        assert_eq!(silent.snapshot().volume, DEFAULT_VOLUME);
+    }
+
     #[test]
     fn normalization_toggle_is_live_and_profiles_are_bounded_and_account_bound() {
         let (mut player, receiver) = queued_player(Snapshot::default(), None);
