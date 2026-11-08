@@ -143,6 +143,25 @@ impl Profile {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    /// Gain for the audible track, read on the output callback (atomics only).
+    /// File metadata or a cached/finished measurement is used as is. Until
+    /// then the producer's look-ahead estimate (up to the buffered seconds
+    /// ahead of playback) may only lower the level: a first play is never left
+    /// at unity gain, and nothing is boosted mid-track before the whole track
+    /// is known. A higher final value applies from the next play.
+    pub(super) fn running_gain(&self, latched: Option<f32>) -> f32 {
+        let current = self.gain();
+        if !current.is_finite() || current <= 0.0 {
+            return latched.unwrap_or(1.0);
+        }
+        match latched {
+            None if self.core.final_gain.load(Ordering::Acquire) => current,
+            None => current.min(1.0),
+            Some(latched) => current.min(latched),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn prepared_gain(&self) -> Option<f32> {
         self.core
             .final_gain
@@ -532,8 +551,45 @@ mod tests {
         assert!(pcm.started.load(Ordering::Acquire));
     }
 
+    fn peak(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+    }
+
     #[test]
-    fn missing_metadata_does_not_delay_or_change_a_running_track_when_analysis_finishes() {
+    fn look_ahead_measurement_attenuates_a_loud_first_play_from_its_first_sample() {
+        let profile = Profile::new(Arc::new(AtomicBool::new(true)));
+        let samples = tone(0.6, 3);
+        let raw = bytes(&samples);
+        let pcm = Pcm {
+            loudness: Some(profile.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&pcm, &raw, false);
+        // The producer measures what it buffered before the first callback.
+        profile.feed(0, &raw[..SAMPLE_RATE as usize * FRAME_BYTES]);
+        assert!(profile.prepared_gain().is_none());
+        let estimate = profile.gain();
+        assert!(estimate < 0.5, "a loud tone needs attenuation: {estimate}");
+        let mut output = vec![9.0; 960];
+        render_normalized(&mut output, &pcm, &mut OutputNormalizer::new(SAMPLE_RATE));
+        let mut expected = samples[..960].to_vec();
+        OutputNormalizer::new(SAMPLE_RATE).process(&mut expected, 2, true, estimate, 1.0);
+        assert_eq!(output, expected);
+        assert_eq!(
+            f32::from_bits(pcm.normalization_gain.load(Ordering::Relaxed)),
+            estimate
+        );
+    }
+
+    #[test]
+    fn missing_metadata_starts_at_unity_then_only_lowers_a_running_track() {
         let profile = Profile::new(Arc::new(AtomicBool::new(true)));
         let samples = tone(0.6, 3);
         let raw = bytes(&samples);
@@ -554,13 +610,58 @@ mod tests {
         assert!(pcm.started.load(Ordering::Acquire));
         profile.feed(0, &raw);
         profile.finish_stream(3 * u64::from(SAMPLE_RATE));
-        assert!(profile.prepared_gain().is_some_and(|gain| gain < 0.8));
-        render_normalized(&mut output, &pcm, &mut normalizer);
+        let gain = profile.prepared_gain().unwrap();
+        assert!(gain < 0.8);
+        let mut later = vec![0.0; 5 * SAMPLE_RATE as usize];
+        render_normalized(&mut later, &pcm, &mut normalizer);
         assert_eq!(
-            output,
-            samples[960..1920],
-            "Background analysis changed the active track"
+            f32::from_bits(pcm.normalization_gain.load(Ordering::Relaxed)),
+            gain
         );
+        // A smooth fade down, without a step, settling at the measured gain.
+        assert!(peak(&later[..960]) > peak(&later[later.len() - 960..]));
+        assert!((peak(&later[later.len() - 960..]) - 0.6 * gain).abs() < 0.01);
+        for pair in later.as_chunks::<2>().0.windows(2) {
+            assert!((pair[0][0] - pair[1][0]).abs() < 0.1, "audible step");
+        }
+
+        // A quiet track is not boosted mid-play; its boost waits for a replay.
+        let quiet = Profile::new(Arc::new(AtomicBool::new(true)));
+        let soft = tone(0.02, 3);
+        let soft_raw = bytes(&soft);
+        let running = Pcm {
+            loudness: Some(quiet.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&running, &soft_raw, false);
+        let mut normalizer = OutputNormalizer::new(SAMPLE_RATE);
+        render_normalized(&mut output, &running, &mut normalizer);
+        quiet.feed(0, &soft_raw);
+        quiet.finish_stream(3 * u64::from(SAMPLE_RATE));
+        assert!(quiet.prepared_gain().is_some_and(|gain| gain > 1.5));
+        render_normalized(&mut output, &running, &mut normalizer);
+        assert_eq!(output, soft[960..1920], "a running track was boosted");
+        let replay = Pcm {
+            loudness: Some(quiet.clone()),
+            ..Pcm::new(
+                CHANNELS,
+                SAMPLE_RATE,
+                Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+                false,
+            )
+        };
+        prefill(&replay, &soft_raw, false);
+        render_normalized(
+            &mut output,
+            &replay,
+            &mut OutputNormalizer::new(SAMPLE_RATE),
+        );
+        assert!(peak(&output) > peak(&soft[..960]) * 1.5);
         let next = Pcm {
             loudness: Some(profile.clone()),
             ..Pcm::new(

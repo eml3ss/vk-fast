@@ -653,14 +653,14 @@ fn render_normalized(
     }
     if let Some(profile) = &pcm.loudness {
         let enabled = profile.enabled();
-        let mut gain = pcm.normalization_gain.load(Ordering::Relaxed);
-        if gain == 0 {
-            gain = profile.prepared_gain().unwrap_or(1.0).to_bits();
-            // Background analysis prepares the next play. One track keeps the
-            // coefficient chosen before its first audible sample.
-            if enabled && frames > 0 {
-                pcm.normalization_gain.store(gain, Ordering::Relaxed);
-            }
+        let stored = pcm.normalization_gain.load(Ordering::Relaxed);
+        let latched = (stored != 0).then(|| f32::from_bits(stored));
+        // Metadata or a prepared measurement is fixed before the first audible
+        // sample. Without it, the look-ahead measurement can only lower this
+        // track's level; the normalizer smooths every change.
+        let gain = profile.running_gain(latched).to_bits();
+        if enabled && frames > 0 && gain != stored {
+            pcm.normalization_gain.store(gain, Ordering::Relaxed);
         }
         normalizer.process(
             &mut output[..frames * pcm.channels],
