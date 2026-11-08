@@ -128,16 +128,23 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                     );
                 });
             } else if view.playlists.is_empty() {
-                ui.add(theme::wrapped_body(
-                    ui,
-                    language.text(
-                        "Нет доступных для изменения плейлистов",
-                        "No editable playlists",
-                    ),
-                    ui.available_width(),
-                    egui::Align::Min,
-                    theme::MUTED,
-                ));
+                // Item spacing, the separator's space and half its height
+                // leave 10 px below; match it on the top and left (the menu
+                // frame itself adds 6).
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.add(theme::wrapped_body(
+                        ui,
+                        language.text(
+                            "Нет доступных для изменения плейлистов",
+                            "No editable playlists",
+                        ),
+                        (ui.available_width() - 4.0).max(1.0),
+                        egui::Align::Min,
+                        theme::MUTED,
+                    ));
+                });
             } else {
                 theme::scroll_area(
                     ui,
