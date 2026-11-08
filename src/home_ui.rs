@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     cover_art::CoverCache,
+    cover_play::{self, PlayState, state_icon},
     i18n::Language,
     icons::{self, Icon},
     model::{AlbumRef, Track},
@@ -162,7 +163,7 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                             continue;
                         };
                         ui.push_id(("home-collection", &collection.id), |ui| {
-                            let state = PlayState::of_collection(&view, &collection.id);
+                            let state = collection_state(&view, &collection.id);
                             let (body, play_clicked) = collection_card(
                                 ui,
                                 covers,
@@ -356,67 +357,20 @@ fn arrow(ui: &egui::Ui, rect: egui::Rect, next: bool, hovered: bool) {
     painter.line_segment([tip, tip + egui::vec2(-4.5 * direction, 5.0)], stroke);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlayState {
-    Idle,
-    Pending,
-    Playing,
-    Paused,
+fn mix_state(view: &HomeView<'_>, mix: &CatalogMix) -> PlayState {
+    PlayState::new(
+        view.pending_mix == Some(mix),
+        view.active_mix == Some(mix),
+        view.active_mix_playing,
+    )
 }
 
-impl PlayState {
-    fn new(pending: bool, active: bool, playing: bool) -> Self {
-        match (pending, active, playing) {
-            (true, _, _) => Self::Pending,
-            (false, false, _) => Self::Idle,
-            (false, true, true) => Self::Playing,
-            (false, true, false) => Self::Paused,
-        }
-    }
-
-    fn of(view: &HomeView<'_>, mix: &CatalogMix) -> Self {
-        Self::new(
-            view.pending_mix == Some(mix),
-            view.active_mix == Some(mix),
-            view.active_mix_playing,
-        )
-    }
-
-    fn of_collection(view: &HomeView<'_>, id: &str) -> Self {
-        Self::new(
-            view.pending_collection == Some(id),
-            view.active_collection == Some(id),
-            view.active_mix_playing,
-        )
-    }
-
-    fn icon(self) -> Icon {
-        match self {
-            Self::Playing => Icon::Pause,
-            Self::Idle | Self::Paused | Self::Pending => Icon::Play,
-        }
-    }
-}
-
-/// Play or pause, or a spinning arc while the mix or playlist is loading.
-fn state_icon(ui: &egui::Ui, rect: egui::Rect, state: PlayState, color: Color32) {
-    if state != PlayState::Pending {
-        icons::paint(ui.painter(), rect, state.icon(), color);
-        return;
-    }
-    let radius = rect.width().min(rect.height()) * 0.42;
-    let start = ui.input(|input| input.time) as f32 * 6.0;
-    let points = (0..=28)
-        .map(|step| {
-            let angle = start + 4.4 * step as f32 / 28.0;
-            rect.center() + radius * egui::vec2(angle.cos(), angle.sin())
-        })
-        .collect();
-    ui.painter().add(egui::Shape::line(
-        points,
-        Stroke::new((radius * 0.32).max(1.6), color),
-    ));
-    ui.ctx().request_repaint();
+fn collection_state(view: &HomeView<'_>, id: &str) -> PlayState {
+    PlayState::new(
+        view.pending_collection == Some(id),
+        view.active_collection == Some(id),
+        view.active_mix_playing,
+    )
 }
 
 fn catalog_sections(
@@ -459,7 +413,7 @@ fn catalog_sections(
         carousel(ui, key, &spans, 36.0, language, |ui, index| {
             let tile = &tiles[index];
             ui.push_id(("home-mix-tile", &tile.id), |ui| {
-                if mix_chip(ui, &tile.title, PlayState::of(view, &tile.mix)).clicked() {
+                if mix_chip(ui, &tile.title, mix_state(view, &tile.mix)).clicked() {
                     action = Some(Action::PlayCatalogMix(tile.mix.clone()));
                 }
             });
@@ -518,8 +472,8 @@ fn catalog_sections(
             |ui, index| {
                 let mix = &mixes[index];
                 ui.push_id(("home-artist-mix", index), |ui| {
-                    let state = PlayState::of(view, &mix.mix);
-                    if artist_mix_card(ui, covers, mix, width, state).clicked() {
+                    let state = mix_state(view, &mix.mix);
+                    if artist_mix_card(ui, covers, mix, width, state) {
                         action = Some(Action::PlayCatalogMix(mix.mix.clone()));
                     }
                 });
@@ -758,7 +712,7 @@ fn artist_mix_card(
     mix: &ArtistMix,
     width: f32,
     state: PlayState,
-) -> Response {
+) -> bool {
     let (rect, response) = card(ui, egui::vec2(width, 194.0), &mix.title);
     if state != PlayState::Idle {
         ui.painter().rect_stroke(
@@ -778,13 +732,13 @@ fn artist_mix_card(
     );
     photo.set_clip_rect(ui.clip_rect().intersect(art));
     covers.show_rounded(&mut photo, mix.photo_url.as_deref(), art.width(), 56);
-    let badge = art.right_bottom() - egui::vec2(16.0, 16.0);
-    ui.painter().circle_filled(badge, 20.0, Color32::WHITE);
-    state_icon(
+    let play = cover_play::button(
         ui,
-        egui::Rect::from_center_size(badge, egui::vec2(20.0, 20.0)),
+        art.right_bottom() - egui::vec2(16.0, 16.0),
+        20.0,
+        ui.id().with("artist-mix-play"),
         state,
-        theme::BACKGROUND,
+        &mix.title,
     );
     card_text(
         ui,
@@ -797,7 +751,7 @@ fn artist_mix_card(
             .family(theme::semibold()),
         &mix.description,
     );
-    response
+    response.clicked() || play.clicked()
 }
 
 fn columns(width: f32) -> usize {
@@ -1227,32 +1181,16 @@ fn collection_card(
             .family(theme::semibold()),
         &collection.subtitle,
     );
-    let play_rect = egui::Rect::from_center_size(
-        art.right_bottom() - egui::vec2(16.0, 16.0),
-        egui::vec2(40.0, 40.0),
-    );
-    let play = ui.interact(play_rect, ui.id().with("collection-play"), Sense::click());
-    if play.clicked() {
-        play.request_focus();
-    }
-    let fill = if play.is_pointer_button_down_on() {
-        Color32::from_rgb(218, 228, 241)
-    } else {
-        Color32::WHITE
-    };
-    ui.painter().circle_filled(play_rect.center(), 20.0, fill);
-    state_icon(ui, play_rect.shrink(10.0), state, theme::BACKGROUND);
-    if play.has_focus() {
-        ui.painter()
-            .circle_stroke(play_rect.center(), 22.0, Stroke::new(1.5, theme::ACCENT));
-    }
     let label = language.text("Слушать подборку", "Play playlist");
-    play.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    let play = play
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(label);
+    // Home keeps its original corner position; only the colour is shared.
+    let play = cover_play::button(
+        ui,
+        art.right_bottom() - egui::vec2(16.0, 16.0),
+        20.0,
+        ui.id().with("collection-play"),
+        state,
+        label,
+    );
     (response, play.clicked())
 }
 
@@ -2127,14 +2065,12 @@ mod tests {
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    egui::Shape::Circle(circle)
-                        if circle.fill == Color32::WHITE && circle.radius == 20.0 =>
-                    {
+                    egui::Shape::Circle(circle) if circle.fill == theme::ACCENT => {
                         Some(circle.center)
                     }
                     _ => None,
                 })
-                .expect("Missing playlist play button");
+                .expect("Missing blue playlist play button");
             let body = output
                 .shapes
                 .iter()

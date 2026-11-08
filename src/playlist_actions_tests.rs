@@ -71,6 +71,7 @@ fn play_reply(owner: i64, reference: AlbumRef, shuffle: bool) -> PlayRequest {
     sender.send(Ok(page(2, &[4, 5]).items)).ok().unwrap();
     PlayRequest {
         owner,
+        page: MusicPage::Playlist(reference.clone()),
         reference,
         shuffle,
         canceled: Arc::new(AtomicBool::new(false)),
@@ -417,6 +418,7 @@ fn delayed_playlist_play_is_account_bound_cancelable_and_superseded_by_manual_pl
     app.playlist_controls.autoplay = Some(PlayRequest {
         owner: 42,
         reference: reference(5),
+        page: MusicPage::Playlist(reference(5)),
         shuffle: false,
         canceled: canceled.clone(),
         receiver,

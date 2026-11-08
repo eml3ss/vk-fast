@@ -19,6 +19,7 @@ mod catalog;
 mod client_platform;
 mod cover_art;
 mod cover_cache;
+mod cover_play;
 mod detail_ui;
 mod diagnostics;
 mod discord_rpc;

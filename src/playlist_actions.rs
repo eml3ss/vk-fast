@@ -85,6 +85,8 @@ impl Drop for ManageRequest {
 struct PlayRequest {
     owner: i64,
     reference: AlbumRef,
+    /// The page whose queue this start becomes, e.g. `album:1_2`.
+    page: MusicPage,
     shuffle: bool,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Result<Vec<Track>, WebAudioError>>,
@@ -154,6 +156,12 @@ impl State {
     }
     pub(super) fn loading_play(&self) -> bool {
         self.autoplay.is_some()
+    }
+    /// The collection waiting for its tracks before it starts playing.
+    pub(super) fn pending_play(&self) -> Option<(i64, i64)> {
+        self.autoplay
+            .as_ref()
+            .map(|request| key(&request.reference))
     }
     pub(super) fn rebind(&mut self, ctx: &egui::Context) {
         if let Some(form) = &mut self.form {
@@ -638,14 +646,24 @@ impl MusicApp {
     }
 
     fn play_sidebar_playlist(&mut self, ctx: &egui::Context, reference: AlbumRef, shuffle: bool) {
+        let page = self.sidebar_collection_page(reference.clone());
+        self.play_collection(ctx, reference, page, shuffle);
+    }
+
+    /// Start an album or playlist without opening it, loading its tracks in
+    /// the background when they are not cached yet.
+    pub(super) fn play_collection(
+        &mut self,
+        ctx: &egui::Context,
+        reference: AlbumRef,
+        page: MusicPage,
+        shuffle: bool,
+    ) {
         self.cancel_delayed_advance();
-        let page_key = self
-            .sidebar_collection_page(reference.clone())
-            .detail_key()
-            .unwrap();
+        let page_key = page.detail_key().unwrap();
         if let Some(data) = self.details.get(&page_key) {
             let tracks = data.tracks().to_vec();
-            self.start_sidebar_playlist(ctx, reference, tracks, shuffle);
+            self.start_sidebar_playlist(ctx, page, tracks, shuffle);
             return;
         }
         if self.demo {
@@ -678,6 +696,7 @@ impl MusicApp {
                 self.playlist_controls.autoplay = Some(PlayRequest {
                     owner,
                     reference,
+                    page,
                     shuffle,
                     canceled,
                     receiver,
@@ -690,7 +709,7 @@ impl MusicApp {
     fn start_sidebar_playlist(
         &mut self,
         ctx: &egui::Context,
-        reference: AlbumRef,
+        page: MusicPage,
         tracks: Vec<Track>,
         shuffle: bool,
     ) {
@@ -705,13 +724,7 @@ impl MusicApp {
         let keys: Vec<_> = tracks.iter().map(Track::key).collect();
         self.play_order.set_shuffle(shuffle, &keys, None);
         self.save_playback_modes();
-        self.start_queue_from(
-            ctx,
-            tracks,
-            self.sidebar_collection_page(reference)
-                .detail_key()
-                .unwrap(),
-        );
+        self.start_queue_from(ctx, tracks, page.detail_key().unwrap());
     }
 
     pub(super) fn open_playlist_editor(
@@ -999,7 +1012,7 @@ impl MusicApp {
         }
         match result {
             Ok(tracks) => {
-                self.start_sidebar_playlist(ctx, request.reference.clone(), tracks, request.shuffle)
+                self.start_sidebar_playlist(ctx, request.page.clone(), tracks, request.shuffle)
             }
             Err(WebAudioError::Canceled) => {}
             Err(error) => self.track_menu_error = Some(error),

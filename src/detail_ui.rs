@@ -5,6 +5,7 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use crate::{
     artist_releases::{Kind as ReleaseKind, Release},
     cover_art::CoverCache,
+    cover_play::{self, PlayState, Playback},
     i18n::Language,
     icons::{self, Icon},
     model::{AlbumRef, ArtistRef},
@@ -46,6 +47,8 @@ pub enum Action {
     Play,
     Shuffle,
     OpenAlbum(AlbumRef),
+    /// Start a release from its card without opening it.
+    PlayAlbum(AlbumRef),
     OpenArtist(ArtistRef),
     OpenCreator(crate::web_audio::PlaylistCreator),
     EditPlaylist,
@@ -473,6 +476,8 @@ pub struct ReleasesView<'a> {
     pub discography: &'a [Release],
     pub incomplete: bool,
     pub loading: bool,
+    pub playback: Playback,
+    pub related: &'a [crate::web_audio::RelatedArtist],
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -487,7 +492,7 @@ pub fn artist_releases(
     covers: &mut CoverCache,
     view: ReleasesView<'_>,
 ) -> Option<Action> {
-    let mut action = releases(ui, covers, view.language, view.latest);
+    let mut action = releases(ui, covers, view.language, view.latest, view.playback);
     ui.add_space(22.0);
     let id = ui.make_persistent_id(("artist-release-tab", view.artist_id));
     let mut tab = ui
@@ -540,7 +545,12 @@ pub fn artist_releases(
             ReleaseTab::Singles => matches!(release.kind, ReleaseKind::Single | ReleaseKind::Ep),
         })
         .collect();
+    // The space under the last element before "You may also like".
+    let mut tail_gap = SECTION_GAP;
     if filtered.is_empty() && !view.incomplete {
+        // Same space under the note as between the tabs and the note: the
+        // note's scope already adds one item spacing below it.
+        tail_gap = 10.0 - ui.spacing().item_spacing.y;
         theme::inset_heading(ui, |ui| {
             ui.label(
                 RichText::new(match tab {
@@ -553,12 +563,183 @@ pub fn artist_releases(
             )
         });
     }
+    // Two rows first; the rest behind "Show all", which then offers "Hide".
+    let limit = release_columns(ui.available_width()) * 2;
+    let expanded_id = ui.make_persistent_id(("artist-discography-all", view.artist_id, tab as u8));
+    let expanded = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(expanded_id))
+        .unwrap_or(false);
+    let shown = if expanded {
+        &filtered[..]
+    } else {
+        &filtered[..filtered.len().min(limit)]
+    };
     ui.push_id(("artist-discography", view.artist_id, tab as u8), |ui| {
-        if let Some(intent) = release_grid(ui, covers, view.language, &filtered) {
+        if let Some(intent) = release_grid(ui, covers, view.language, shown, view.playback) {
             action = Some(intent);
         }
     });
+    if filtered.len() > limit {
+        tail_gap = LINK_GAP;
+        if expand_button(ui, view.language, expanded) {
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+        }
+    }
+    if let Some(intent) = related_artists(
+        ui,
+        covers,
+        view.language,
+        view.artist_id,
+        view.related,
+        tail_gap,
+    ) {
+        action = Some(intent);
+    }
     action
+}
+
+const SECTION_GAP: f32 = 22.0;
+/// Extra space on each side of "Show all", added to the item spacing.
+const LINK_GAP: f32 = 2.0;
+
+/// "Show all" / "Hide" under a shortened grid: a compact link with equal
+/// space above and below. Returns true when clicked.
+fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> bool {
+    ui.add_space(LINK_GAP);
+    theme::inset_heading(ui, |ui| {
+        let label = if expanded {
+            language.text("Скрыть", "Hide")
+        } else {
+            language.text("Показать все", "Show all")
+        };
+        let response = ui.add(
+            egui::Label::new(RichText::new(label).color(theme::ACCENT))
+                .sense(Sense::click())
+                .selectable(false),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    })
+}
+
+/// VK's "You may also like" artists at the bottom of an artist page.
+fn related_artists(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    language: Language,
+    artist_id: &str,
+    related: &[crate::web_audio::RelatedArtist],
+    top_gap: f32,
+) -> Option<Action> {
+    if related.is_empty() {
+        return None;
+    }
+    ui.add_space(top_gap);
+    theme::inset_heading(ui, |ui| {
+        ui.add(
+            egui::Label::new(
+                RichText::new(language.text("Вам могут понравиться", "You may also like"))
+                    .size(20.0)
+                    .family(theme::semibold()),
+            )
+            .selectable(false),
+        )
+    });
+    ui.add_space(10.0);
+    let columns = ((ui.available_width() + 12.0) / 212.0)
+        .floor()
+        .clamp(1.0, 6.0) as usize;
+    let width = ((ui.available_width() - 12.0 * columns.saturating_sub(1) as f32) / columns as f32)
+        .max(1.0);
+    let expanded_id = ui.make_persistent_id(("artist-related-all", artist_id));
+    let expanded = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(expanded_id))
+        .unwrap_or(false);
+    let shown = if expanded {
+        related
+    } else {
+        &related[..related.len().min(columns)]
+    };
+    let mut action = None;
+    for (row, items) in shown.chunks(columns).enumerate() {
+        if row > 0 {
+            ui.add_space(10.0);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for item in items {
+                ui.push_id(("related-artist", &item.artist.id), |ui| {
+                    if related_card(ui, covers, item, width) {
+                        action = Some(Action::OpenArtist(item.artist.clone()));
+                    }
+                });
+            }
+        });
+    }
+    if related.len() > columns && expand_button(ui, language, expanded) {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+    }
+    action
+}
+
+fn related_card(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    item: &crate::web_audio::RelatedArtist,
+    width: f32,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 64.0), Sense::click());
+    let hovered = response.hovered() || response.has_focus();
+    ui.painter().rect_filled(
+        rect,
+        12.0,
+        if hovered {
+            Color32::from_rgb(31, 38, 49)
+        } else {
+            theme::SURFACE
+        },
+    );
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let avatar =
+        egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::Vec2::splat(44.0));
+    let mut image = child(ui, "related-avatar", avatar);
+    covers.show_rounded(&mut image, item.image_url.as_deref(), 44.0, 22);
+    let mut text = child(
+        ui,
+        "related-name",
+        egui::Rect::from_min_max(
+            egui::pos2(avatar.right() + 12.0, rect.top()),
+            rect.max - egui::vec2(10.0, 0.0),
+        ),
+    );
+    text.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.add(
+            egui::Label::new(RichText::new(&item.artist.name).family(theme::semibold()))
+                .truncate()
+                .selectable(false),
+        );
+    });
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &item.artist.name)
+    });
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 /// The catalog supplies latest releases in display order. Fit one row to the window.
@@ -567,6 +748,7 @@ pub fn releases(
     covers: &mut CoverCache,
     language: Language,
     releases: &[Release],
+    playback: Playback,
 ) -> Option<Action> {
     if releases.is_empty() {
         return None;
@@ -588,7 +770,7 @@ pub fn releases(
         .take(release_columns(ui.available_width()))
         .collect();
     ui.push_id("latest-releases", |ui| {
-        release_grid(ui, covers, language, &visible)
+        release_grid(ui, covers, language, &visible, playback)
     })
     .inner
 }
@@ -602,6 +784,7 @@ fn release_grid(
     covers: &mut CoverCache,
     language: Language,
     releases: &[&Release],
+    playback: Playback,
 ) -> Option<Action> {
     if releases.is_empty() {
         return None;
@@ -625,6 +808,15 @@ fn release_grid(
         .max(0.0) as usize)
         .min(rows);
     let mut action = None;
+    // Cards paint into a child bounded by the grid, so their inner widgets
+    // can never stretch the page below the allocated rows.
+    let mut cards = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("release-cards")
+            .max_rect(area),
+    );
+    cards.set_clip_rect(ui.clip_rect());
+    let ui = &mut cards;
     for row in start..end {
         for column in 0..columns {
             let Some(release) = releases.get(row * columns + column) else {
@@ -634,7 +826,7 @@ fn release_grid(
                 area.min + egui::vec2(column as f32 * (width + 14.0), row as f32 * row_height),
                 egui::vec2(width, card_height),
             );
-            if let Some(intent) = release_card(ui, covers, language, release, rect) {
+            if let Some(intent) = release_card(ui, covers, language, release, rect, playback) {
                 action = Some(intent);
             }
         }
@@ -648,6 +840,7 @@ fn release_card(
     language: Language,
     release: &Release,
     rect: egui::Rect,
+    playback: Playback,
 ) -> Option<Action> {
     let album = &release.album;
     ui.push_id(("release", album.owner_id, album.id), |ui| {
@@ -672,6 +865,22 @@ fn release_card(
             egui::Vec2::splat(art_size),
         );
         artwork(ui, covers, art, album.cover_url.as_deref(), "release-art");
+        // Like VK: the blue play button appears inside the cover on hover,
+        // and stays while this release is loading or current.
+        let state = playback.state((album.owner_id, album.id));
+        let play =
+            (ui.rect_contains_pointer(rect) || response.has_focus() || state != PlayState::Idle)
+                .then(|| {
+                    cover_play::button(
+                        ui,
+                        cover_play::corner(art),
+                        cover_play::radius(art),
+                        ui.id().with("play"),
+                        state,
+                        language.text("Слушать", "Play"),
+                    )
+                })
+                .is_some_and(|play| play.clicked());
         let mut text = child(
             ui,
             "release-title",
@@ -703,7 +912,11 @@ fn release_card(
             response.surrender_focus();
         }
         response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        clicked.then(|| Action::OpenAlbum(album.clone()))
+        if play {
+            Some(Action::PlayAlbum(album.clone()))
+        } else {
+            clicked.then(|| Action::OpenAlbum(album.clone()))
+        }
     })
     .inner
 }
@@ -1741,6 +1954,8 @@ mod tests {
                                 discography: &discography,
                                 incomplete: false,
                                 loading: false,
+                                playback: Playback::default(),
+                                related: &[],
                             },
                         );
                     },
@@ -1777,6 +1992,217 @@ mod tests {
     }
 
     #[test]
+    fn discography_shows_two_rows_then_expands_with_hover_play_and_related_artists() {
+        let release = |id: i64| Release {
+            album: AlbumRef {
+                id,
+                owner_id: -42,
+                title: format!("Album {id}"),
+                access_key: None,
+                cover_url: None,
+            },
+            kind: ReleaseKind::Album,
+            year: Some(2026),
+        };
+        let discography: Vec<_> = (1..=12).map(release).collect();
+        let related = [crate::web_audio::RelatedArtist {
+            artist: ArtistRef {
+                id: "related_one".into(),
+                name: "Related One".into(),
+            },
+            image_url: None,
+        }];
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        // 600 px fits three columns: two rows are six albums.
+        let mut frame = |tick: u32, events: Vec<egui::Event>| {
+            let mut action = None;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 3000.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action = artist_releases(
+                        ui,
+                        &mut covers,
+                        ReleasesView {
+                            language: Language::Russian,
+                            artist_id: "synthetic",
+                            latest: &[],
+                            discography: &discography,
+                            incomplete: false,
+                            loading: false,
+                            playback: Playback::default(),
+                            related: &related,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            (output, action)
+        };
+        let text = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+        };
+        let blue = |output: &egui::FullOutput| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle) if circle.fill == theme::ACCENT => Some(circle.center),
+                _ => None,
+            })
+        };
+        let (output, _) = frame(1, Vec::new());
+        assert!(text(&output, "Album 6").is_some());
+        assert!(text(&output, "Album 7").is_none(), "only two rows at first");
+        assert!(blue(&output).is_none(), "play buttons wait for hover");
+
+        let card = text(&output, "Album 2").unwrap();
+        let (output, _) = frame(2, vec![egui::Event::PointerMoved(card)]);
+        let play = blue(&output).expect("hover shows the blue play button");
+        frame(3, pointer(play, true));
+        let (_, action) = frame(4, pointer(play, false));
+        assert_eq!(action, Some(Action::PlayAlbum(release(2).album)));
+
+        let (output, _) = frame(5, Vec::new());
+        let rect_of = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .next_back()
+                .unwrap()
+        };
+        let link = rect_of("Показать все");
+        let cards_bottom = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == theme::SURFACE && rect.rect.bottom() <= link.top() =>
+                {
+                    Some(rect.rect.bottom())
+                }
+                _ => None,
+            })
+            .fold(0.0, f32::max);
+        let heading = rect_of("Вам могут понравиться");
+        let above = link.top() - cards_bottom;
+        let below = heading.top() - link.bottom();
+        assert!(
+            (above - below).abs() <= 1.0 && above <= 12.0,
+            "Show all spacing: {above} above, {below} below"
+        );
+        let show_all = text(&output, "Показать все").unwrap();
+        frame(6, pointer(show_all, true));
+        frame(7, pointer(show_all, false));
+        let (output, _) = frame(8, Vec::new());
+        assert!(text(&output, "Album 12").is_some(), "show all expands");
+        assert!(text(&output, "Скрыть").is_some());
+
+        let artist = text(&output, "Related One").unwrap();
+        frame(9, pointer(artist, true));
+        let (_, action) = frame(10, pointer(artist, false));
+        assert_eq!(action, Some(Action::OpenArtist(related[0].artist.clone())));
+    }
+
+    #[test]
+    fn an_empty_tab_note_has_equal_space_above_and_below() {
+        let single = Release {
+            album: AlbumRef {
+                id: 1,
+                owner_id: -42,
+                title: "Only single".into(),
+                access_key: None,
+                cover_url: None,
+            },
+            kind: ReleaseKind::Single,
+            year: Some(2026),
+        };
+        let related = [crate::web_audio::RelatedArtist {
+            artist: ArtistRef {
+                id: "related_one".into(),
+                name: "Related One".into(),
+            },
+            image_url: None,
+        }];
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 1200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                artist_releases(
+                    ui,
+                    &mut covers,
+                    ReleasesView {
+                        language: Language::English,
+                        artist_id: "synthetic-empty",
+                        latest: &[],
+                        discography: std::slice::from_ref(&single),
+                        incomplete: false,
+                        loading: false,
+                        playback: Playback::default(),
+                        related: &related,
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let text_rect = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let tab_text = text_rect("Albums");
+        let tab = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.contains(tab_text.center()) => Some(rect.rect),
+                _ => None,
+            })
+            .next()
+            .expect("selected tab background");
+        let note = text_rect("No albums yet");
+        let heading = text_rect("You may also like");
+        let above = note.top() - tab.bottom();
+        let below = heading.top() - note.bottom();
+        assert!(
+            (above - below).abs() <= 1.0,
+            "empty note spacing: {above} above, {below} below"
+        );
+    }
+
+    #[test]
     fn release_card_opens_the_supplied_album_identity() {
         let context = egui::Context::default();
         theme::install(&context);
@@ -1810,6 +2236,7 @@ mod tests {
                             kind: ReleaseKind::Album,
                             year: None,
                         }],
+                        Playback::default(),
                     );
                 },
             );

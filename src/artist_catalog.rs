@@ -555,6 +555,7 @@ mod tests {
             latest_releases: Vec::new(),
             discography: Vec::new(),
             releases_error: None,
+            related: Vec::new(),
         }
     }
     fn release(id: i64, metadata: Value) -> Value {

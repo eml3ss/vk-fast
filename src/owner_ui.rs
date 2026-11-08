@@ -1,6 +1,7 @@
 //! Music publisher pages use the same artwork cache and theme as release pages.
 use crate::{
     cover_art::CoverCache,
+    cover_play::{self, PlayState, Playback},
     detail_ui,
     i18n::Language,
     icons::{self, Icon},
@@ -12,6 +13,7 @@ use eframe::egui::{self, Align, FontId, Layout, RichText, Sense};
 
 pub enum Action {
     OpenPlaylist(AlbumRef),
+    PlayPlaylist(AlbumRef),
     More,
     Retry,
 }
@@ -23,6 +25,7 @@ pub fn show(
     reference: &PlaylistCreator,
     page: Option<&OwnerPage>,
     loading: bool,
+    playback: Playback,
 ) -> Option<Action> {
     let mut action = None;
     theme::scroll_area(
@@ -66,7 +69,7 @@ pub fn show(
                 );
                 return;
             }
-            action = grid(ui, covers, language, &page.playlists).map(Action::OpenPlaylist);
+            action = grid(ui, covers, language, &page.playlists, playback);
             if let Some(error) = &page.playlists_error {
                 ui.add_space(12.0);
                 let message = if *error == WebAudioError::Rejected {
@@ -203,7 +206,8 @@ fn grid(
     covers: &mut CoverCache,
     language: Language,
     playlists: &[UserPlaylist],
-) -> Option<AlbumRef> {
+    playback: Playback,
+) -> Option<Action> {
     if playlists.is_empty() {
         return None;
     }
@@ -264,6 +268,25 @@ fn grid(
             );
             image.set_clip_rect(ui.clip_rect().intersect(art));
             covers.show(&mut image, playlist.album.cover_url.as_deref(), art_size);
+            let key = (playlist.album.owner_id, playlist.album.id);
+            let state = playback.state(key);
+            let play = (ui.rect_contains_pointer(rect)
+                || response.has_focus()
+                || state != PlayState::Idle)
+                .then(|| {
+                    cover_play::button(
+                        ui,
+                        cover_play::corner(art),
+                        cover_play::radius(art),
+                        ui.id().with(("owner-playlist-play", key)),
+                        state,
+                        language.text("Слушать", "Play"),
+                    )
+                })
+                .is_some_and(|play| play.clicked());
+            if play {
+                selected = Some(Action::PlayPlaylist(playlist.album.clone()));
+            }
             for (line, label, font, color) in [
                 (
                     0.0,
@@ -299,8 +322,9 @@ fn grid(
             if response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
+                && !play
             {
-                selected = Some(playlist.album.clone());
+                selected = Some(Action::OpenPlaylist(playlist.album.clone()));
             }
         }
     }
@@ -386,6 +410,7 @@ mod tests {
                             &page.creator,
                             Some(&page),
                             false,
+                            Playback::default(),
                         )
                     },
                 );
@@ -451,7 +476,8 @@ mod tests {
                             Language::Russian,
                             &page.creator,
                             Some(&page),
-                            false
+                            false,
+                            Playback::default(),
                         ),
                         Some(Action::More)
                     )

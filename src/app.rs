@@ -4712,6 +4712,40 @@ impl MusicApp {
         self.load_collection_tracks(ctx, id);
     }
 
+    /// Which album or playlist is current or loading, for cover play buttons.
+    fn cover_playback(&self) -> crate::cover_play::Playback {
+        let active = self
+            .queue_origin
+            .as_deref()
+            .filter(|_| !self.mix_active && self.playing.is_some())
+            .and_then(|origin| {
+                origin
+                    .strip_prefix("album:")
+                    .or_else(|| origin.strip_prefix("playlist:"))
+            })
+            .and_then(|key| key.split_once('_'))
+            .and_then(|(owner, id)| Some((owner.parse().ok()?, id.parse().ok()?)));
+        crate::cover_play::Playback {
+            pending: self.playlist_controls.pending_play(),
+            active,
+            audible: matches!(
+                self.player.snapshot().state,
+                PlaybackState::Playing | PlaybackState::Loading
+            ),
+        }
+    }
+
+    /// A cover's play button: toggle the current collection, or start it in
+    /// the background without leaving the page.
+    fn play_cover(&mut self, ctx: &egui::Context, reference: AlbumRef, page: MusicPage) {
+        let key = (reference.owner_id, reference.id);
+        if self.cover_playback().active == Some(key) {
+            self.toggle_playback(ctx);
+        } else {
+            self.play_collection(ctx, reference, page, false);
+        }
+    }
+
     /// Home's play button: start the collection, or toggle it when it is the
     /// current queue. Missing tracks load in place; it never opens the page.
     fn play_home_collection(&mut self, ctx: &egui::Context, id: String) {
@@ -5650,6 +5684,7 @@ impl MusicApp {
     }
 
     fn detail_content(&mut self, ui: &mut egui::Ui) {
+        let cover_playback = self.cover_playback();
         let ctx = ui.ctx().clone();
         let page = self.page.clone();
         let language = self.language;
@@ -5931,6 +5966,8 @@ impl MusicApp {
                             discography: &artist_page.discography,
                             incomplete: artist_page.releases_error.is_some(),
                             loading,
+                            playback: cover_playback,
+                            related: &artist_page.related,
                         },
                     )
                 {
@@ -5962,6 +5999,9 @@ impl MusicApp {
             Some(detail_ui::Action::OpenAlbum(album)) => {
                 self.navigate_music(&ctx, MusicPage::Album(album))
             }
+            Some(detail_ui::Action::PlayAlbum(album)) => {
+                self.play_cover(&ctx, album.clone(), MusicPage::Album(album));
+            }
             Some(detail_ui::Action::OpenCreator(creator)) if creator.owner_id != 0 => {
                 self.navigate_music(&ctx, MusicPage::Owner(creator));
             }
@@ -5989,6 +6029,7 @@ impl MusicApp {
             DetailPage::Owner(page) => Some(page),
             _ => None,
         });
+        let playback = self.cover_playback();
         let action = crate::owner_ui::show(
             ui,
             &mut self.covers,
@@ -5996,11 +6037,15 @@ impl MusicApp {
             creator,
             page,
             self.detail_request.is_some(),
+            playback,
         );
         let ctx = ui.ctx().clone();
         match action {
             Some(crate::owner_ui::Action::OpenPlaylist(playlist)) => {
                 self.navigate_music(&ctx, MusicPage::Playlist(playlist))
+            }
+            Some(crate::owner_ui::Action::PlayPlaylist(playlist)) => {
+                self.play_cover(&ctx, playlist.clone(), MusicPage::Playlist(playlist));
             }
             Some(crate::owner_ui::Action::More) if self.detail_error.is_none() => {
                 self.load_more_owner(&ctx)
@@ -13982,6 +14027,7 @@ mod tests {
                 latest_releases: Vec::new(),
                 discography: Vec::new(),
                 releases_error: None,
+                related: Vec::new(),
             })),
         );
         app.navigate_music(&ctx, MusicPage::Album(album));

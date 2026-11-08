@@ -187,6 +187,14 @@ pub struct ArtistPage {
     pub latest_releases: Vec<crate::artist_releases::Release>,
     pub discography: Vec<crate::artist_releases::Release>,
     pub releases_error: Option<WebAudioError>,
+    /// VK's "You may also like" artists, in VK's order.
+    pub related: Vec<RelatedArtist>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelatedArtist {
+    pub artist: ArtistRef,
+    pub image_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3243,6 +3251,7 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
         .filter_map(Value::as_str)
         .filter_map(|id| album_pool.get(id).cloned())
         .collect();
+    let related = related_artists(value, blocks, &artist);
     Ok((
         ArtistPage {
             artist,
@@ -3251,9 +3260,70 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
             discography: latest_releases.clone(),
             latest_releases,
             releases_error: None,
+            related,
         },
         streams,
     ))
+}
+
+/// VK's related-artists block: a `links` block whose own URL ends in
+/// `/related`, holding artist links (`vk.ru/artist/<id or domain>`). Official
+/// community pages are separate `links` blocks and never become artists.
+fn related_artists(value: &Value, blocks: &[Value], artist: &ArtistRef) -> Vec<RelatedArtist> {
+    let Some(block) = blocks.iter().find(|block| {
+        block["data_type"] == "links"
+            && block["url"]
+                .as_str()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .is_some_and(|url| url.path().ends_with("/related"))
+    }) else {
+        return Vec::new();
+    };
+    let links = value["links"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut seen = HashSet::new();
+    block["links_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|id| links.iter().find(|link| link["id"].as_str() == Some(id)))
+        .filter(|link| link["meta"]["content_type"] == "artist")
+        .filter_map(|link| {
+            let url = reqwest::Url::parse(link["url"].as_str()?).ok()?;
+            if url.scheme() != "https"
+                || !matches!(
+                    url.host_str(),
+                    Some("vk.ru" | "vk.com" | "m.vk.ru" | "m.vk.com")
+                )
+            {
+                return None;
+            }
+            let mut path = url.path_segments()?;
+            let id = (path.next() == Some("artist")).then(|| path.next())??;
+            let name = link["title"].as_str()?.trim();
+            if !valid_artist_id(id) || name.is_empty() || id == artist.id {
+                return None;
+            }
+            let image_url = link["image"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|image| {
+                    let width = number(&image["width"])?;
+                    Some((width, valid_cover_url(image["url"].as_str()?)?))
+                })
+                .min_by_key(|(width, _)| (width - 160).abs())
+                .map(|(_, url)| url);
+            seen.insert(id.to_owned()).then(|| RelatedArtist {
+                artist: ArtistRef {
+                    id: id.to_owned(),
+                    name: name.chars().take(256).collect(),
+                },
+                image_url,
+            })
+        })
+        .take(24)
+        .collect()
 }
 
 struct UserPlaylistPage {
@@ -8188,6 +8258,43 @@ mod library_action_tests {
 mod detail_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn related_artists_come_only_from_the_related_links_block() {
+        let value = json!({
+            "links": [
+                {"id": "a", "title": "Related One", "url": "https://vk.ru/artist/related_one",
+                 "meta": {"content_type": "artist"},
+                 "image": [{"width": 143, "url": "https://images.example.test/143.jpg"},
+                           {"width": 1184, "url": "https://images.example.test/1184.jpg"}]},
+                {"id": "b", "title": "Self", "url": "https://vk.ru/artist/canonical-1",
+                 "meta": {"content_type": "artist"}},
+                {"id": "c", "title": "Official group", "url": "https://vk.ru/club1",
+                 "meta": {"content_type": "group"}},
+                {"id": "d", "title": "Elsewhere", "url": "https://evil.example.test/artist/x",
+                 "meta": {"content_type": "artist"}},
+                {"id": "e", "title": "Pages artist", "url": "https://vk.ru/artist/pages_only",
+                 "meta": {"content_type": "artist"}}
+            ]
+        });
+        let blocks = vec![
+            json!({"data_type": "links", "url": "https://vk.ru/artist/canonical-1/pages",
+                   "links_ids": ["e"]}),
+            json!({"data_type": "links", "url": "https://vk.ru/artist/canonical-1/related",
+                   "links_ids": ["a", "b", "c", "d", "a", "missing"]}),
+        ];
+        assert_eq!(
+            related_artists(&value, &blocks, &artist()),
+            [RelatedArtist {
+                artist: ArtistRef {
+                    id: "related_one".into(),
+                    name: "Related One".into(),
+                },
+                image_url: Some("https://images.example.test/143.jpg".into()),
+            }]
+        );
+        assert!(related_artists(&value, &blocks[..1], &artist()).is_empty());
+    }
 
     fn artist() -> ArtistRef {
         ArtistRef {
