@@ -184,6 +184,9 @@ pub fn artist_header(
             egui::Vec2::splat(portrait_size),
         );
         artwork(ui, covers, portrait, view.image_url, "artist-portrait");
+        if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
+            cover_viewer(ui, covers, portrait, url, view.language);
+        }
         // The portrait recedes into the page's dark blue surface rather than
         // placing text over a bright face or introducing an unreadable crop.
         fade(ui.painter(), rect, color);
@@ -357,7 +360,7 @@ fn collection_header(
     background(ui.painter(), rect, color);
     let art = egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size));
     artwork(ui, covers, art, view.image_url, "album-cover");
-    if !playlist && let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
+    if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
         cover_viewer(ui, covers, art, url, view.language);
     }
     let text_origin = if wide {
@@ -947,8 +950,8 @@ fn artwork(
     covers.show(&mut image, url, rect.width());
 }
 
-/// A release cover opens full size over a dimmed window. Any click, or
-/// Escape, closes it. Playlist covers are not clickable.
+/// A release or playlist cover, or an artist photo, opens full size over a
+/// dimmed window. Any click, or Escape, closes it.
 fn cover_viewer(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
@@ -956,7 +959,7 @@ fn cover_viewer(
     url: &str,
     language: Language,
 ) {
-    let label = language.text("Открыть обложку", "Open cover");
+    let label = language.text("Открыть изображение", "Open image");
     let id = egui::Id::new(("release-cover-viewer", url));
     let open = ui.interact(art, id.with("open"), Sense::click());
     open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
@@ -1458,8 +1461,12 @@ mod tests {
     }
 
     #[test]
-    fn release_cover_opens_full_size_and_closes_while_playlist_covers_stay_static() {
-        for is_playlist in [false, true] {
+    fn release_playlist_and_artist_images_open_full_size_and_close() {
+        for (kind, point) in [
+            ("album", egui::pos2(110.0, 110.0)),
+            ("playlist", egui::pos2(110.0, 110.0)),
+            ("artist", egui::pos2(840.0, 120.0)),
+        ] {
             let context = egui::Context::default();
             theme::install(&context);
             let mut covers = CoverCache::new();
@@ -1490,10 +1497,28 @@ mod tests {
                             can_edit_playlist: false,
                             follow: None,
                         };
-                        if is_playlist {
-                            playlist_header(ui, &mut covers, view);
-                        } else {
-                            album_header(ui, &mut covers, view);
+                        match kind {
+                            "playlist" => {
+                                playlist_header(ui, &mut covers, view);
+                            }
+                            "artist" => {
+                                artist_header(
+                                    ui,
+                                    &mut covers,
+                                    ArtistView {
+                                        language: Language::Russian,
+                                        name: "Artist",
+                                        image_url: view.image_url,
+                                        track_count: 1,
+                                        loading: false,
+                                        playing: false,
+                                        follow: None,
+                                    },
+                                );
+                            }
+                            _ => {
+                                album_header(ui, &mut covers, view);
+                            }
                         }
                     },
                 );
@@ -1512,7 +1537,6 @@ mod tests {
                 })
             };
             frame(Vec::new());
-            let point = egui::pos2(110.0, 110.0);
             frame(vec![
                 egui::Event::PointerMoved(point),
                 egui::Event::PointerButton {
@@ -1529,7 +1553,7 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }]);
             let opened = frame(Vec::new());
-            assert_eq!(dimmed(&opened), !is_playlist, "playlist: {is_playlist}");
+            assert!(dimmed(&opened), "{kind}");
             frame(vec![egui::Event::Key {
                 key: egui::Key::Escape,
                 physical_key: None,

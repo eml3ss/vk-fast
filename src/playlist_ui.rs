@@ -810,8 +810,9 @@ fn menu_row(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::
     .inner
 }
 
-/// Tags under the header. Picking one hides the others behind a reset
-/// button; playlists also offer "Created by you".
+/// Tags under the header, in one row that slides like Home's carousels when
+/// it does not fit. Picking one hides the others behind a reset button;
+/// playlists also offer "Created by you".
 fn filter_chips(
     ui: &mut egui::Ui,
     language: Language,
@@ -819,6 +820,12 @@ fn filter_chips(
     items: &[PlaylistItem],
     artists: &[FollowedArtist],
 ) {
+    #[derive(Clone, Copy)]
+    enum Tag {
+        Reset,
+        Kind(LibraryFilter),
+        Own,
+    }
     let available = |filter| match filter {
         LibraryFilter::Playlists => items
             .iter()
@@ -836,44 +843,76 @@ fn filter_chips(
         LibraryFilter::Albums,
         LibraryFilter::Artists,
     ];
-    if search.filter.is_none() && all.iter().filter(|filter| available(**filter)).count() < 2 {
+    let tags: Vec<Tag> = match search.filter {
+        None => all
+            .into_iter()
+            .filter(|filter| available(*filter))
+            .map(Tag::Kind)
+            .collect(),
+        Some(filter) => {
+            let mut tags = vec![Tag::Reset, Tag::Kind(filter)];
+            if filter == LibraryFilter::Playlists
+                && items
+                    .iter()
+                    .any(|item| item.kind == CollectionKind::Playlist && item.can_edit)
+            {
+                tags.push(Tag::Own);
+            }
+            tags
+        }
+    };
+    if search.filter.is_none() && tags.len() < 2 {
         return;
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        ui.add_space(2.0);
-        match search.filter {
-            None => {
-                for filter in all.into_iter().filter(|filter| available(*filter)) {
-                    if chip(ui, label(filter), false).clicked() {
-                        search.filter = Some(filter);
-                        search.own = false;
-                    }
-                }
+    let own = language.text("Созданные вами", "By you");
+    let text = |tag| match tag {
+        Tag::Reset => "",
+        Tag::Kind(filter) => label(filter),
+        Tag::Own => own,
+    };
+    let mut spans = Vec::with_capacity(tags.len());
+    let mut x = 0.0;
+    for tag in &tags {
+        let width = match tag {
+            Tag::Reset => CHIP_HEIGHT,
+            _ => chip_width(ui, text(*tag)),
+        };
+        spans.push((x, width));
+        x += width + 6.0;
+    }
+    let (filter, own_only) = (search.filter, search.own);
+    let mut clicked = None;
+    crate::carousel::carousel(
+        ui,
+        "library-tags",
+        &spans,
+        CHIP_HEIGHT,
+        language,
+        |ui, index| {
+            let tag = tags[index];
+            let response = match tag {
+                Tag::Reset => reset_chip(ui, language.text("Сбросить фильтр", "Clear filter")),
+                Tag::Kind(kind) => chip(ui, text(tag), filter == Some(kind)),
+                Tag::Own => chip(ui, text(tag), own_only),
+            };
+            if response.clicked() {
+                clicked = Some(tag);
             }
-            Some(filter) => {
-                if reset_chip(ui, language.text("Сбросить фильтр", "Clear filter")).clicked()
-                {
-                    search.filter = None;
-                    search.own = false;
-                    return;
-                }
-                if chip(ui, label(filter), true).clicked() {
-                    search.filter = None;
-                    search.own = false;
-                    return;
-                }
-                if filter == LibraryFilter::Playlists
-                    && items
-                        .iter()
-                        .any(|item| item.kind == CollectionKind::Playlist && item.can_edit)
-                    && chip(ui, language.text("Созданные вами", "By you"), search.own).clicked()
-                {
-                    search.own = !search.own;
-                }
-            }
+        },
+    );
+    match clicked {
+        // The selected tag also clears the filter, like the reset button.
+        Some(Tag::Reset | Tag::Kind(_)) if search.filter.is_some() => {
+            search.filter = None;
+            search.own = false;
         }
-    });
+        Some(Tag::Kind(kind)) => {
+            search.filter = Some(kind);
+            search.own = false;
+        }
+        Some(Tag::Own) => search.own = !search.own,
+        _ => {}
+    }
     ui.add_space(8.0);
 }
 
@@ -890,11 +929,19 @@ fn chip_paint(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, select
     ui.painter().rect_filled(rect, rect.height() * 0.5, fill);
 }
 
+fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), Color32::WHITE)
+        .size()
+        .x
+        + 24.0
+}
+
 fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let galley =
         ui.painter()
             .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), Color32::WHITE);
-    let size = egui::vec2(galley.size().x + 24.0, CHIP_HEIGHT);
+    let size = egui::vec2(chip_width(ui, text), CHIP_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     chip_paint(ui, rect, &response, selected);
     let color = if selected {
@@ -1274,8 +1321,8 @@ mod tests {
             h.search.query = "Saved".into();
             let (filtered_album, _) = h.draw(Vec::new());
             assert!(
-                // Below the header, the search field and the wrapped tags.
-                text_rect(&filtered_album, "Saved release").unwrap().top() < 200.0,
+                // Below the header, the search field and one row of tags.
+                text_rect(&filtered_album, "Saved release").unwrap().top() < 166.0,
                 "Filtered rows must appear immediately at the start of the list"
             );
             let (closed, _) = h.click(search_button);
@@ -1363,8 +1410,15 @@ mod tests {
         };
         draw(&mut search, Vec::new());
         let all = draw(&mut search, Vec::new());
+        let row = text_rect(&all, "Плейлисты").unwrap().center().y;
         for tag in ["Плейлисты", "Альбомы", "Исполнители"] {
-            assert!(text_rect(&all, tag).is_some(), "{tag}");
+            let rect = text_rect(&all, tag).unwrap_or_else(|| panic!("{tag}"));
+            // Glyph bounds differ slightly (descenders); a second row would
+            // be a whole tag height lower.
+            assert!(
+                (rect.center().y - row).abs() < 5.0,
+                "Tags share one row: {tag}"
+            );
         }
         let albums = text_rect(&all, "Альбомы").unwrap().center();
         draw(&mut search, click(albums));
@@ -1397,9 +1451,13 @@ mod tests {
         let only_playlists = draw(&mut search, Vec::new());
         assert!(text_rect(&only_playlists, "Saved playlist").is_some());
         assert!(text_rect(&only_playlists, "Saved release").is_none());
+        // The row overflows the narrow sidebar: click the tag's visible start,
+        // left of the carousel's edge arrow.
         let by_you = text_rect(&only_playlists, "Созданные вами")
             .unwrap()
-            .center();
+            .left_center()
+            + egui::vec2(4.0, 0.0);
+        assert!(by_you.x < 232.0 - 40.0, "{by_you:?}");
         draw(&mut search, click(by_you));
         let own_only = draw(&mut search, Vec::new());
         assert!(search.own);
