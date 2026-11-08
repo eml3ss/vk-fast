@@ -49,6 +49,7 @@ mod qr_login_ui;
 mod recent_cache;
 mod release_info;
 mod repaint_target;
+mod screen_cache;
 mod scrolling;
 mod search_swipe;
 mod search_ui;

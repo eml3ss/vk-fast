@@ -34,6 +34,8 @@ mod owner_page_tests;
 mod playlist_actions;
 #[path = "queue_app.rs"]
 mod queue_app;
+#[path = "screen_cache_app.rs"]
+mod screen_cache_app;
 #[path = "system_media_app.rs"]
 mod system_media_app;
 #[path = "track_view_cache.rs"]
@@ -1258,6 +1260,12 @@ pub struct MusicApp {
     click_behavior_save_failed: bool,
     search_on_enter: bool,
     search_on_enter_save_failed: bool,
+    mix_after_queue: bool,
+    mix_after_queue_save_failed: bool,
+    screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
+    screen_cache_owner: Option<i64>,
+    broadcast: bool,
+    broadcast_save_failed: bool,
     window_reopen: bool,
     /// Outer widths of the navigation and the lyrics/queue panels, as the
     /// user last dragged them. Saved with the window geometry.
@@ -1593,6 +1601,12 @@ impl MusicApp {
             click_behavior_save_failed: false,
             search_on_enter: preferences::load_search_on_enter(),
             search_on_enter_save_failed: false,
+            mix_after_queue: preferences::load_mix_after_queue(),
+            mix_after_queue_save_failed: false,
+            screen_cache: None,
+            screen_cache_owner: None,
+            broadcast: preferences::load_broadcast(),
+            broadcast_save_failed: false,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
@@ -1787,6 +1801,8 @@ impl MusicApp {
             request.canceled.store(true, Ordering::Release);
         }
         self.pending_link = None;
+        self.screen_cache = None;
+        self.screen_cache_owner = None;
         self.audio_upload = audio_upload_app::State::default();
         self.cancel_qr();
         self.stop_playback();
@@ -2530,7 +2546,53 @@ impl MusicApp {
 
     fn next_track(&mut self, ctx: &egui::Context) {
         self.unavailable_playback.clear();
+        if self.restart_repeated_track(ctx) {
+            return;
+        }
         self.advance_track(ctx, false);
+    }
+
+    /// Set or clear the account's "now playing" status. Fire and forget: a
+    /// failure leaves the status as it was and never stops playback.
+    fn send_broadcast(&mut self, key: Option<(i64, i64)>) {
+        if self.demo || cfg!(test) {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-broadcast".into())
+            .spawn(move || {
+                let result = client.set_broadcast(owner, key, &AtomicBool::new(false));
+                crate::diagnostics::event(
+                    "broadcast",
+                    match (&result, key.is_some()) {
+                        (Ok(()), true) => "set",
+                        (Ok(()), false) => "cleared",
+                        (Err(_), _) => "failed",
+                    },
+                );
+            })
+        {
+            self.workers.push(worker);
+        }
+    }
+
+    /// With repeat one, Next plays the current track again from the start.
+    fn restart_repeated_track(&mut self, ctx: &egui::Context) -> bool {
+        self.synchronize_order();
+        let Some(key) = self
+            .play_order
+            .repeats(self.playing.as_ref().map(Track::key))
+        else {
+            return false;
+        };
+        self.cancel_delayed_advance();
+        self.play_track(ctx, key);
+        true
     }
 
     fn advance_track(&mut self, ctx: &egui::Context, natural_end: bool) {
@@ -2586,6 +2648,16 @@ impl MusicApp {
             if self.pending.is_none() {
                 self.load_page(ctx, false);
             }
+        } else if self.mix_after_queue
+            && !self.mix_active
+            && let Some(last) = self.playing.as_ref().map(Track::key)
+        {
+            // The queue has ended: carry on with a mix of the last track.
+            if !self.unavailable_playback.allow_continuation() {
+                self.stop_unavailable_recovery();
+                return;
+            }
+            self.play_track_mix(ctx, last);
         }
     }
 
@@ -2616,6 +2688,9 @@ impl MusicApp {
                         self.recent.insert(0, resolved.track.clone());
                         self.recent.truncate(recent_cache::MAX_RECENT);
                         self.save_recent(ctx);
+                        if self.broadcast {
+                            self.send_broadcast(Some(resolved.track.key()));
+                        }
                         let position = self.resume_position.take().unwrap_or(0.0);
                         self.player
                             .play_cached(resolved.cache_key, resolved.url, position);
@@ -4485,6 +4560,7 @@ impl MusicApp {
         let owner = session.profile.id;
         self.playlists_requested = true;
         self.playlist_error = None;
+        self.start_screen_cache(ctx);
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -4552,6 +4628,7 @@ impl MusicApp {
                 self.remember_playlist_order();
                 self.sync_playlist_pins();
                 self.playlist_error = None;
+                self.save_library_cache();
             }
             Err(
                 error @ (WebAudioError::Expired
@@ -4743,6 +4820,7 @@ impl MusicApp {
         let owner = session.profile.id;
         self.home_requested = true;
         self.home_error = None;
+        self.start_screen_cache(ctx);
         self.load_home_catalog(ctx, client.clone(), owner);
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
@@ -4950,6 +5028,7 @@ impl MusicApp {
         if let Ok(catalog) = result {
             self.home_catalog = catalog;
             self.rebuild_home_collections();
+            self.save_home_cache();
         }
     }
 
@@ -5011,6 +5090,7 @@ impl MusicApp {
                 self.home_sources = sources;
                 self.rebuild_home_collections();
                 self.home_error = None;
+                self.save_home_cache();
             }
             Ok(HomeReply::Tracks(id, tracks)) => {
                 let autoplay = self
@@ -6345,6 +6425,10 @@ impl MusicApp {
         if refresh {
             let ctx = ui.ctx().clone();
             self.load_home(&ctx);
+            // Home shows the My music track count: refresh it too.
+            if self.pending.is_none() {
+                self.load_page(&ctx, true);
+            }
         }
         ui.add_space(8.0);
         #[cfg(feature = "screenshot")]
@@ -8668,7 +8752,12 @@ impl MusicApp {
                 Setting::DoubleClickPlay,
                 Setting::SearchOnEnter,
             ],
-            SettingsSection::Playback => &[Setting::NormalizeVolume, Setting::Lyrics],
+            SettingsSection::Playback => &[
+                Setting::NormalizeVolume,
+                Setting::MixAfterQueue,
+                Setting::Broadcast,
+                Setting::Lyrics,
+            ],
             SettingsSection::Cache => &[
                 Setting::CacheLimit,
                 Setting::CacheClear,
@@ -8990,8 +9079,81 @@ impl MusicApp {
                         );
                     }
                 }
-                if query.matches(Setting::Lyrics) {
+                if query.matches(Setting::MixAfterQueue) {
                     if query.matches(Setting::NormalizeVolume) {
+                        ui.add_space(16.0);
+                    }
+                    let label = t(
+                        "Включать микс, когда очередь закончится",
+                        "Start a mix when the queue ends",
+                    );
+                    if theme::switch(ui, &mut self.mix_after_queue, label).changed() {
+                        self.mix_after_queue_save_failed = !cfg!(test)
+                            && preferences::save_mix_after_queue(self.mix_after_queue).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Музыка продолжится миксом, похожим на последний трек.",
+                            "Music continues with a mix based on the last track.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.mix_after_queue_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                }
+                if query.matches(Setting::Broadcast) {
+                    if query.matches(Setting::NormalizeVolume)
+                        || query.matches(Setting::MixAfterQueue)
+                    {
+                        ui.add_space(16.0);
+                    }
+                    let label = t(
+                        "Транслировать аудиозаписи на мою страницу",
+                        "Show what I listen to on my page",
+                    );
+                    if theme::switch(ui, &mut self.broadcast, label).changed() {
+                        self.broadcast_save_failed =
+                            !cfg!(test) && preferences::save_broadcast(self.broadcast).is_err();
+                        let key = self
+                            .broadcast
+                            .then(|| self.playing.as_ref().map(Track::key))
+                            .flatten();
+                        // On: show the playing track now. Off: clear the status.
+                        if !self.broadcast || key.is_some() {
+                            self.send_broadcast(key);
+                        }
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Играющий трек показывается в статусе вашей страницы VK.",
+                            "The playing track is shown in your VK page status.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.broadcast_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                }
+                if query.matches(Setting::Lyrics) {
+                    if query.matches(Setting::NormalizeVolume)
+                        || query.matches(Setting::MixAfterQueue)
+                        || query.matches(Setting::Broadcast)
+                    {
                         ui.add_space(18.0);
                     }
                     self.lyrics_settings(ui);
@@ -9414,6 +9576,7 @@ impl MusicApp {
         self.poll_system_media(ctx, frame);
         self.poll_lyrics(ctx);
         self.poll(ctx);
+        self.poll_screen_cache();
         self.poll_home(ctx);
         self.poll_home_catalog();
         self.poll_playlists(ctx);
@@ -9540,6 +9703,8 @@ fn read_only_worker(name: Option<&str>) -> bool {
                 | "vk-playlist-play"
                 | "vk-qr-login"
                 | "vk-window-focus"
+                | "vk-broadcast"
+                | "vk-screen-cache"
         )
     )
 }
@@ -10039,6 +10204,12 @@ mod tests {
             click_behavior_save_failed: false,
             search_on_enter: true,
             search_on_enter_save_failed: false,
+            mix_after_queue: false,
+            mix_after_queue_save_failed: false,
+            screen_cache: None,
+            screen_cache_owner: None,
+            broadcast: false,
+            broadcast_save_failed: false,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),

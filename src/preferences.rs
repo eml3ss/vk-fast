@@ -26,6 +26,7 @@ const DEFAULT_LOGGING_ENABLED: bool = false;
 const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
 const DEFAULT_AUTO_UPDATES: bool = true;
 const DEFAULT_SEARCH_ON_ENTER: bool = true;
+const DEFAULT_MIX_AFTER_QUEUE: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -59,6 +60,11 @@ struct Preferences {
     auto_updates: bool,
     #[serde(deserialize_with = "deserialize_search_on_enter")]
     search_on_enter: bool,
+    #[serde(deserialize_with = "deserialize_mix_after_queue")]
+    mix_after_queue: bool,
+    /// Off unless the user turns it on: it changes the account's page.
+    #[serde(deserialize_with = "deserialize_broadcast")]
+    broadcast: bool,
     /// The browser that receives non-music links while VK Fast handles web
     /// links: a desktop entry id on Linux, a ProgId on Windows.
     #[serde(
@@ -87,6 +93,8 @@ impl Default for Preferences {
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
             auto_updates: DEFAULT_AUTO_UPDATES,
             search_on_enter: DEFAULT_SEARCH_ON_ENTER,
+            mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
+            broadcast: false,
             link_browser: String::new(),
             extra: serde_json::Map::new(),
         }
@@ -224,6 +232,22 @@ fn deserialize_search_on_enter<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_SEARCH_ON_ENTER))
+}
+
+fn deserialize_mix_after_queue<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(DEFAULT_MIX_AFTER_QUEUE))
+}
+
+fn deserialize_broadcast<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
 }
 
 fn invalid() -> io::Error {
@@ -698,6 +722,34 @@ pub fn load_discord_rpc_enabled() -> bool {
 
 pub fn save_discord_rpc_enabled(enabled: bool) -> io::Result<()> {
     save_discord_rpc_at(&preferences_path()?, enabled)
+}
+
+pub fn load_mix_after_queue() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_MIX_AFTER_QUEUE, |preferences| {
+            preferences.mix_after_queue
+        })
+}
+
+pub fn save_mix_after_queue(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.mix_after_queue = enabled
+    })
+}
+
+pub fn load_broadcast() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.broadcast)
+}
+
+pub fn save_broadcast(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.broadcast = enabled
+    })
 }
 
 pub fn load_search_on_enter() -> bool {

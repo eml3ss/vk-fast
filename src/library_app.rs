@@ -176,6 +176,7 @@ impl MusicApp {
                         }
                         self.library_browser.artists = items;
                         self.library_browser.error = None;
+                        self.save_library_cache();
                     }
                     Err(WebAudioError::Canceled) => {}
                     Err(error) => self.library_browser.error = Some(error),

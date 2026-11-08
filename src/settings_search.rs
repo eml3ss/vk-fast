@@ -15,6 +15,8 @@ pub enum Setting {
     DoubleClickPlay,
     SearchOnEnter,
     NormalizeVolume,
+    MixAfterQueue,
+    Broadcast,
     Lyrics,
     MinimizeToTray,
     LinkHandler,
@@ -67,6 +69,12 @@ impl Query {
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"
+            }
+            Setting::MixAfterQueue => {
+                "воспроизведение микс конец очереди закончится продолжать продолжение автоматически по треку похожие playback mix end of queue continue autoplay similar track radio"
+            }
+            Setting::Broadcast => {
+                "воспроизведение транслировать трансляция статус страница моя аудиозаписи музыка друзья playback broadcast status page profile now playing friends"
             }
             Setting::Lyrics => {
                 "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный доступ токен ключ playback lyrics musixmatch vk genius source fallback anonymous token api key synced источник резервный"

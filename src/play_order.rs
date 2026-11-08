@@ -157,7 +157,15 @@ impl PlaybackOrder {
         current: Option<TrackKey>,
         allow_wrap: bool,
     ) -> Option<TrackKey> {
-        let target = *self.upcoming(current, allow_wrap).get(position)?;
+        let mut position = position;
+        if let Some(key) = self.repeats(current) {
+            // The first row is the repeated current track: play it again.
+            if position == 0 {
+                return Some(key);
+            }
+            position -= 1;
+        }
+        let target = *self.upcoming_after(current, allow_wrap).get(position)?;
         let future = if current.is_some_and(|key| self.history.get(self.cursor) == Some(&key)) {
             self.history.len() - self.cursor - 1
         } else {
@@ -202,7 +210,29 @@ impl PlaybackOrder {
     }
 
     /// A read-only snapshot for the menu. It never draws a new shuffle order.
+    /// Repeat one replays the current track, so it is also the next one.
+    pub fn repeats(&self, current: Option<TrackKey>) -> Option<TrackKey> {
+        current.filter(|key| {
+            self.repeat == RepeatMode::One
+                && (self.keys.contains(key) || self.is_queued_current(*key))
+        })
+    }
+
     pub fn upcoming(&self, current: Option<TrackKey>, allow_wrap: bool) -> Vec<Upcoming> {
+        let mut result = self.upcoming_after(current, allow_wrap);
+        if let Some(key) = self.repeats(current) {
+            result.insert(
+                0,
+                Upcoming {
+                    key,
+                    queued_id: None,
+                },
+            );
+        }
+        result
+    }
+
+    fn upcoming_after(&self, current: Option<TrackKey>, allow_wrap: bool) -> Vec<Upcoming> {
         let mut result = Vec::new();
         let mut anchor = current.and_then(|key| self.anchor(key));
         if current.is_some_and(|key| self.history.get(self.cursor) == Some(&key)) {
@@ -928,6 +958,30 @@ mod tests {
         assert_eq!(order.advance_next(next, false, false), Some(next));
         assert!(!order.is_queued_current(next));
         assert!(!order.remaining.contains(&next));
+    }
+
+    #[test]
+    fn repeat_one_lists_the_current_track_next_and_its_row_replays_it() {
+        let keys = keys(3);
+        let mut order = PlaybackOrder::default();
+        order.sync(&keys, Some(keys[0]));
+        let before: Vec<_> = order
+            .upcoming(Some(keys[0]), true)
+            .iter()
+            .map(|row| row.key)
+            .collect();
+        order.cycle_repeat();
+        order.cycle_repeat();
+        let upcoming: Vec<_> = order
+            .upcoming(Some(keys[0]), true)
+            .iter()
+            .map(|row| row.key)
+            .collect();
+        assert_eq!(upcoming[0], keys[0]);
+        assert_eq!(&upcoming[1..], &before[..]);
+        assert_eq!(order.repeats(Some(keys[0])), Some(keys[0]));
+        assert_eq!(order.jump_to(0, Some(keys[0]), true), Some(keys[0]));
+        assert_eq!(order.jump_to(2, Some(keys[0]), true), Some(keys[2]));
     }
 
     #[test]

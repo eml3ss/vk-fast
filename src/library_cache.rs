@@ -188,7 +188,7 @@ fn valid_metadata(id: i64, owner_id: i64, artist: &str, title: &str, cover: Opti
         && cover.is_none_or(|url| valid_cover_url(url).is_some())
 }
 
-fn cache_path(account_id: i64) -> io::Result<PathBuf> {
+pub(crate) fn cache_path(account_id: i64) -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
         if account_id <= 0 {

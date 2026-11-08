@@ -40,7 +40,6 @@ mod playlist_follow;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
 pub use artist_follow::FollowedArtist;
-#[cfg(test)]
 pub use home_catalog::MixTile;
 pub use home_catalog::{ArtistMix, CatalogMix, FriendPlaylist, HomeCatalog};
 pub use owner_page::OwnerPage;
@@ -1765,6 +1764,32 @@ impl WebAudioClient {
         self.tracks_metadata(expected_owner, &[key], canceled)?
             .pop()
             .ok_or(WebAudioError::Format)
+    }
+
+    /// Show the playing track on the account's page ("broadcast to status"),
+    /// or clear it with `None`. Only sent while the user has it enabled.
+    pub fn set_broadcast(
+        &self,
+        expected_owner: i64,
+        key: Option<(i64, i64)>,
+        canceled: &AtomicBool,
+    ) -> Result<(), WebAudioError> {
+        let mut params = Vec::new();
+        if let Some(key) = key {
+            if key.0 == 0 || key.1 <= 0 {
+                return Err(WebAudioError::Format);
+            }
+            params.push(("audio", format!("{}_{}", key.0, key.1)));
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        self.detail_request(
+            expected_owner,
+            generation,
+            "audio.setBroadcast",
+            params,
+            canceled,
+        )?;
+        Ok(())
     }
 
     /// Lyrics use the exact audio identity and the existing verified web session.

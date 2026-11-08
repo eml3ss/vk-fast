@@ -301,6 +301,9 @@ impl MusicApp {
         if !next && self.restart_track_after_three_seconds() {
             return;
         }
+        if next && self.restart_repeated_track(ctx) {
+            return;
+        }
         self.cancel_delayed_advance();
         self.synchronize_order();
         let current = self.playing.as_ref().map(Track::key).or(self.selected);
