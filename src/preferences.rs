@@ -60,6 +60,8 @@ struct Preferences {
     auto_updates: bool,
     #[serde(deserialize_with = "deserialize_search_on_enter")]
     search_on_enter: bool,
+    #[serde(deserialize_with = "deserialize_middle_autoscroll")]
+    middle_autoscroll: bool,
     #[serde(deserialize_with = "deserialize_mix_after_queue")]
     mix_after_queue: bool,
     /// Off unless the user turns it on: it changes the account's page.
@@ -93,6 +95,7 @@ impl Default for Preferences {
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
             auto_updates: DEFAULT_AUTO_UPDATES,
             search_on_enter: DEFAULT_SEARCH_ON_ENTER,
+            middle_autoscroll: false,
             mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
             broadcast: false,
             link_browser: String::new(),
@@ -243,6 +246,14 @@ fn deserialize_mix_after_queue<'de, D: serde::Deserializer<'de>>(
 }
 
 fn deserialize_broadcast<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
+}
+
+fn deserialize_middle_autoscroll<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<bool, D::Error> {
     Ok(serde_json::Value::deserialize(deserializer)?
@@ -749,6 +760,19 @@ pub fn load_broadcast() -> bool {
 pub fn save_broadcast(enabled: bool) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.broadcast = enabled
+    })
+}
+
+pub fn load_middle_autoscroll() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.middle_autoscroll)
+}
+
+pub fn save_middle_autoscroll(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.middle_autoscroll = enabled
     })
 }
 

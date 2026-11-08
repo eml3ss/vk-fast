@@ -14,6 +14,7 @@ pub enum Setting {
     CompactSeek,
     DoubleClickPlay,
     SearchOnEnter,
+    MiddleAutoscroll,
     NormalizeVolume,
     MixAfterQueue,
     Broadcast,
@@ -66,6 +67,9 @@ impl Query {
             }
             Setting::SearchOnEnter => {
                 "интерфейс поиск искать энтер enter ввод нажатие клавиша сразу при вводе текста interface search enter key press instant typing as you type"
+            }
+            Setting::MiddleAutoscroll => {
+                "интерфейс автопрокрутка прокрутка колёсико колесико средняя кнопка мыши щелчок interface autoscroll auto scroll middle click mouse wheel button"
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"

@@ -1260,6 +1260,11 @@ pub struct MusicApp {
     click_behavior_save_failed: bool,
     search_on_enter: bool,
     search_on_enter_save_failed: bool,
+    middle_autoscroll: bool,
+    middle_autoscroll_save_failed: bool,
+    autoscroll: crate::autoscroll::Autoscroll,
+    /// The page area of the last frame, where a middle click autoscrolls.
+    page_rect: egui::Rect,
     mix_after_queue: bool,
     mix_after_queue_save_failed: bool,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
@@ -1601,6 +1606,10 @@ impl MusicApp {
             click_behavior_save_failed: false,
             search_on_enter: preferences::load_search_on_enter(),
             search_on_enter_save_failed: false,
+            middle_autoscroll: preferences::load_middle_autoscroll(),
+            middle_autoscroll_save_failed: false,
+            autoscroll: Default::default(),
+            page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
             mix_after_queue_save_failed: false,
             screen_cache: None,
@@ -8799,6 +8808,7 @@ impl MusicApp {
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
                 Setting::SearchOnEnter,
+                Setting::MiddleAutoscroll,
             ],
             SettingsSection::Playback => &[
                 Setting::NormalizeVolume,
@@ -9013,6 +9023,7 @@ impl MusicApp {
                     if query.matches(Setting::CompactSeek)
                         || query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::MiddleAutoscroll)
                     {
                         ui.add_space(16.0);
                     }
@@ -9041,6 +9052,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::MiddleAutoscroll)
                     {
                         ui.add_space(16.0);
                     }
@@ -9091,6 +9103,36 @@ impl MusicApp {
                             t(
                                 "Не удалось сохранить настройку поиска.",
                                 "Could not save the search preference.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::MiddleAutoscroll) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::MiddleAutoscroll) {
+                    let label = t(
+                        "Автопрокрутка по щелчку колёсиком",
+                        "Autoscroll on middle click",
+                    );
+                    if theme::switch(ui, &mut self.middle_autoscroll, label).changed() {
+                        self.middle_autoscroll_save_failed = !cfg!(test)
+                            && preferences::save_middle_autoscroll(self.middle_autoscroll).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Щёлкните колёсиком на странице и ведите мышь вверх или вниз. Любой щелчок останавливает прокрутку.",
+                            "Middle-click a page and move the mouse up or down. Any click stops scrolling.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.middle_autoscroll_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
                             ),
                         );
                     }
@@ -9363,6 +9405,10 @@ impl MusicApp {
 
     fn render(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
+        if ui.ctx().current_pass_index() == 0 {
+            let enabled = self.middle_autoscroll && !self.lyrics.fullscreen;
+            self.autoscroll.apply(ui.ctx(), enabled, self.page_rect);
+        }
         self.poll_lyrics(ui.ctx());
         if self.lyrics.fullscreen
             && !egui::Popup::is_any_open(ui.ctx())
@@ -9443,7 +9489,7 @@ impl MusicApp {
             )
             .show(ui, |ui| self.toolbar(ui));
         self.right_panel(ui);
-        egui::CentralPanel::default()
+        let page = egui::CentralPanel::default()
             .frame(Frame::new().fill(BACKGROUND).inner_margin(egui::Margin {
                 left: 8,
                 right: 8,
@@ -9468,6 +9514,7 @@ impl MusicApp {
                     self.content(ui);
                 }
             });
+        self.page_rect = page.response.rect;
         let _ = self.qr_window(ui.ctx());
         self.mix_settings_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
@@ -10263,6 +10310,10 @@ mod tests {
             click_behavior_save_failed: false,
             search_on_enter: true,
             search_on_enter_save_failed: false,
+            middle_autoscroll: false,
+            middle_autoscroll_save_failed: false,
+            autoscroll: Default::default(),
+            page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,
             mix_after_queue_save_failed: false,
             screen_cache: None,

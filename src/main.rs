@@ -12,6 +12,7 @@ mod audio_cache;
 mod audio_output;
 mod audio_upload;
 mod audio_upload_ui;
+mod autoscroll;
 mod avatar_cache;
 mod carousel;
 mod client_platform;
