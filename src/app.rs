@@ -564,6 +564,21 @@ impl Drop for DetailRequest {
     }
 }
 
+/// The page a VK Music link opens: a track opens its album or single.
+fn link_page(target: crate::link_router::Target) -> MusicPage {
+    match target {
+        crate::link_router::Target::Track(key) => MusicPage::TrackAlbum(key, String::new()),
+        crate::link_router::Target::Album(album) => MusicPage::Album(album),
+        crate::link_router::Target::Playlist(playlist) => MusicPage::Playlist(playlist),
+        crate::link_router::Target::Artist(artist) => MusicPage::Artist(artist),
+    }
+}
+
+type LinkHandlerReply = (
+    Option<Result<(), crate::link_router::RouterError>>,
+    crate::link_router::Status,
+);
+
 enum TrackAction {
     Menu(Track, track_menu::Action),
     ToggleLike(Track),
@@ -1182,6 +1197,12 @@ pub struct MusicApp {
     discord_rpc: discord_rpc_app::State,
     discord_rpc_enabled: bool,
     discord_rpc_save_failed: bool,
+    /// The system link handler as last read; None until Settings load it.
+    link_handler: Option<crate::link_router::Status>,
+    link_handler_pending: Option<Receiver<LinkHandlerReply>>,
+    link_handler_error: Option<crate::link_router::RouterError>,
+    /// A VK Music link from the system, opened once music is connected.
+    pending_link: Option<crate::link_router::Target>,
     #[cfg(any(windows, test))]
     updater: update_app::State,
     playing: Option<Track>,
@@ -1277,6 +1298,7 @@ impl MusicApp {
         if opening_settings {
             self.start_cache_job(ctx, CacheAction::Info);
             self.start_storage_job(ctx, StorageAction::Info);
+            self.start_link_handler_job(ctx, None);
         }
         if restore_pending
             && !self.settings_open
@@ -1506,6 +1528,10 @@ impl MusicApp {
             discord_rpc: discord_rpc_app::State::default(),
             discord_rpc_enabled: preferences::load_discord_rpc_enabled(),
             discord_rpc_save_failed: false,
+            link_handler: None,
+            link_handler_pending: None,
+            link_handler_error: None,
+            pending_link: None,
             #[cfg(any(windows, test))]
             updater: if cfg!(test) {
                 update_app::State::default()
@@ -7908,6 +7934,171 @@ impl MusicApp {
 
     /// Measure artwork and history, or clear artwork, off the UI thread.
     /// Runs when Settings open and after a change, never on a timer.
+    /// Read the system link handler, or turn it on or off first. Runs when
+    /// Settings open and on the switch, off the UI thread.
+    fn start_link_handler_job(&mut self, ctx: &egui::Context, enable: Option<bool>) {
+        // Tests never read or change the system's link handlers.
+        if cfg!(test) || self.link_handler_pending.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        self.workers.retain(|worker| !worker.is_finished());
+        match thread::Builder::new()
+            .name("vk-link-handler".into())
+            .spawn(move || {
+                let result = enable.map(|enable| {
+                    if enable {
+                        crate::link_router::enable()
+                    } else {
+                        crate::link_router::disable()
+                    }
+                });
+                let _ = sender.send((result, crate::link_router::status()));
+                ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.link_handler_pending = Some(receiver);
+            }
+            Err(_) => self.link_handler_error = Some(crate::link_router::RouterError::System),
+        }
+    }
+
+    fn poll_link_handler(&mut self) {
+        let Some(receiver) = &self.link_handler_pending else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((result, status)) => {
+                self.link_handler_pending = None;
+                if let Some(result) = result {
+                    self.link_handler_error = result.err();
+                }
+                self.link_handler = Some(status);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.link_handler_pending = None;
+                self.link_handler_error = Some(crate::link_router::RouterError::System);
+            }
+        }
+    }
+
+    /// Take links sent by later launches and open the newest one as soon as
+    /// the music session can load it.
+    fn poll_links(&mut self, ctx: &egui::Context) {
+        if let Some(activation) = &self.instance_activation {
+            for link in activation.take_links() {
+                if let Some(target) = crate::link_router::parse(&link) {
+                    self.pending_link = Some(target);
+                }
+            }
+        }
+        if self.demo
+            || !self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.music.is_some())
+        {
+            return;
+        }
+        let Some(target) = self.pending_link.take() else {
+            return;
+        };
+        if self.lyrics.fullscreen {
+            self.set_lyrics_fullscreen(ctx, false);
+        }
+        self.navigate_music(ctx, link_page(target));
+    }
+
+    fn link_handler_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        use crate::link_router::RouterError;
+        let language = self.language;
+        let t = |ru, en| language.text(ru, en);
+        let busy = self.link_handler_pending.is_some();
+        let status = self.link_handler.clone();
+        let mut enabled = status.as_ref().is_some_and(|status| status.enabled);
+        ui.horizontal(|ui| {
+            let changed = ui
+                .add_enabled_ui(status.is_some() && !busy, |ui| {
+                    theme::switch(
+                        ui,
+                        &mut enabled,
+                        t(
+                            "Открывать ссылки VK Музыки в VK Fast",
+                            "Open VK Music links in VK Fast",
+                        ),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed {
+                self.link_handler_error = None;
+                self.start_link_handler_job(ctx, Some(enabled));
+            }
+            if busy {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+        });
+        let browser = status
+            .as_ref()
+            .and_then(|status| status.browser.clone())
+            .map_or_else(
+                || t("в браузере", "in your browser").to_owned(),
+                |browser| format!("{} {browser}", t("в", "in")),
+            );
+        ui.label(
+            RichText::new(format!(
+                "{} {browser}.",
+                t(
+                    "Треки, альбомы, плейлисты и исполнители по ссылкам из других приложений откроются здесь, остальные ссылки —",
+                    "Tracks, albums, playlists and artists linked from other apps open here; other links open",
+                )
+            ))
+            .small()
+            .color(MUTED),
+        );
+        if status
+            .as_ref()
+            .is_some_and(|status| status.enabled && !status.active)
+        {
+            ui.label(
+                RichText::new(t(
+                    "Осталось выбрать VK Fast для ссылок HTTP и HTTPS в параметрах Windows.",
+                    "Now choose VK Fast for HTTP and HTTPS links in Windows Settings.",
+                ))
+                .small()
+                .color(MUTED),
+            );
+            if ui
+                .button(t("Открыть параметры Windows", "Open Windows Settings"))
+                .clicked()
+            {
+                let _ = open::that("ms-settings:defaultapps?registeredAppUser=VK%20Fast");
+            }
+        }
+        if let Some(error) = &self.link_handler_error {
+            ui.colored_label(
+                Color32::from_rgb(255, 158, 153),
+                match error {
+                    RouterError::NoBrowser => t(
+                        "Не найден браузер по умолчанию, которому VK Fast передавал бы остальные ссылки.",
+                        "No default browser was found to receive the other links.",
+                    ),
+                    RouterError::UnsupportedPath => t(
+                        "Путь к VK Fast содержит символы, которые нельзя записать в настройки системы.",
+                        "The path to VK Fast contains characters the system settings cannot store.",
+                    ),
+                    RouterError::System => t(
+                        "Не удалось изменить обработчик ссылок в системе.",
+                        "Could not change the system's link handler.",
+                    ),
+                },
+            );
+        }
+    }
+
     fn start_storage_job(&mut self, ctx: &egui::Context, action: StorageAction) {
         if self.storage_pending.is_some() {
             return;
@@ -8292,6 +8483,7 @@ impl MusicApp {
             SettingsSection::General => &[
                 Setting::Language,
                 Setting::MinimizeToTray,
+                Setting::LinkHandler,
                 Setting::DiscordRpc,
                 Setting::Logging,
             ],
@@ -8359,6 +8551,7 @@ impl MusicApp {
                         );
                     }
                     if query.matches(Setting::MinimizeToTray)
+                        || query.matches(Setting::LinkHandler)
                         || query.matches(Setting::DiscordRpc)
                         || query.matches(Setting::Logging)
                     {
@@ -8399,6 +8592,15 @@ impl MusicApp {
                             ),
                         );
                     }
+                    if query.matches(Setting::LinkHandler)
+                        || query.matches(Setting::DiscordRpc)
+                        || query.matches(Setting::Logging)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::LinkHandler) {
+                    self.link_handler_settings(ui, &ctx);
                     if query.matches(Setting::DiscordRpc) || query.matches(Setting::Logging) {
                         ui.add_space(16.0);
                     }
@@ -9000,6 +9202,8 @@ impl MusicApp {
         }
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
+        self.poll_links(ctx);
+        self.poll_link_handler();
         self.poll_system_media(ctx, frame);
         self.poll_lyrics(ctx);
         self.poll(ctx);
@@ -9560,6 +9764,10 @@ mod tests {
             discord_rpc: discord_rpc_app::State::default(),
             discord_rpc_enabled: false,
             discord_rpc_save_failed: false,
+            link_handler: None,
+            link_handler_pending: None,
+            link_handler_error: None,
+            pending_link: None,
             #[cfg(any(windows, test))]
             updater: update_app::State::default(),
             playing: None,
@@ -11968,6 +12176,112 @@ mod tests {
             cache_warning: false,
         });
         app
+    }
+
+    #[test]
+    fn links_from_later_launches_wait_for_music_and_open_the_newest_release() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        let activation = crate::single_instance::Activation::default();
+        app.attach_instance(activation.clone());
+        activation.open_link("https://vk.ru/audio1_2");
+        activation.open_link("https://example.com/not-music");
+        activation.open_link("https://vk.ru/music/album/-2000_5_ab");
+        app.poll_links(&ctx);
+        // No music session yet: the newest music link waits for it.
+        let album = AlbumRef {
+            id: 5,
+            owner_id: -2000,
+            title: String::new(),
+            access_key: Some("ab".into()),
+            cover_url: None,
+        };
+        assert_eq!(
+            app.pending_link,
+            Some(crate::link_router::Target::Album(album.clone()))
+        );
+        assert!(activation.take_links().is_empty());
+        assert!(app.page != MusicPage::Album(album.clone()));
+        assert!(app.workers.is_empty());
+        assert!(
+            link_page(crate::link_router::Target::Album(album.clone())) == MusicPage::Album(album)
+        );
+        assert!(
+            link_page(crate::link_router::Target::Track((1, 2)))
+                == MusicPage::TrackAlbum((1, 2), String::new())
+        );
+        let artist = ArtistRef {
+            id: "synthetic".into(),
+            name: "synthetic".into(),
+        };
+        assert!(
+            link_page(crate::link_router::Target::Artist(artist.clone()))
+                == MusicPage::Artist(artist)
+        );
+    }
+
+    #[test]
+    fn link_handler_switch_describes_the_browser_and_waits_for_windows_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.language = Language::Russian;
+        app.settings_open = true;
+        app.settings_section = SettingsSection::General;
+        app.link_handler = Some(crate::link_router::Status {
+            enabled: true,
+            active: false,
+            browser: Some("Helium".into()),
+        });
+        let mut frame = 0;
+        let mut output = account_ui_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(1040.0, 720.0),
+            &mut frame,
+            Vec::new(),
+        );
+        for _ in 0..2 {
+            output = account_ui_frame(
+                &ctx,
+                &mut app,
+                egui::vec2(1040.0, 720.0),
+                &mut frame,
+                Vec::new(),
+            );
+        }
+        assert!(account_ui_text_rect(&output, "Открывать ссылки VK Музыки в VK Fast").is_some());
+        let texts: Vec<String> = account_ui_shapes(&output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.ends_with("остальные ссылки — в Helium.")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("Осталось выбрать VK Fast"))
+        );
+        app.link_handler.as_mut().unwrap().active = true;
+        for _ in 0..2 {
+            output = account_ui_frame(
+                &ctx,
+                &mut app,
+                egui::vec2(1040.0, 720.0),
+                &mut frame,
+                Vec::new(),
+            );
+        }
+        assert!(account_ui_text_rect(&output, "Открыть параметры Windows").is_none());
+        assert!(SettingsQuery::new("ссылки браузер").matches(Setting::LinkHandler));
+        assert!(SettingsQuery::new("open links").matches(Setting::LinkHandler));
     }
 
     #[test]

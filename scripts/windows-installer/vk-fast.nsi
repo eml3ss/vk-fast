@@ -370,6 +370,10 @@ Section "Uninstall"
     Delete "$DESKTOP\VK Fast.lnk"
     DeleteRegKey HKCU "${UNINSTALL_KEY}"
     DeleteRegKey HKCU "${APP_KEY}"
+    ; "Open VK Music links in VK Fast" registration (Capabilities live under APP_KEY).
+    DeleteRegValue HKCU "Software\RegisteredApplications" "VK Fast"
+    DeleteRegKey HKCU "Software\Classes\VKFast.Link"
+    DeleteRegKey HKCU "Software\Classes\vkfast"
   ${EndIf}
   ; Remove only an empty installation folder. User config/cache are retained.
   RMDir "$INSTDIR"

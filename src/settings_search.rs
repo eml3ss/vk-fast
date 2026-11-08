@@ -16,6 +16,7 @@ pub enum Setting {
     NormalizeVolume,
     Lyrics,
     MinimizeToTray,
+    LinkHandler,
     Logging,
     DiscordRpc,
     CacheLimit,
@@ -68,6 +69,9 @@ impl Query {
             }
             Setting::MinimizeToTray => {
                 "общие системный трей сворачивать свернуть при закрытии закрытие фон значок general minimize minimise to system tray when close closing background icon"
+            }
+            Setting::LinkHandler => {
+                "общие ссылки ссылка открывать открытие браузер браузере по умолчанию вк vk музыка музыки обработчик приложение general links link open browser default handler vk music app"
             }
             Setting::Logging => {
                 "общие логи логирование журнал диагностика отладка запись файла ошибки general logs logging log diagnostic diagnostics debug file errors"

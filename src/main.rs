@@ -26,6 +26,7 @@ mod i18n;
 mod icons;
 mod keybinds;
 mod library_cache;
+mod link_router;
 mod lyrics;
 mod lyrics_ui;
 mod media_decoder;
@@ -196,6 +197,21 @@ fn main() -> eframe::Result {
         ui_fonts::diagnostic();
         return Ok(());
     }
+    // The system link handler: VK Music links open in VK Fast, every other
+    // link goes straight on to the user's browser without starting the player.
+    let open_link = match args.iter().position(|arg| arg == "--open-url") {
+        Some(position) => {
+            let Some(link) = args.get(position + 1) else {
+                eprintln!("--open-url requires a link.");
+                std::process::exit(2);
+            };
+            if link_router::parse(link).is_none() {
+                return forward_link(link);
+            }
+            Some(link.clone())
+        }
+        None => None,
+    };
     #[cfg(feature = "screenshot")]
     let screenshot_path = args
         .windows(2)
@@ -216,18 +232,28 @@ fn main() -> eframe::Result {
     };
     // Helpers and CLI checks above remain independent. Claim the GUI instance
     // before touching preferences, sessions, audio or diagnostic files.
-    let instance = match single_instance::acquire(|process_id| {
-        #[cfg(windows)]
-        let _ = eframe::allow_foreground_activation(process_id);
-        #[cfg(not(windows))]
-        let _ = process_id;
-    })
+    let instance = match single_instance::acquire(
+        |process_id| {
+            #[cfg(windows)]
+            let _ = eframe::allow_foreground_activation(process_id);
+            #[cfg(not(windows))]
+            let _ = process_id;
+        },
+        open_link.as_deref(),
+    )
     .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
     {
         single_instance::Acquisition::Primary(primary) => primary,
         single_instance::Acquisition::AlreadyRunning => return Ok(()),
     };
     let activation = instance.activations();
+    if let Some(link) = &open_link {
+        activation.open_link(link);
+    }
+    // Keep an enabled link handler pointing at this copy of the application.
+    let _ = std::thread::Builder::new()
+        .name("vk-link-handler".into())
+        .spawn(link_router::refresh_registration);
     #[cfg(windows)]
     {
         app_paths::config_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
@@ -294,6 +320,29 @@ fn main() -> eframe::Result {
     diagnostics::shutdown();
     drop(instance);
     result
+}
+
+/// Hand a non-music link to the browser chosen before VK Fast took over web
+/// links. Never reopens it through the system: that would come back here.
+fn forward_link(link: &str) -> eframe::Result {
+    let web = link.starts_with("https://") || link.starts_with("http://");
+    if web && link.len() <= link_router::MAX_URL && link_router::forward(link).is_ok() {
+        return Ok(());
+    }
+    eprintln!("VK Fast could not pass the link to a browser.");
+    #[cfg(target_os = "linux")]
+    if web {
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "VK Fast",
+                "Не удалось открыть ссылку в браузере. Отключите «Открывать ссылки VK Музыки в VK Fast» или выберите браузер в настройках системы.",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    std::process::exit(1);
 }
 
 fn check_playlists() -> Result<(), String> {

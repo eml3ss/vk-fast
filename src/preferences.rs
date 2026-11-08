@@ -56,6 +56,13 @@ struct Preferences {
     discord_rpc_enabled: bool,
     #[serde(deserialize_with = "deserialize_auto_updates")]
     auto_updates: bool,
+    /// The browser that receives non-music links while VK Fast handles web
+    /// links: a desktop entry id on Linux, a ProgId on Windows.
+    #[serde(
+        deserialize_with = "deserialize_link_browser",
+        skip_serializing_if = "String::is_empty"
+    )]
+    link_browser: String,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -76,9 +83,20 @@ impl Default for Preferences {
             logging_enabled: DEFAULT_LOGGING_ENABLED,
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
             auto_updates: DEFAULT_AUTO_UPDATES,
+            link_browser: String::new(),
             extra: serde_json::Map::new(),
         }
     }
+}
+
+fn deserialize_link_browser<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .filter(|id| crate::link_router::valid_handler(id))
+        .unwrap_or_default()
+        .to_owned())
 }
 
 fn deserialize_shuffle<'de, D: serde::Deserializer<'de>>(
@@ -682,6 +700,26 @@ pub fn load_auto_updates() -> bool {
 pub fn save_auto_updates(enabled: bool) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.auto_updates = enabled
+    })
+}
+
+pub fn load_link_browser() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map(|preferences| preferences.link_browser)
+        .filter(|id| crate::link_router::valid_handler(id))
+}
+
+pub fn save_link_browser(id: &str) -> io::Result<()> {
+    if !crate::link_router::valid_handler(id) {
+        return Err(invalid());
+    }
+    update_at(&preferences_path()?, |preferences| {
+        preferences.link_browser = id.to_owned()
     })
 }
 

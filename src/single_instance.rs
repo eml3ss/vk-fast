@@ -1,6 +1,7 @@
 //! A user-local activation channel, acquired before any application state opens.
 //! The guard survives native-window recreation; activation survives UI startup.
 use std::{
+    collections::VecDeque,
     io,
     sync::{
         Arc, Mutex,
@@ -13,6 +14,9 @@ use std::{
 use crate::repaint_target::RepaintTarget;
 
 const ACTIVATE: &[u8] = b"VKFAST_ACTIVATE_V1";
+/// Activation that also carries one link to open, followed by the link.
+const OPEN_LINK: &[u8] = b"VKFAST_OPENLINK_V1";
+const MAX_LINKS: usize = 8;
 const CONNECT_BUDGET: Duration = Duration::from_secs(3);
 const RETRY: Duration = Duration::from_millis(10);
 
@@ -24,6 +28,7 @@ pub enum Acquisition {
 #[derive(Default)]
 struct ActivationState {
     pending: AtomicBool,
+    links: Mutex<VecDeque<String>>,
     repaint: Mutex<Option<RepaintTarget>>,
 }
 
@@ -34,6 +39,52 @@ pub struct Activation(Arc<ActivationState>);
 impl Activation {
     pub fn take_pending(&self) -> bool {
         self.0.pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// Links sent by later launches, oldest first.
+    pub fn take_links(&self) -> Vec<String> {
+        self.0
+            .links
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    /// Queue a link and wake the window, as a second launch does.
+    pub fn open_link(&self, link: &str) {
+        if link.is_empty() || link.len() > crate::link_router::MAX_URL {
+            return;
+        }
+        {
+            let mut links = self
+                .0
+                .links
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if links.len() == MAX_LINKS {
+                links.pop_front();
+            }
+            links.push_back(link.to_owned());
+        }
+        self.notify();
+    }
+
+    /// Handle one activation message; false for an unknown one.
+    fn receive(&self, message: &[u8]) -> bool {
+        if message == ACTIVATE {
+            self.notify();
+            true
+        } else if let Some(link) = message.strip_prefix(OPEN_LINK)
+            && let Ok(link) = std::str::from_utf8(link)
+            && !link.is_empty()
+            && link.len() <= crate::link_router::MAX_URL
+        {
+            self.open_link(link);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_repaint_target(&self, target: RepaintTarget) {
@@ -96,8 +147,20 @@ impl Drop for Primary {
 
 /// Windows calls the supplied foreground-permission grant with the real server
 /// PID before sending activation. Linux does not need that policy handoff.
-pub fn acquire(grant_foreground: impl Fn(u32)) -> io::Result<Acquisition> {
-    platform::acquire(&platform::default_address()?, &grant_foreground)
+/// `link` travels to an already running instance with its activation.
+pub fn acquire(grant_foreground: impl Fn(u32), link: Option<&str>) -> io::Result<Acquisition> {
+    platform::acquire(
+        &platform::default_address()?,
+        &grant_foreground,
+        &message(link),
+    )
+}
+
+fn message(link: Option<&str>) -> Vec<u8> {
+    match link.filter(|link| !link.is_empty() && link.len() <= crate::link_router::MAX_URL) {
+        Some(link) => [OPEN_LINK, link.as_bytes()].concat(),
+        None => ACTIVATE.to_vec(),
+    }
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -227,7 +290,7 @@ mod platform {
         Ok(())
     }
 
-    pub fn acquire(address: &Address, _: &impl Fn(u32)) -> io::Result<Acquisition> {
+    pub fn acquire(address: &Address, _: &impl Fn(u32), message: &[u8]) -> io::Result<Acquisition> {
         let uid = uid()?;
         private_directory(address, uid)?;
         let lock_path = address.join("instance.lock");
@@ -274,13 +337,12 @@ mod platform {
                             identity: (metadata.dev(), metadata.ino()),
                         },
                         move |activation, stopping| {
-                            let mut message = [0_u8; 64];
+                            let mut message =
+                                vec![0_u8; OPEN_LINK.len() + crate::link_router::MAX_URL];
                             while !stopping.load(Ordering::Acquire) {
                                 match receive.recv(&mut message) {
-                                    Ok(length) if &message[..length] == ACTIVATE => {
-                                        if !stopping.load(Ordering::Acquire) {
-                                            activation.notify();
-                                        }
+                                    Ok(length) if !stopping.load(Ordering::Acquire) => {
+                                        activation.receive(&message[..length]);
                                     }
                                     Ok(_) => (),
                                     Err(error)
@@ -300,8 +362,8 @@ mod platform {
                 Err(TryLockError::WouldBlock) => {
                     let sender = UnixDatagram::unbound()?;
                     sender.set_nonblocking(true)?;
-                    match sender.send_to(ACTIVATE, &path) {
-                        Ok(length) if length == ACTIVATE.len() => {
+                    match sender.send_to(message, &path) {
+                        Ok(length) if length == message.len() => {
                             return Ok(Acquisition::AlreadyRunning);
                         }
                         Ok(_) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
@@ -388,10 +450,25 @@ mod platform {
         transfer(|bytes| stream.write(bytes), &mut bytes.to_vec())
     }
 
-    pub(super) fn activate_existing(mut stream: Stream, grant: &impl Fn(u32)) -> io::Result<()> {
+    /// The pipe carries a header, then for a link its u16 length and bytes.
+    fn framed(message: &[u8]) -> Vec<u8> {
+        match message.strip_prefix(OPEN_LINK) {
+            Some(link) => {
+                let length = u16::try_from(link.len()).unwrap_or(u16::MAX);
+                [OPEN_LINK, length.to_le_bytes().as_slice(), link].concat()
+            }
+            None => message.to_vec(),
+        }
+    }
+
+    pub(super) fn activate_existing(
+        mut stream: Stream,
+        grant: &impl Fn(u32),
+        message: &[u8],
+    ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
         grant(stream.server_process_id()?);
-        write(&mut stream, ACTIVATE)?;
+        write(&mut stream, &framed(message))?;
         let mut ack = [0];
         read(&mut stream, &mut ack)?;
         if ack == *b"1" {
@@ -401,7 +478,11 @@ mod platform {
         }
     }
 
-    pub fn acquire(address: &Address, grant: &impl Fn(u32)) -> io::Result<Acquisition> {
+    pub fn acquire(
+        address: &Address,
+        grant: &impl Fn(u32),
+        message: &[u8],
+    ) -> io::Result<Acquisition> {
         let name = format!(
             "vk-fast-instance-{:x}.lock",
             Sha256::digest(address.as_bytes())
@@ -461,9 +542,28 @@ mod platform {
                                 if stream.set_nonblocking(true).is_err() {
                                     continue;
                                 }
-                                let mut message = [0; ACTIVATE.len()];
-                                if read(&mut stream, &mut message).is_ok() && message == ACTIVATE {
-                                    activation.notify();
+                                let mut header = [0; ACTIVATE.len()];
+                                if read(&mut stream, &mut header).is_err() {
+                                    continue;
+                                }
+                                let accepted = if header.as_slice() == OPEN_LINK {
+                                    let mut length = [0; 2];
+                                    let length = read(&mut stream, &mut length)
+                                        .ok()
+                                        .map(|()| usize::from(u16::from_le_bytes(length)))
+                                        .filter(|length| {
+                                            (1..=crate::link_router::MAX_URL).contains(length)
+                                        });
+                                    length.is_some_and(|length| {
+                                        let mut link = vec![0; length];
+                                        read(&mut stream, &mut link).is_ok()
+                                            && activation
+                                                .receive(&[OPEN_LINK, link.as_slice()].concat())
+                                    })
+                                } else {
+                                    activation.receive(&header)
+                                };
+                                if accepted {
                                     let _ = write(&mut stream, b"1");
                                 }
                             }
@@ -476,7 +576,7 @@ mod platform {
                         ConnectWaitMode::Timeout(Duration::from_millis(100)),
                     ) {
                         Ok(stream) => {
-                            activate_existing(stream, grant)?;
+                            activate_existing(stream, grant, message)?;
                             return Ok(Acquisition::AlreadyRunning);
                         }
                         Err(_) if Instant::now() < deadline => (),
@@ -552,7 +652,7 @@ mod tests {
     }
 
     fn primary_at(namespace: &Namespace) -> Primary {
-        match platform::acquire(&namespace.address(), &|_| {}).unwrap() {
+        match platform::acquire(&namespace.address(), &|_| {}, ACTIVATE).unwrap() {
             Acquisition::Primary(primary) => primary,
             Acquisition::AlreadyRunning => panic!("Unexpected existing test instance"),
         }
@@ -592,9 +692,12 @@ mod tests {
             std::env::var_os("VK_FAST_INSTANCE_TEST_DIRECTORY").expect("test directory"),
         );
         let action = std::env::var("VK_FAST_INSTANCE_TEST_ACTION").unwrap();
-        let acquired = platform::acquire(&address(directory.to_str().unwrap()), &|_| {}).unwrap();
+        let link = "https://vk.ru/music/album/-2000_1_ab";
+        let message = message((action == "link").then_some(link));
+        let acquired =
+            platform::acquire(&address(directory.to_str().unwrap()), &|_| {}, &message).unwrap();
         match (action.as_str(), acquired) {
-            ("signal", Acquisition::AlreadyRunning) => (),
+            ("signal" | "link", Acquisition::AlreadyRunning) => (),
             ("hold", Acquisition::Primary(_primary)) => {
                 fs::write(directory.join("ready"), b"ready").unwrap();
                 loop {
@@ -621,12 +724,41 @@ mod tests {
     }
 
     #[test]
+    fn a_second_launch_hands_its_link_to_the_running_instance() {
+        let namespace = Namespace::new();
+        let primary = primary_at(&namespace);
+        let activation = primary.activations();
+        let mut child = child(&namespace, "link");
+        wait(|| child.0.try_wait().unwrap().is_some());
+        assert!(child.0.wait().unwrap().success());
+        wait(|| activation.0.pending.load(Ordering::Acquire));
+        assert!(activation.take_pending());
+        assert_eq!(
+            activation.take_links(),
+            ["https://vk.ru/music/album/-2000_1_ab"]
+        );
+        assert!(activation.take_links().is_empty());
+        // Unknown or oversized messages are ignored; the queue stays bounded.
+        assert!(!activation.receive(b"VKFAST_OPENLINK_V1"));
+        assert!(!activation.receive(b"hello"));
+        for index in 0..20 {
+            activation.open_link(&format!("https://vk.ru/audio1_{}", index + 1));
+        }
+        let links = activation.take_links();
+        assert_eq!(links.len(), MAX_LINKS);
+        assert_eq!(links.last().unwrap(), "https://vk.ru/audio1_20");
+        activation.open_link(&"a".repeat(crate::link_router::MAX_URL + 1));
+        assert!(activation.take_links().is_empty());
+        drop(primary);
+    }
+
+    #[test]
     fn a_crashed_primary_releases_exclusion_and_stale_endpoint_is_recovered() {
         let namespace = Namespace::new();
         let mut child = child(&namespace, "hold");
         wait(|| namespace.0.join("ready").exists());
         assert!(matches!(
-            platform::acquire(&namespace.address(), &|_| {}).unwrap(),
+            platform::acquire(&namespace.address(), &|_| {}, ACTIVATE).unwrap(),
             Acquisition::AlreadyRunning
         ));
         child.0.kill().unwrap();
