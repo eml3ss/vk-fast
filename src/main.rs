@@ -15,6 +15,7 @@ mod audio_upload_ui;
 mod auth_return;
 mod avatar_cache;
 mod browser_auth;
+mod carousel;
 mod catalog;
 mod client_platform;
 mod cover_art;

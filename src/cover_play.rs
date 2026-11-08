@@ -96,7 +96,9 @@ pub fn button(
     let rect = egui::Rect::from_center_size(center, egui::Vec2::splat(radius * 2.0));
     let response = ui.interact(rect, id, Sense::click());
     if response.clicked() {
-        response.request_focus();
+        // A mouse click must not leave a focus ring behind; keyboard focus
+        // (Tab) still draws it below.
+        response.surrender_focus();
     }
     let fill = if response.is_pointer_button_down_on() {
         theme::PRIMARY

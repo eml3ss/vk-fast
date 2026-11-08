@@ -1,7 +1,7 @@
 //! Music publisher pages use the same artwork cache and theme as release pages.
 use crate::{
     cover_art::CoverCache,
-    cover_play::{self, PlayState, Playback},
+    cover_play::{self, Playback},
     detail_ui,
     i18n::Language,
     icons::{self, Icon},
@@ -112,6 +112,8 @@ pub fn show(
                     action = Some(Action::More);
                 }
             }
+            // The same space from the bottom edge as between page blocks.
+            ui.add_space(22.0);
         },
     );
     action
@@ -270,9 +272,10 @@ fn grid(
             covers.show(&mut image, playlist.album.cover_url.as_deref(), art_size);
             let key = (playlist.album.owner_id, playlist.album.id);
             let state = playback.state(key);
-            let play = (ui.rect_contains_pointer(rect)
-                || response.has_focus()
-                || state != PlayState::Idle)
+            // Like VK: only while the pointer is over the card, even when
+            // this playlist is the one playing.
+            let play = ui
+                .rect_contains_pointer(rect)
                 .then(|| {
                     cover_play::button(
                         ui,

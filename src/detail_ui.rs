@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use crate::{
     artist_releases::{Kind as ReleaseKind, Release},
     cover_art::CoverCache,
-    cover_play::{self, PlayState, Playback},
+    cover_play::{self, Playback},
     i18n::Language,
     icons::{self, Icon},
     model::{AlbumRef, ArtistRef},
@@ -597,12 +597,14 @@ pub fn artist_releases(
     ) {
         action = Some(intent);
     }
+    // The page ends with the same space that separates its blocks.
+    ui.add_space(SECTION_GAP);
     action
 }
 
 const SECTION_GAP: f32 = 22.0;
 /// Extra space on each side of "Show all", added to the item spacing.
-const LINK_GAP: f32 = 2.0;
+const LINK_GAP: f32 = 8.0;
 
 /// "Show all" / "Hide" under a shortened grid: a compact link with equal
 /// space above and below. Returns true when clicked.
@@ -652,41 +654,31 @@ fn related_artists(
         )
     });
     ui.add_space(10.0);
+    // One sliding row with edge arrows on hover, like Home's sections.
     let columns = ((ui.available_width() + 12.0) / 212.0)
         .floor()
         .clamp(1.0, 6.0) as usize;
     let width = ((ui.available_width() - 12.0 * columns.saturating_sub(1) as f32) / columns as f32)
         .max(1.0);
-    let expanded_id = ui.make_persistent_id(("artist-related-all", artist_id));
-    let expanded = ui
-        .ctx()
-        .data(|data| data.get_temp::<bool>(expanded_id))
-        .unwrap_or(false);
-    let shown = if expanded {
-        related
-    } else {
-        &related[..related.len().min(columns)]
-    };
+    let spans: Vec<(f32, f32)> = (0..related.len())
+        .map(|index| (index as f32 * (width + 12.0), width))
+        .collect();
     let mut action = None;
-    for (row, items) in shown.chunks(columns).enumerate() {
-        if row > 0 {
-            ui.add_space(10.0);
-        }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            for item in items {
-                ui.push_id(("related-artist", &item.artist.id), |ui| {
-                    if related_card(ui, covers, item, width) {
-                        action = Some(Action::OpenArtist(item.artist.clone()));
-                    }
-                });
-            }
-        });
-    }
-    if related.len() > columns && expand_button(ui, language, expanded) {
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(expanded_id, !expanded));
-    }
+    crate::carousel::carousel(
+        ui,
+        &format!("artist-related:{artist_id}"),
+        &spans,
+        64.0,
+        language,
+        |ui, index| {
+            let item = &related[index];
+            ui.push_id(("related-artist", &item.artist.id), |ui| {
+                if related_card(ui, covers, item, width) {
+                    action = Some(Action::OpenArtist(item.artist.clone()));
+                }
+            });
+        },
+    );
     action
 }
 
@@ -865,22 +857,22 @@ fn release_card(
             egui::Vec2::splat(art_size),
         );
         artwork(ui, covers, art, album.cover_url.as_deref(), "release-art");
-        // Like VK: the blue play button appears inside the cover on hover,
-        // and stays while this release is loading or current.
+        // Like VK: the blue play button appears inside the cover only while
+        // the pointer is over the card, even for the release that is playing.
         let state = playback.state((album.owner_id, album.id));
-        let play =
-            (ui.rect_contains_pointer(rect) || response.has_focus() || state != PlayState::Idle)
-                .then(|| {
-                    cover_play::button(
-                        ui,
-                        cover_play::corner(art),
-                        cover_play::radius(art),
-                        ui.id().with("play"),
-                        state,
-                        language.text("Слушать", "Play"),
-                    )
-                })
-                .is_some_and(|play| play.clicked());
+        let play = ui
+            .rect_contains_pointer(rect)
+            .then(|| {
+                cover_play::button(
+                    ui,
+                    cover_play::corner(art),
+                    cover_play::radius(art),
+                    ui.id().with("play"),
+                    state,
+                    language.text("Слушать", "Play"),
+                )
+            })
+            .is_some_and(|play| play.clicked());
         let mut text = child(
             ui,
             "release-title",
@@ -2105,7 +2097,7 @@ mod tests {
         let above = link.top() - cards_bottom;
         let below = heading.top() - link.bottom();
         assert!(
-            (above - below).abs() <= 1.0 && above <= 12.0,
+            (above - below).abs() <= 1.0 && (14.0..=20.0).contains(&above),
             "Show all spacing: {above} above, {below} below"
         );
         let show_all = text(&output, "Показать все").unwrap();
