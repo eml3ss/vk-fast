@@ -150,9 +150,11 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
             empty_collections(ui, &view);
         } else {
             // Two full rows that slide together: the first half on top.
-            let columns = columns(ui.available_width());
-            let width = cell_width(ui.available_width(), columns);
             let top = view.collections.len().div_ceil(2);
+            // Few collections stretch over the full width instead of
+            // leaving empty columns; an odd count leaves the second row short.
+            let columns = columns(ui.available_width()).min(top.max(1));
+            let width = cell_width(ui.available_width(), columns);
             let spans = fixed_spans(top, width);
             carousel(
                 ui,
