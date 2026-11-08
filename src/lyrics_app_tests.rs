@@ -23,6 +23,35 @@ fn prepared(ctx: &egui::Context, language: Language) -> MusicApp {
 }
 
 #[test]
+fn right_panel_layout_survives_reopening_and_restoring_the_last_track() {
+    for lyrics_open in [false, true] {
+        for queue_open in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = prepared(&ctx, Language::English);
+            let state = crate::window_state::RightPanel {
+                lyrics_open,
+                queue_open,
+                split: 0.37,
+            };
+            app.restore_right_panel_state(state);
+            let saved = app.right_panel_state();
+            assert_eq!(saved, state);
+
+            let mut reopened = prepared(&ctx, Language::English);
+            reopened.restore_right_panel_state(saved);
+            let snapshot = playback_resume::Snapshot {
+                track: reopened.playing.clone().unwrap(),
+                position: 25.0,
+            };
+            reopened.restore_playback_resume(42, Some(snapshot));
+            assert_eq!(reopened.right_panel_state(), saved);
+            assert_eq!(reopened.resume_position, Some(25.0));
+            assert!(!reopened.lyrics.fullscreen);
+        }
+    }
+}
+
+#[test]
 fn lyrics_open_below_the_queue_and_fullscreen_restores_the_drawer_on_escape() {
     for language in [Language::Russian, Language::English] {
         let ctx = egui::Context::default();

@@ -55,6 +55,29 @@ impl State {
 }
 
 impl MusicApp {
+    pub fn right_panel_state(&self) -> crate::window_state::RightPanel {
+        crate::window_state::RightPanel {
+            lyrics_open: self.lyrics.active && self.lyrics.open,
+            queue_open: self.queue_ui.open,
+            split: if self.queue_ui.split > 0.0 && self.queue_ui.split < 1.0 {
+                self.queue_ui.split
+            } else {
+                0.5
+            },
+        }
+    }
+
+    pub fn restore_right_panel_state(&mut self, state: crate::window_state::RightPanel) {
+        self.lyrics.active = state.lyrics_open;
+        self.lyrics.open = state.lyrics_open;
+        self.queue_ui.open = state.queue_open;
+        self.queue_ui.split = if state.split > 0.0 && state.split < 1.0 {
+            state.split
+        } else {
+            0.5
+        };
+    }
+
     fn ensure_lyrics_service(&mut self, ctx: &egui::Context) {
         if self.lyrics.service.is_none() && self.lyrics.settings_error.is_none() {
             match Service::new(ctx) {

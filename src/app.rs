@@ -2057,7 +2057,9 @@ impl MusicApp {
         {
             return;
         }
+        let right_panel = self.right_panel_state();
         self.stop_playback();
+        self.restore_right_panel_state(right_panel);
         // Credentials and stream URLs are always resolved afresh after Play.
         saved.track.url = None;
         if let Some(album) = &mut saved.track.album {

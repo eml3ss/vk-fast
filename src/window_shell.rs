@@ -30,6 +30,10 @@ pub trait ResidentApp: eframe::App {
         None
     }
     fn restore_panel_widths(&mut self, _widths: [f32; 2]) {}
+    fn right_panel_state(&self) -> Option<crate::window_state::RightPanel> {
+        None
+    }
+    fn restore_right_panel_state(&mut self, _state: crate::window_state::RightPanel) {}
 }
 
 impl ResidentApp for MusicApp {
@@ -62,6 +66,12 @@ impl ResidentApp for MusicApp {
     fn restore_panel_widths(&mut self, widths: [f32; 2]) {
         MusicApp::restore_panel_widths(self, widths);
     }
+    fn right_panel_state(&self) -> Option<crate::window_state::RightPanel> {
+        Some(MusicApp::right_panel_state(self))
+    }
+    fn restore_right_panel_state(&mut self, state: crate::window_state::RightPanel) {
+        MusicApp::restore_right_panel_state(self, state);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +82,7 @@ struct WindowGeometry {
     maximized: bool,
     fullscreen: bool,
     panels: Option<[f32; 2]>,
+    right_panel: Option<crate::window_state::RightPanel>,
 }
 
 impl WindowGeometry {
@@ -86,6 +97,7 @@ impl WindowGeometry {
             maximized: viewport.maximized.unwrap_or(false),
             fullscreen: viewport.fullscreen.unwrap_or(false),
             panels: None,
+            right_panel: None,
         }
     }
 
@@ -124,6 +136,7 @@ impl WindowGeometry {
         self.maximized = saved.maximized;
         self.position_pixels = saved.position_pixels;
         self.panels = saved.panels;
+        self.right_panel = saved.right_panel;
     }
 
     fn saved(self) -> crate::window_state::SavedWindow {
@@ -132,6 +145,7 @@ impl WindowGeometry {
             maximized: self.maximized,
             position_pixels: self.position_pixels,
             panels: self.panels,
+            right_panel: self.right_panel,
         }
     }
 
@@ -188,12 +202,17 @@ impl<A: ResidentApp> eframe::App for WindowApp<A> {
         if let Some(app) = &mut self.app {
             app.ui(ui, frame);
             self.geometry.panels = app.panel_widths().or(self.geometry.panels);
+            self.geometry.right_panel = app.right_panel_state().or(self.geometry.right_panel);
         }
         let zoom = ui.ctx().zoom_factor();
         ui.input(|input| self.geometry.remember(input.viewport(), zoom));
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(app) = &self.app {
+            self.geometry.panels = app.panel_widths().or(self.geometry.panels);
+            self.geometry.right_panel = app.right_panel_state().or(self.geometry.right_panel);
+        }
         save_geometry(self.geometry);
         if self
             .app
@@ -299,6 +318,9 @@ pub fn run_native<A: ResidentApp + 'static>(
                     let mut app = creator.expect("Initial application constructor")(cc)?;
                     if let Some(panels) = geometry.panels {
                         app.restore_panel_widths(panels);
+                    }
+                    if let Some(state) = geometry.right_panel {
+                        app.restore_right_panel_state(state);
                     }
                     app
                 };
