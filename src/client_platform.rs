@@ -47,11 +47,11 @@ mod tests {
     }
 
     #[test]
-    fn active_authentication_constants_and_webview_alias_use_the_target_identity() {
+    fn active_authentication_constants_and_music_client_use_the_target_identity() {
         let identity = identity_for_windows(cfg!(target_os = "windows"));
         assert_eq!(USER_AGENT, identity.user_agent);
         assert_eq!(DEVICE_NAME, identity.device_name);
-        // The Tauri webview receives this same alias from web_audio.
+        // The website music client sends this same identity.
         assert_eq!(crate::web_audio::USER_AGENT, USER_AGENT);
     }
 }

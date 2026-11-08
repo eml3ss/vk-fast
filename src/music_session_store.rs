@@ -1,5 +1,4 @@
 //! Private, account-bound profile and cookies of the application's VK session.
-//! This file is independent of the saved VK ID OAuth session.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -368,6 +367,31 @@ pub fn restore_profile() -> io::Result<Option<(Profile, Vec<SessionCookie>)>> {
     restore_profile_at(&session_path()?)
 }
 
+/// Delete data left by the retired website and VK ID sign-in methods: the
+/// private webview profile (it held that browser's VK cookies) and the old
+/// OAuth session file. Runs off the UI thread; failures are not fatal.
+pub fn remove_retired_logins() {
+    let Some(directory) = session_path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_owned))
+    else {
+        return;
+    };
+    remove_retired_at(&directory);
+}
+
+fn remove_retired_at(directory: &Path) {
+    let webview = directory.join("webview");
+    // Never follow a link out of the application's own state directory.
+    if fs::symlink_metadata(&webview).is_ok_and(|meta| meta.file_type().is_dir()) {
+        let _ = fs::remove_dir_all(&webview);
+    }
+    let oauth = directory.join("session.json");
+    if fs::symlink_metadata(&oauth).is_ok_and(|meta| meta.file_type().is_file()) {
+        let _ = fs::remove_file(&oauth);
+    }
+}
+
 pub fn clear() -> io::Result<()> {
     let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
     clear_at(&session_path()?)
@@ -471,6 +495,22 @@ mod tests {
         assert_eq!(cookies[0].value, "synthetic-cookie-value");
         assert_eq!(load_at(&path, profile.id).unwrap().unwrap().len(), 1);
         assert!(load_at(&path, profile.id + 1).is_err());
+    }
+
+    #[test]
+    fn retired_sign_in_data_is_removed_without_touching_the_music_session() {
+        let directory = TestDirectory::new();
+        let state = directory.0.join("state");
+        fs::create_dir_all(state.join("webview/profile")).unwrap();
+        fs::write(state.join("webview/profile/Cookies"), "synthetic").unwrap();
+        fs::write(state.join("session.json"), "{}").unwrap();
+        let music = state.join("music-session.json");
+        save_at(&music, 42, &fixture()).unwrap();
+        remove_retired_at(&state);
+        assert!(!state.join("webview").exists());
+        assert!(!state.join("session.json").exists());
+        assert!(load_at(&music, 42).unwrap().is_some());
+        remove_retired_at(&state);
     }
 
     #[test]

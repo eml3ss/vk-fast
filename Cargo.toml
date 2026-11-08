@@ -25,7 +25,6 @@ html-escape = "0.2"
 encoding_rs = "0.8"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-tauri = { version = "2.12", default-features = false, features = ["wry", "x11", "custom-protocol"] }
 rfd = "0.17.2"
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 raw-window-handle = "0.6.2"
@@ -42,7 +41,8 @@ skrifa = "=0.44.0"
 sys-locale = "0.3.2"
 
 [build-dependencies]
-tauri-build = { version = "2", default-features = false }
+static_vcruntime = "3.0.0"
+embed-resource = "3.0.12"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }

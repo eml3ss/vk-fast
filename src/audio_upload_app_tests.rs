@@ -20,7 +20,6 @@ fn connected(ctx: &egui::Context, language: Language) -> MusicApp {
             last_name: "Account".into(),
             avatar_url: None,
         },
-        client: None,
         cache_warning: false,
         music: Some(client),
     });

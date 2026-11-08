@@ -52,7 +52,6 @@ mod update_app;
 use crate::{
     audio_cache::{AudioCache, CacheKey, CacheStats},
     avatar_cache::AvatarCache,
-    browser_auth::{self, Control, LoginError},
     cover_art::{self, CoverCache},
     detail_ui, home_ui,
     i18n::Language,
@@ -66,12 +65,10 @@ use crate::{
     release_info,
     repaint_target::RepaintTarget,
     scrolling::Scrolling,
-    search_swipe, search_ui, seek_bar, session_store,
+    search_swipe, search_ui, seek_bar,
     settings_search::{self, Query as SettingsQuery, Setting},
-    tauri_login,
     theme::{self, ACCENT, BACKGROUND, MUTED, PRIMARY, SURFACE},
     titlebar, track_menu,
-    vk::{VkClient, VkError},
     web_audio::{WebAudioClient, WebAudioError},
     web_session::SessionCookie,
 };
@@ -347,7 +344,6 @@ fn write_playback_resume(owner: i64, snapshot: &playback_resume::Snapshot) -> bo
 
 struct Session {
     profile: Profile,
-    client: Option<VkClient>,
     cache_warning: bool,
     music: Option<WebAudioClient>,
 }
@@ -359,15 +355,14 @@ struct RefreshedProfile {
 
 enum Reply {
     Connected(
-        Session,
+        Box<Session>,
         Option<UiError>,
         bool,
         Vec<Track>,
         Vec<Track>,
-        Option<playback_resume::Snapshot>,
+        Option<Box<playback_resume::Snapshot>>,
     ),
     NoSavedSession,
-    WebConnected(QrConnected),
     Audio(AudioPage, bool, Option<RefreshedProfile>),
 }
 
@@ -710,14 +705,11 @@ impl SettingsSection {
 }
 
 enum UiError {
-    Vk(VkError),
-    Browser(LoginError),
     Music(WebAudioError),
     MusicStorage,
     Qr(qr_auth::Error),
     QrCode(qr_auth::Error),
     QrImage,
-    WebLogin(tauri_login::Error),
     Playback(PlaybackError),
     NoStream,
     WorkerStart,
@@ -727,12 +719,9 @@ enum UiError {
 impl UiError {
     fn message(&self, language: Language) -> String {
         match self {
-            Self::Vk(error) => error.localized(language),
-            Self::Browser(error) => error.localized(language),
             Self::Music(error) => error.localized(language),
             Self::Playback(error) => error.localized(language),
             Self::Qr(error) => error.localized(language),
-            Self::WebLogin(error) => error.localized(language),
             Self::QrCode(qr_auth::Error::IncorrectCode) => {
                 qr_auth::Error::IncorrectCode.localized(language)
             }
@@ -758,8 +747,8 @@ impl UiError {
                 .into(),
             Self::MusicStorage => language
                 .text(
-                    "Не удалось прочитать сохранённый вход. Войдите через VK или QR заново.",
-                    "Could not read the saved session. Sign in with VK or QR again.",
+                    "Не удалось прочитать сохранённый вход. Войдите по QR-коду заново.",
+                    "Could not read the saved session. Sign in with the QR code again.",
                 )
                 .into(),
             Self::WorkerStart => language
@@ -946,18 +935,6 @@ fn qr_image(ctx: &egui::Context, url: &str) -> Option<egui::TextureHandle> {
     ))
 }
 
-impl From<VkError> for UiError {
-    fn from(error: VkError) -> Self {
-        Self::Vk(error)
-    }
-}
-
-impl From<LoginError> for UiError {
-    fn from(error: LoginError) -> Self {
-        Self::Browser(error)
-    }
-}
-
 #[derive(Default)]
 struct Library {
     tracks: Vec<Track>,
@@ -1031,11 +1008,8 @@ impl Library {
 pub struct MusicApp {
     session: Option<Session>,
     pending: Option<Receiver<Result<Reply, UiError>>>,
-    browser_login: Option<Control>,
-    web_login: Option<tauri_login::Control>,
-    dialog_parent: Option<eframe::NativeDialogParent>,
-    native_login_ui: crate::web_login_ui::State,
-    profile_cleanup: Option<Receiver<Result<(), ()>>>,
+    /// A saved session is being restored at startup.
+    restoring: bool,
     workers: Vec<thread::JoinHandle<()>>,
     library: Library,
     track_view_cache: track_view_cache::TrackViewCache,
@@ -1328,12 +1302,7 @@ impl MusicApp {
         }
     }
 
-    pub fn new(
-        ctx: &egui::Context,
-        demo: bool,
-        language: Language,
-        dialog_parent: Option<eframe::NativeDialogParent>,
-    ) -> Self {
+    pub fn new(ctx: &egui::Context, demo: bool, language: Language) -> Self {
         theme::install(ctx);
         let cache_limit_mb = preferences::load_cache_limit_mb();
         #[cfg(not(test))]
@@ -1353,11 +1322,7 @@ impl MusicApp {
         let mut app = Self {
             session: None,
             pending: None,
-            browser_login: None,
-            web_login: None,
-            dialog_parent,
-            native_login_ui: crate::web_login_ui::State::default(),
-            profile_cleanup: None,
+            restoring: false,
             workers: Vec::new(),
             library: Library::default(),
             track_view_cache: track_view_cache::TrackViewCache::default(),
@@ -1558,9 +1523,6 @@ impl MusicApp {
             self.qr_texture = self.qr_url.as_deref().and_then(|url| qr_image(ctx, url));
             // Existing worker clones share this target and wake the new window.
             self.repaint_target.set_context(ctx);
-            if let Some(control) = &self.web_login {
-                control.bind(ctx);
-            }
             // The former renderer has retired. Its queued texture frees must
             // not survive until the old worker context is eventually dropped.
             self.ui_context.tex_manager().write().take_delta().clear();
@@ -1659,17 +1621,11 @@ impl MusicApp {
 
     fn reset(&mut self) {
         self.audio_upload = audio_upload_app::State::default();
-        self.native_login_ui.clear();
-        if let Some(control) = self.web_login.take() {
-            control.cancel();
-        }
         self.cancel_qr();
         self.stop_playback();
         self.play_order =
             PlaybackOrder::with_modes(self.play_order.shuffle(), self.play_order.repeat());
-        if let Some(control) = self.browser_login.take() {
-            control.cancel();
-        }
+        self.restoring = false;
         self.pending = None; // Discard any late response from the previous session.
         self.session = None;
         self.avatar_refresh_ready = false;
@@ -1741,16 +1697,8 @@ impl MusicApp {
     }
 
     pub fn connect_qr(&mut self, ctx: &egui::Context) {
-        if self.profile_cleanup.is_some() {
-            return;
-        }
-        if let Some(control) = self.web_login.take() {
-            control.cancel();
-        }
         self.cancel_qr();
-        if let Some(control) = self.browser_login.take() {
-            control.cancel();
-        }
+        self.restoring = false;
         self.pending = None;
         self.qr_open = true;
         self.qr_error = None;
@@ -1841,7 +1789,6 @@ impl MusicApp {
                         self.reset();
                         self.session = Some(Session {
                             profile: signed_in.profile,
-                            client: None,
                             cache_warning: false,
                             music: Some(signed_in.music),
                         });
@@ -2225,8 +2172,7 @@ impl MusicApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.web_login.is_some()
-            || self.qr_open
+        if self.qr_open
             || self.playlist_create_form.is_some()
             || self.playlist_controls.has_modal()
             || egui::Popup::is_any_open(ctx)
@@ -2571,92 +2517,10 @@ impl MusicApp {
         }
     }
 
-    pub fn connect_oauth(&mut self, ctx: &egui::Context) {
-        if self.profile_cleanup.is_some() {
-            return;
-        }
-        self.reset();
-        let control = Control::default();
-        self.browser_login = Some(control.clone());
-        self.start_job(ctx, move || {
-            let signed_in = browser_auth::login(control)?;
-            let cached = library_cache::load(signed_in.profile.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let recent = read_recent_snapshot(signed_in.profile.id);
-            let resume = read_playback_resume(signed_in.profile.id);
-            Ok(Reply::Connected(
-                Session {
-                    client: Some(signed_in.client),
-                    profile: signed_in.profile,
-                    cache_warning: signed_in.cache_warning,
-                    music: None,
-                },
-                None,
-                true,
-                cached,
-                recent,
-                resume,
-            ))
-        });
-        if self.pending.is_none()
-            && let Some(control) = self.browser_login.take()
-        {
-            control.cancel();
-        }
-    }
-
-    pub fn connect_browser(&mut self, ctx: &egui::Context) {
-        if self.profile_cleanup.is_some() {
-            return;
-        }
-        self.reset();
-        let control = tauri_login::Control::default();
-        control.bind(ctx);
-        self.native_login_ui.clear();
-        self.web_login = Some(control.clone());
-        let parent = self.dialog_parent.clone();
-        let language = self.language;
-        self.start_job(ctx, move || {
-            let mut signed_in =
-                tauri_login::login(control.clone(), language, parent).map_err(UiError::WebLogin)?;
-            if control.is_canceled() {
-                return Err(UiError::WebLogin(tauri_login::Error::Canceled));
-            }
-            let music = WebAudioClient::new(signed_in.cookies.clone()).map_err(UiError::Music)?;
-            let verified_profile = music
-                .refresh_profile(signed_in.profile.id)
-                .map_err(UiError::Music)?;
-            signed_in.profile.merge_metadata(&verified_profile);
-            if control.is_canceled() {
-                return Err(UiError::WebLogin(tauri_login::Error::Canceled));
-            }
-            let page = music
-                .page(signed_in.profile.id, 0)
-                .map_err(UiError::Music)?;
-            let cached = library_cache::load(signed_in.profile.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let recent = read_recent_snapshot(signed_in.profile.id);
-            let resume = read_playback_resume(signed_in.profile.id);
-            Ok(Reply::WebConnected(QrConnected {
-                resume,
-                recent,
-                cached,
-                profile: signed_in.profile,
-                cookies: signed_in.cookies,
-                music,
-                page,
-            }))
-        });
-    }
-
     pub fn restore_session(&mut self, ctx: &egui::Context) {
-        let control = Control::restoring();
-        self.browser_login = Some(control);
+        self.restoring = true;
         self.start_job(ctx, move || {
+            music_session_store::remove_retired_logins();
             match music_session_store::restore_profile().map_err(|_| UiError::MusicStorage)? {
                 Some((profile, cookies)) => {
                     let cached = library_cache::load(profile.id)
@@ -2666,17 +2530,16 @@ impl MusicApp {
                     let recent = read_recent_snapshot(profile.id);
                     let resume = read_playback_resume(profile.id);
                     Ok(Reply::Connected(
-                        Session {
+                        Box::new(Session {
                             profile,
-                            client: None,
                             cache_warning: false,
                             music: Some(WebAudioClient::new(cookies).map_err(UiError::Music)?),
-                        },
+                        }),
                         None,
                         false,
                         cached,
                         recent,
-                        resume,
+                        resume.map(Box::new),
                     ))
                 }
                 None => Ok(Reply::NoSavedSession),
@@ -2684,57 +2547,10 @@ impl MusicApp {
         });
     }
 
-    fn logout(&mut self, ctx: &egui::Context) {
+    fn logout(&mut self) {
         self.reset();
-        let oauth = session_store::clear();
-        let music = music_session_store::clear();
-        if oauth.is_err() || music.is_err() {
+        if music_session_store::clear().is_err() {
             self.auth_error = Some(UiError::MusicStorage);
-        }
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let ctx = self.repaint_target.with_context(ctx);
-        match thread::Builder::new()
-            .name("vk-clear-login".into())
-            .spawn(move || {
-                let until = Instant::now() + Duration::from_secs(5);
-                let result = loop {
-                    match tauri_login::clear_profile() {
-                        Ok(()) => break Ok(()),
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::AlreadyExists
-                            ) && Instant::now() < until =>
-                        {
-                            thread::sleep(Duration::from_millis(50))
-                        }
-                        Err(_) => break Err(()),
-                    }
-                };
-                let _ = sender.send(result);
-                ctx.request_repaint();
-            }) {
-            Ok(worker) => {
-                self.workers.push(worker);
-                self.profile_cleanup = Some(receiver);
-            }
-            Err(_) => self.auth_error = Some(UiError::MusicStorage),
-        }
-    }
-
-    fn poll_profile_cleanup(&mut self) {
-        if let Some(receiver) = &self.profile_cleanup {
-            let result = match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err(())),
-            };
-            if let Some(result) = result {
-                self.profile_cleanup = None;
-                if result.is_err() {
-                    self.auth_error = Some(UiError::MusicStorage);
-                }
-            }
         }
     }
 
@@ -2888,7 +2704,6 @@ impl MusicApp {
             return;
         }
         let Some(session) = &self.session else { return };
-        let client = session.client.clone();
         let music = session.music.clone();
         let owner_id = session.profile.id;
         // Preserve the current library until a refresh actually succeeds.
@@ -2912,8 +2727,6 @@ impl MusicApp {
                     music.page_batch(owner_id, offset, 100)
                 };
                 load().map_err(|error| UiError::Music(music.confirm_expired(owner_id, error)))
-            } else if let Some(client) = client {
-                client.audio_page(owner_id, offset).map_err(UiError::Vk)
             } else {
                 Err(UiError::NoStream)
             };
@@ -2930,9 +2743,7 @@ impl MusicApp {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
-                self.browser_login = None;
-                self.web_login = None;
-                self.native_login_ui.clear();
+                self.restoring = false;
                 self.avatar_refresh_ready = true;
                 let message = UiError::Interrupted;
                 if self.session.is_some() {
@@ -2944,41 +2755,9 @@ impl MusicApp {
             }
         };
         self.pending = None;
-        self.browser_login = None;
-        self.web_login = None;
-        self.native_login_ui.clear();
+        self.restoring = false;
         match result {
             Ok(Reply::NoSavedSession) => {}
-            Ok(Reply::WebConnected(signed_in)) => {
-                if music_session_store::save_profile(&signed_in.profile, &signed_in.cookies)
-                    .is_err()
-                {
-                    self.auth_error = Some(UiError::MusicStorage);
-                    return;
-                }
-                self.reset();
-                self.session = Some(Session {
-                    profile: signed_in.profile,
-                    client: None,
-                    cache_warning: false,
-                    music: Some(signed_in.music),
-                });
-                self.avatar_refresh_ready = true;
-                self.avatar_refresh_url = self
-                    .session
-                    .as_ref()
-                    .and_then(|session| session.profile.avatar_url.clone());
-                self.recent = self
-                    .restored_recent(self.session.as_ref().unwrap().profile.id, signed_in.recent);
-                self.library = self
-                    .restored_library(self.session.as_ref().unwrap().profile.id, signed_in.cached);
-                self.library.refresh(signed_in.page);
-                self.restore_playback_resume(
-                    self.session.as_ref().unwrap().profile.id,
-                    signed_in.resume,
-                );
-                self.save_library(ctx);
-            }
             Ok(Reply::Connected(session, music_error, explicit_login, cached, recent, resume)) => {
                 self.track_view_cache.invalidate();
                 if explicit_login {
@@ -2987,8 +2766,11 @@ impl MusicApp {
                 }
                 self.recent = self.restored_recent(session.profile.id, recent);
                 self.library = self.restored_library(session.profile.id, cached);
-                self.session = Some(session);
-                self.restore_playback_resume(self.session.as_ref().unwrap().profile.id, resume);
+                self.session = Some(*session);
+                self.restore_playback_resume(
+                    self.session.as_ref().unwrap().profile.id,
+                    resume.map(|resume| *resume),
+                );
                 self.auth_error = None;
                 if let Some(error) = music_error {
                     self.audio_error = Some(error);
@@ -3094,24 +2876,13 @@ impl MusicApp {
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
         let ctx = ui.ctx().clone();
-        let can_login = self.pending.is_none() && self.profile_cleanup.is_none();
+        let can_login = self.pending.is_none();
         let button_size = egui::vec2(ui.available_width(), 36.0);
         if ui
             .add_enabled(
                 can_login,
-                egui::Button::new(t("Войти через VK", "Sign in with VK"))
-                    .fill(PRIMARY)
-                    .min_size(button_size),
-            )
-            .clicked()
-        {
-            self.connect_browser(&ctx);
-            egui::Popup::close_id(&ctx, egui::Id::new("account-popup"));
-        }
-        if ui
-            .add_enabled(
-                can_login,
                 egui::Button::new(t("Войти по QR-коду", "Sign in with QR code"))
+                    .fill(PRIMARY)
                     .min_size(button_size),
             )
             .clicked()
@@ -3119,20 +2890,11 @@ impl MusicApp {
             self.connect_qr(&ctx);
             egui::Popup::close_id(&ctx, egui::Id::new("account-popup"));
         }
-        if self.profile_cleanup.is_some() {
-            ui.label(t("Выходим из VK…", "Signing out of VK…"));
-        }
-        if self.web_login.is_some() || self.browser_login.is_some() {
-            let status = if self.web_login.is_some() {
-                t("Вход в VK…", "Signing in to VK…")
-            } else {
-                self.browser_login
-                    .as_ref()
-                    .map_or(t("Подключение…", "Connecting…"), |control| {
-                        control.status(language)
-                    })
-            };
-            ui.label(status);
+        if self.restoring {
+            ui.label(t(
+                "Восстанавливаем сохранённый вход…",
+                "Restoring your saved sign-in…",
+            ));
             if ui.button(t("Отменить", "Cancel")).clicked() {
                 self.reset();
             }
@@ -3170,7 +2932,7 @@ impl MusicApp {
                 )
                 .clicked()
             {
-                self.logout(ui.ctx());
+                self.logout();
                 ui.close();
             }
         } else {
@@ -6270,7 +6032,7 @@ impl MusicApp {
                     self.play_track(&ctx, key);
                 }
             }
-            Some(home_ui::Action::SignIn) => self.connect_browser(&ctx),
+            Some(home_ui::Action::SignIn) => self.connect_qr(&ctx),
             None => {}
         }
     }
@@ -8486,25 +8248,12 @@ impl MusicApp {
                     self.content(ui);
                 }
             });
-        if let Some(control) = self.web_login.clone() {
-            if crate::web_login_ui::show(
-                ui.ctx(),
-                &mut self.native_login_ui,
-                &control,
-                self.language,
-            ) {
-                self.reset();
-            }
-        } else {
-            self.native_login_ui.clear();
-        }
         let _ = self.qr_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
         self.audio_upload_window(ui.ctx());
         if !self.system_titlebar
             && !self.qr_open
-            && self.web_login.is_none()
             && !self.audio_upload.has_modal()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
@@ -8595,7 +8344,6 @@ impl MusicApp {
         if ui.ctx().current_pass_index() == 0
             && (!self.settings_open || self.lyrics.fullscreen)
             && !self.qr_open
-            && self.web_login.is_none()
             && self.playlist_create_form.is_none()
             && !self.playlist_controls.has_modal()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -8650,7 +8398,6 @@ impl MusicApp {
         self.poll_system_media(ctx, frame);
         self.poll_lyrics(ctx);
         self.poll(ctx);
-        self.poll_profile_cleanup();
         self.poll_home(ctx);
         self.poll_home_catalog();
         self.poll_playlists(ctx);
@@ -8724,7 +8471,7 @@ impl MusicApp {
         self.poll_cache(ctx);
         self.publish_system_media();
         self.publish_discord_rpc();
-        if self.qr_open || self.web_login.is_some() {
+        if self.qr_open {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         if let Some(deadline) = self.volume_save_at {
@@ -8735,7 +8482,7 @@ impl MusicApp {
                 ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
             }
         }
-        if self.browser_login.is_some() {
+        if self.restoring {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         if self.playback_pending.is_some()
@@ -8756,13 +8503,7 @@ impl Drop for MusicApp {
         self.discord_rpc.detach();
         // Capture committed media time before Stop resets the engine snapshot.
         let resume = self.playback_resume_snapshot();
-        if let Some(control) = self.web_login.take() {
-            control.cancel();
-        }
         self.cancel_qr();
-        if let Some(control) = &self.browser_login {
-            control.cancel();
-        }
         self.pending = None;
         self.home_request = None;
         self.detail_request = None;
@@ -9126,11 +8867,7 @@ mod tests {
         MusicApp {
             session: None,
             pending: None,
-            browser_login: None,
-            web_login: None,
-            dialog_parent: None,
-            native_login_ui: crate::web_login_ui::State::default(),
-            profile_cleanup: None,
+            restoring: false,
             workers: Vec::new(),
             library: Library::default(),
             track_view_cache: track_view_cache::TrackViewCache::default(),
@@ -9351,7 +9088,6 @@ mod tests {
             app.workers.is_empty(),
             "UI started a worker without a login click"
         );
-        assert!(app.web_login.is_none());
         assert!(app.qr_pending.is_none());
         assert!(app.qr_control.is_none());
         output
@@ -9451,7 +9187,6 @@ mod tests {
                                 last_name: "User".into(),
                                 avatar_url: None,
                             },
-                            client: None,
                             cache_warning: false,
                             music: None,
                         });
@@ -9705,7 +9440,6 @@ mod tests {
                 last_name: "User".into(),
                 avatar_url: None,
             },
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -9799,7 +9533,6 @@ mod tests {
                 last_name: "User".into(),
                 avatar_url: None,
             },
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -9939,7 +9672,6 @@ mod tests {
                 last_name: "User".into(),
                 avatar_url: None,
             },
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -10644,7 +10376,6 @@ mod tests {
                         last_name: "User".into(),
                         avatar_url: None,
                     },
-                    client: None,
                     cache_warning: false,
                     music: None,
                 });
@@ -10835,7 +10566,6 @@ mod tests {
         };
         app.session = Some(Session {
             profile: placeholder.clone(),
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -11020,19 +10750,12 @@ mod tests {
                     language.text("Музыка рядом", "Your music, closer"),
                 )
                 .unwrap();
-                let vk = account_ui_button_rect(
-                    &output,
-                    language.text("Войти через VK", "Sign in with VK"),
-                );
                 let qr = account_ui_button_rect(
                     &output,
                     language.text("Войти по QR-коду", "Sign in with QR code"),
                 );
-                assert!(vk.top() > hero.bottom());
-                assert!(qr.top() >= vk.bottom());
-                assert!((vk.center().x - hero.center().x).abs() <= 2.0);
+                assert!(qr.top() > hero.bottom());
                 assert!((qr.center().x - hero.center().x).abs() <= 2.0);
-                assert!((vk.width() - qr.width()).abs() <= 1.0);
                 let player = account_ui_shapes(&output)
                     .into_iter()
                     .find_map(|shape| match shape {
@@ -11058,6 +10781,8 @@ mod tests {
                     })
                     .collect();
                 for removed in [
+                    "Войти через VK",
+                    "Sign in with VK",
                     "Вход по токену",
                     "Token sign-in",
                     "Посмотреть демо",
@@ -11075,22 +10800,20 @@ mod tests {
 
                 let (_sender, receiver) = mpsc::sync_channel(1);
                 app.pending = Some(receiver);
-                app.browser_login = Some(Control::restoring());
-                let restore_status = app.browser_login.as_ref().unwrap().status(language);
+                app.restoring = true;
                 output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
-                assert!(account_ui_text_rect(&output, restore_status).is_some());
                 assert!(
                     account_ui_text_rect(
                         &output,
                         language.text(
-                            "Вход в VK…",
-                            "Signing in to VK…"
+                            "Восстанавливаем сохранённый вход…",
+                            "Restoring your saved sign-in…"
                         ),
                     )
-                    .is_none()
+                    .is_some()
                 );
 
-                app.browser_login = None;
+                app.restoring = false;
                 app.session = Some(Session {
                     profile: Profile {
                         id: 42,
@@ -11098,7 +10821,6 @@ mod tests {
                         last_name: "Listener".into(),
                         avatar_url: None,
                     },
-                    client: None,
                     cache_warning: false,
                     music: None,
                 });
@@ -11149,7 +10871,7 @@ mod tests {
         let directory = CacheScheduleDirectory::new();
         let cache = AudioCache::test_at(directory.0.join("audio"), 4096).unwrap();
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian);
         app.audio_cache = Some(cache.clone());
         app.cache_limit_mb = preferences::DEFAULT_CACHE_MB;
         (directory, ctx, app, cache)
@@ -11331,7 +11053,6 @@ mod tests {
                 last_name: "User".into(),
                 avatar_url: None,
             },
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -11368,12 +11089,12 @@ mod tests {
         assert!(
             sender
                 .send(Ok(Reply::Connected(
-                    session,
+                    Box::new(session),
                     Some(UiError::Music(WebAudioError::Network)),
                     false,
                     Vec::new(),
                     Vec::new(),
-                    Some(resume_test_saved(42.75)),
+                    Some(Box::new(resume_test_saved(42.75))),
                 )))
                 .is_ok()
         );
@@ -11619,7 +11340,6 @@ mod tests {
                 last_name: "User".into(),
                 avatar_url: None,
             },
-            client: None,
             music: None,
             cache_warning: false,
         });
@@ -14763,32 +14483,14 @@ mod tests {
     }
 
     #[test]
-    fn profile_cleanup_cannot_be_canceled_into_a_new_login() {
+    fn missing_saved_session_leaves_the_sign_in_screen_idle() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        app.profile_cleanup = Some(receiver);
-        app.reset();
-        app.connect_browser(&ctx);
-        app.connect_qr(&ctx);
-        assert!(app.profile_cleanup.is_some());
-        assert!(app.web_login.is_none());
-        assert!(app.qr_pending.is_none());
-        assert!(app.pending.is_none());
-        assert!(sender.send(Ok(())).is_ok());
-        app.poll_profile_cleanup();
-        assert!(app.profile_cleanup.is_none());
-    }
-
-    #[test]
-    fn missing_saved_session_does_not_start_a_webview() {
-        let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.pending = Some(receiver);
         assert!(sender.send(Ok(Reply::NoSavedSession)).is_ok());
         app.poll(&ctx);
-        assert!(app.web_login.is_none());
+        assert!(!app.restoring);
         assert!(app.pending.is_none());
         assert!(app.session.is_none());
     }
@@ -14796,7 +14498,7 @@ mod tests {
     #[test]
     fn phone_code_input_is_available_before_the_optional_otp_status() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian);
         let (_sender, receiver) = mpsc::sync_channel(1);
         app.qr_pending = Some(receiver);
         app.qr_texture = qr_image(&ctx, "https://vk.ru/?synthetic=1");
@@ -14855,7 +14557,7 @@ mod tests {
             for language in [Language::Russian, Language::English] {
                 let ctx = egui::Context::default();
                 let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-                let mut app = MusicApp::new(&ctx, false, language, None);
+                let mut app = MusicApp::new(&ctx, false, language);
                 let (_sender, receiver) = mpsc::sync_channel(1);
                 app.qr_pending = Some(receiver);
                 app.qr_open = true;
@@ -14993,7 +14695,7 @@ mod tests {
     #[test]
     fn cancel_qr_discards_a_late_signed_in_session() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.qr_pending = Some(receiver);
         app.qr_control = Some(qr_auth::Control::default());
@@ -15111,7 +14813,6 @@ mod tests {
                     last_name: "User".into(),
                     avatar_url: None,
                 },
-                client: None,
                 music: None,
                 cache_warning: false,
             });
@@ -15252,7 +14953,7 @@ mod tests {
     #[test]
     fn reset_discards_late_results() {
         let ctx = egui::Context::default();
-        let mut app = MusicApp::new(&ctx, false, Language::Russian, None);
+        let mut app = MusicApp::new(&ctx, false, Language::Russian);
         let (sender, receiver) = mpsc::sync_channel(1);
         app.pending = Some(receiver);
         app.reset();

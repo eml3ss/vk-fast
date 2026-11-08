@@ -86,12 +86,12 @@ impl WebAudioError {
         let text = match self {
             Self::Canceled => language.text("Загрузка трека отменена.", "Track loading was canceled."),
             Self::NoSession => language.text(
-                "Сессия VK не найдена. Нажмите «Войти через VK» или используйте QR.",
-                "No VK session was found. Choose Sign in with VK or use QR.",
+                "Сессия VK не найдена. Войдите по QR-коду.",
+                "No VK session was found. Sign in with the QR code.",
             ),
             Self::Expired => language.text(
-                "Сессия VK истекла. Войдите через VK или QR заново.",
-                "The VK session has expired. Sign in with VK or QR again.",
+                "Сессия VK истекла. Войдите по QR-коду заново.",
+                "The VK session has expired. Sign in with the QR code again.",
             ),
             Self::TokenExpired => language.text(
                 "Не удалось обновить ключ музыки VK. Повторите попытку.",
@@ -613,15 +613,6 @@ impl WebAudioClient {
             return Err(WebAudioError::WrongAccount);
         }
         self.accept_profile(profile.id)
-    }
-
-    /// Identify the current account of this client's own website session. This
-    /// does not use playlist owner IDs or read any external browser profile.
-    pub fn session_profile(&self) -> Result<Profile, WebAudioError> {
-        self.reset_verification()?;
-        let profile = self.fetch_viewer()?;
-        self.accept_profile(profile.id)?;
-        Ok(profile)
     }
 
     /// Recheck the viewer during a library refresh without discarding the

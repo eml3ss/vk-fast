@@ -302,7 +302,7 @@ mod tests {
         assert!(
             app.session
                 .as_ref()
-                .is_some_and(|session| { session.client.is_none() && session.music.is_none() })
+                .is_some_and(|session| session.music.is_none())
         );
     }
 

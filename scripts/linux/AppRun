@@ -9,7 +9,7 @@ if ! command -v fc-match >/dev/null 2>&1; then
 fontconfig (fc-match) not found"
 fi
 if [ -n "$missing" ]; then
-    message="VK Fast requires system WebKitGTK 4.1, GTK 3, PipeWire and fontconfig (glibc 2.39+). Install the packages supplied by your distribution.\n\n$missing"
+    message="VK Fast requires system PipeWire and fontconfig (glibc 2.39+). Install the packages supplied by your distribution.\n\n$missing"
     printf '%b\n' "$message" >&2
     if command -v zenity >/dev/null 2>&1; then
         zenity --error --title='VK Fast' --text="$message" --no-markup || true

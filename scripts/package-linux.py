@@ -37,7 +37,7 @@ def notices(appdir, work, version):
     rust = work / 'Rust-notices.txt'
     subprocess.run(['python3', str(ROOT / 'scripts/collect-licenses.py'), '--target', 'x86_64-unknown-linux-gnu', '--output', str(rust)], cwd=ROOT, check=True)
     content = [f'VK Fast {version}\nCorresponding source and build recipes: https://github.com/eml3ss/vk-fast\n',
-               'WebKitGTK, GTK, PipeWire, fontconfig and their dependencies are provided by the distribution, not redistributed in this package.\n']
+               'PipeWire, fontconfig, graphics drivers and their dependencies are provided by the distribution, not redistributed in this package.\n']
     files = [ROOT / 'LICENSE', ROOT / 'assets/fonts/OFL.txt', rust]
     files += sorted((ROOT / 'docs/third-party/linux').glob('AppImage*-LICENSE.txt'))
     for path in files:
@@ -78,7 +78,7 @@ def package(executable, output):
         shutil.copy2(ROOT / 'assets/vk-fast-icon-512.png', appdir / 'vk-fast.png')
         (appdir / '.DirIcon').symlink_to('vk-fast.png')
         (appdir / 'vk-fast.desktop').write_text('[Desktop Entry]\nType=Application\nName=VK Fast\nExec=vk-fast\nIcon=vk-fast\nCategories=AudioVideo;Audio;Music;\nTerminal=false\n')
-        (appdir / 'README.txt').write_text('VK Fast ' + version + '\n\nRun ./vk-fast (or AppRun).\nRequires distribution WebKitGTK 4.1 / GTK 3, PipeWire, fontconfig and glibc ' + glibc + '+.\nNo GUI libraries, WebKit engine, system modules or source archives are bundled.\nUser data follows XDG paths and is never stored inside this package.\nNotices: usr/share/doc/vk-fast/LICENSES.txt.gz\nhttps://github.com/eml3ss/vk-fast\n')
+        (appdir / 'README.txt').write_text('VK Fast ' + version + '\n\nRun ./vk-fast (or AppRun).\nRequires distribution PipeWire, fontconfig and glibc ' + glibc + '+.\nNo system libraries, modules or source archives are bundled.\nUser data follows XDG paths and is never stored inside this package.\nNotices: usr/share/doc/vk-fast/LICENSES.txt.gz\nhttps://github.com/eml3ss/vk-fast\n')
         notices(appdir, work, version)
         image = work / (name + '.AppImage')
         env = os.environ.copy()

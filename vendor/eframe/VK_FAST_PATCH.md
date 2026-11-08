@@ -7,21 +7,12 @@ The upstream MIT and Apache-2.0 license texts are included unchanged.
 
 Changes:
 
-- `NativeDialogParent` retains the root window and exports a Win32 owner, an
-  X11 window ID or a Wayland xdg-foreign handle for a separately hosted dialog.
-  The export is created off the UI thread and retained until the dialog closes.
-  Native wrappers attach the dialog, apply modal ownership on GTK and center
-  Windows dialogs over their validated launching-process owner.
-- A borrowed Windows pipe-readiness wrapper lets the sign-in worker stop
-  reading when its helper exits even if browser descendants retain a writer.
-
 - Windows viewport focus commands bypass winit's synthetic-Alt foreground
   workaround. A direct Win32 request is made only for a visible, restored HWND
   owned by this process; an already foreground window is left alone. If Windows
   denies activation, only taskbar attention is requested. No keyboard events,
   keyboard-state resets or input-queue attachment are used. Glow and WGPU share
-  the same ordered dispatch. A safe HWND wrapper also serves the VK challenge
-  window without routing through another toolkit's activation workaround.
+  the same ordered dispatch.
 - A process-local popup-menu palette wrapper resolves the supported system
   theme functions once. Windows 10 1809 and 1903+ use their respective function
   signatures; older/unsupported builds keep the native default. High contrast

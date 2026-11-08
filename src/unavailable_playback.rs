@@ -209,7 +209,7 @@ impl MusicApp {
             && self
                 .session
                 .as_ref()
-                .is_some_and(|session| session.music.is_some() || session.client.is_some());
+                .is_some_and(|session| session.music.is_some());
         if let Some(next) = next {
             self.play_track(ctx, next);
         } else if more_mix || more_library {

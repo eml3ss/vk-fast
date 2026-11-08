@@ -12,11 +12,8 @@ mod audio_cache;
 mod audio_output;
 mod audio_upload;
 mod audio_upload_ui;
-mod auth_return;
 mod avatar_cache;
-mod browser_auth;
 mod carousel;
-mod catalog;
 mod client_platform;
 mod cover_art;
 mod cover_cache;
@@ -54,22 +51,17 @@ mod scrolling;
 mod search_swipe;
 mod search_ui;
 mod seek_bar;
-mod session_store;
 mod settings_search;
 mod single_instance;
 mod system_media;
 mod system_tray;
-mod tauri_login;
 mod theme;
 mod titlebar;
 mod track_menu;
 mod ui_fonts;
 #[cfg(any(windows, test))]
 mod updater;
-mod vk;
 mod web_audio;
-mod web_login_state;
-mod web_login_ui;
 mod web_session;
 mod window_shell;
 mod window_state;
@@ -105,27 +97,6 @@ fn main() -> eframe::Result {
         let cache =
             app_paths::cache_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
         println!("{}", serde_json::json!({"config": config, "cache": cache}));
-        return Ok(());
-    }
-    if args.iter().any(|arg| arg == "--web-login") {
-        let language = args
-            .windows(2)
-            .find(|pair| pair[0] == "--lang")
-            .and_then(|pair| i18n::Language::from_code(&pair[1]))
-            .unwrap_or_default();
-        if tauri_login::run_helper(language).is_err() {
-            eprintln!("Не удалось открыть окно входа VK Fast.");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-    if args.first().is_some_and(|arg| arg == "--auth-callback") {
-        if args.len() != 2 || auth_return::deliver(&args[1]).is_err() {
-            eprintln!(
-                "Не удалось передать ответ входа в VK Fast. Начните вход из приложения ещё раз."
-            );
-            std::process::exit(1);
-        }
         return Ok(());
     }
     if args
@@ -194,13 +165,6 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "--check-token-music") {
-        if let Err(message) = check_token_music() {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
     if args.iter().any(|arg| arg == "--check-audio-cache") {
         if let Err(message) = check_audio_cache() {
             eprintln!("{message}");
@@ -217,35 +181,8 @@ fn main() -> eframe::Result {
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "VK Fast / Rust + egui\n\nUsage: vk-fast [--home] [--search [query]] [--demo] [--login] [--lang ru|en]\n\n  --home  Open Home\n  --search [query]  Open Search, optionally run a query\n  --demo  Show sample tracks without connecting to VK\n  --login  Open the private Tauri VK sign-in window immediately\n  --check-login  Verify the configured callback listener without opening a browser\n  --lang  Interface language: ru or en (overrides the saved setting)\n\nChoose Sign in with VK in the application. A private Tauri window opens the official VK sign-in page. Startup only restores an existing session.\nMusic access depends on the session. Sign-in options are in the account menu next to Settings."
+            "VK Fast / Rust + egui\n\nUsage: vk-fast [--home] [--search [query]] [--demo] [--login] [--lang ru|en]\n\n  --home  Open Home\n  --search [query]  Open Search, optionally run a query\n  --demo  Show sample tracks without connecting to VK\n  --login  Show the QR sign-in code immediately\n  --lang  Interface language: ru or en (overrides the saved setting)\n\nSign in by scanning the QR code with the VK app on your phone. Startup only restores an existing session."
         );
-        return Ok(());
-    }
-    if args.iter().any(|arg| arg == "--check-login") {
-        match browser_auth::check_setup() {
-            Ok(message) => println!("{message}"),
-            Err(error) => {
-                eprintln!("{}", error.localized(i18n::Language::Russian));
-                std::process::exit(1);
-            }
-        }
-        return Ok(());
-    }
-    if args.iter().any(|arg| arg == "--check-app-link") {
-        if let Err(message) = check_app_link() {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-    if args.iter().any(|arg| arg == "--check-registration") {
-        match browser_auth::check_registration_setup() {
-            Ok(message) => println!("{message}"),
-            Err(error) => {
-                eprintln!("{}", error.localized(i18n::Language::Russian));
-                std::process::exit(1);
-            }
-        }
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--licenses") {
@@ -303,8 +240,9 @@ fn main() -> eframe::Result {
     }
     let language = language_override.unwrap_or_else(preferences::load_language);
     let demo = args.iter().any(|arg| arg == "--demo");
-    let sign_in = args.iter().any(|arg| arg == "--login");
-    let qr_sign_in = args.iter().any(|arg| arg == "--qr-login");
+    let qr_sign_in = args
+        .iter()
+        .any(|arg| arg == "--login" || arg == "--qr-login");
     let system_titlebar = preferences::load_system_titlebar();
     ui_fonts::preload();
     let options = move || eframe::NativeOptions {
@@ -322,15 +260,10 @@ fn main() -> eframe::Result {
         "vk-fast",
         options,
         Box::new(move |cc: &eframe::CreationContext<'_>| {
-            let mut app =
-                app::MusicApp::new(&cc.egui_ctx, demo, language, cc.native_dialog_parent());
+            let mut app = app::MusicApp::new(&cc.egui_ctx, demo, language);
             app.attach_instance(activation);
             if qr_sign_in {
                 app.connect_qr(&cc.egui_ctx);
-            } else if args.iter().any(|arg| arg == "--oauth-login") {
-                app.connect_oauth(&cc.egui_ctx);
-            } else if sign_in {
-                app.connect_browser(&cc.egui_ctx);
             } else if !demo {
                 app.restore_session(&cc.egui_ctx);
             }
@@ -661,46 +594,6 @@ fn check_home() -> Result<(), String> {
     Ok(())
 }
 
-fn check_token_music() -> Result<(), String> {
-    let _ = browser_auth::restore(browser_auth::Control::restoring());
-    let saved = session_store::load()
-        .map_err(|_| "Не удалось прочитать сохранённый OAuth-вход.")?
-        .ok_or("Сохранённого OAuth-входа нет.")?;
-    let client = vk::VkClient::new(saved.access_token.clone())
-        .map_err(|error| error.localized(i18n::Language::Russian))?
-        .using_app_id(saved.client_id.clone());
-    let page = client
-        .audio_page(saved.profile.id, 0)
-        .map_err(|error| error.localized(i18n::Language::Russian))?;
-    println!("Токен без cookies загрузил {} треков.", page.items.len());
-    Ok(())
-}
-
-fn check_app_link() -> Result<(), String> {
-    let listener = auth_return::bind().map_err(|_| "Не удалось открыть канал возврата.")?;
-    let sample = "vkfast://oauth/callback?code=synthetic-code&device_id=synthetic-device&state=synthetic-state";
-    std::thread::spawn(move || {
-        let _ = open::that(sample);
-    });
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    loop {
-        match listener.try_receive() {
-            Ok(Some(value)) if value.as_str() == sample => {
-                println!("Системный обработчик vkfast передаёт ответ приложению без TCP-порта.");
-                return Ok(());
-            }
-            Ok(_) => (),
-            Err(_) => return Err("Не удалось получить тестовый ответ приложения.".into()),
-        }
-        if std::time::Instant::now() >= until {
-            return Err(
-                "Обработчик vkfast не ответил. Запустите scripts/install-auth-handler.sh.".into(),
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-}
-
 fn check_qr_start() -> Result<(), String> {
     use std::{
         sync::mpsc,
@@ -738,16 +631,6 @@ fn check_qr_start() -> Result<(), String> {
 }
 
 fn saved_profile() -> Result<model::Profile, String> {
-    if let Some((profile, _)) = music_session_store::restore_profile()
-        .map_err(|_| "Не удалось прочитать сохранённый профиль.")?
-    {
-        return Ok(profile);
-    }
-    if let Some(saved) =
-        session_store::load().map_err(|_| "Не удалось прочитать сохранённый вход.")?
-    {
-        return Ok(saved.profile.clone());
-    }
     music_session_store::restore_profile()
         .map_err(|_| "Не удалось прочитать сохранённый профиль.")?
         .map(|(profile, _)| profile)

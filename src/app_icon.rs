@@ -165,9 +165,7 @@ mod tests {
         }
         sizes.sort_unstable();
         assert_eq!(sizes, [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]);
-        let config: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        assert_eq!(config["bundle"]["icon"][0], "assets/vk-fast-icon.ico");
-        assert_eq!(config["bundle"]["icon"][1], "assets/vk-fast-icon.png");
+        let build = include_str!("../build.rs");
+        assert!(build.contains("assets/vk-fast-icon.ico"));
     }
 }

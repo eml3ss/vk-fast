@@ -105,14 +105,6 @@ impl HasWindowHandle for CreationContext<'_> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl CreationContext<'_> {
-    /// Retain the native root while a separately hosted dialog exports its parent.
-    pub fn native_dialog_parent(&self) -> Option<crate::NativeDialogParent> {
-        self.window.clone().map(crate::NativeDialogParent::new)
-    }
-}
-
 #[expect(unsafe_code)]
 #[cfg(not(target_arch = "wasm32"))]
 impl HasDisplayHandle for CreationContext<'_> {

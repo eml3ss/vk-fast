@@ -24,7 +24,7 @@
 
 ## Вход
 
-«Войти через VK» открывает нативную форму. Tauri работает со своим профилем в фоне; капча показывается отдельной карточкой. Доступен QR-вход. Сохранённая сессия восстанавливается при запуске. [Подробнее](docs/tauri-login.md).
+Вход выполняется только по QR-коду: отсканируйте его приложением VK на телефоне и подтвердите вход. Пароль и браузер не нужны. Сохранённая сессия восстанавливается при запуске, «Выйти из аккаунта» удаляет её с компьютера.
 
 ## Сборка
 
@@ -35,16 +35,16 @@ cargo build --release --locked
 cargo run --release --locked
 ```
 
-Для Linux нужны pkg-config, Clang/libclang, GTK 3, WebKitGTK 4.1, X11/Wayland, OpenGL/EGL и PipeWire. Пакеты для сборки:
+Для Linux нужны pkg-config, Clang/libclang, X11/Wayland, OpenGL/EGL и PipeWire. Пакеты для сборки:
 
 | Система | Пакеты |
 | --- | --- |
-| Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire gtk3 webkit2gtk-4.1` |
-| Debian / Ubuntu | `build-essential pkg-config libclang-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
+| Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire` |
+| Debian / Ubuntu | `build-essential pkg-config libclang-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
 
 Для запуска Linux-пакетов используются библиотеки дистрибутива. [Linux: запуск и упаковка](docs/linux.md).
 
-Windows x86-64 использует WASAPI; для входа нужен Microsoft Edge WebView2 Runtime. Настройки и кэш можно хранить в AppData или рядом с программой. [Windows: сборка, установщик и обновления](docs/windows.md).
+Windows x86-64 использует WASAPI. Настройки и кэш можно хранить в AppData или рядом с программой. [Windows: сборка, установщик и обновления](docs/windows.md).
 
 ## Данные и лицензия
 

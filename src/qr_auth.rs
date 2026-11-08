@@ -1,4 +1,4 @@
-//! Fresh VK website QR sessions, separate from VK Fast's own VK ID OAuth.
+//! Fresh VK website QR sessions: the only way to sign in to VK Fast.
 //! Protocol: public qrAuth-web entry.b9595b4b.js and
 //! static.vk.ru/vkid/1.1.1427/185.js, checked 2026-10-29.
 
@@ -28,7 +28,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-// Actual VK website identity; never replaces VK Fast's own OAuth app 54863250.
+// Actual VK website identity used by the QR sign-in.
 const WEBSITE_APP: &str = "7913379";
 const API: &str = "https://api.vk.ru/method/";
 const RETURN_URI: &str = "https://vk.ru/feed";
