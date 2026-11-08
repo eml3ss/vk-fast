@@ -178,6 +178,21 @@ pub fn valid_handler(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
 }
 
+/// The first handler that is not VK Fast and can actually start: `saved`
+/// first, then `candidates` in order.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn pick_browser(
+    saved: Option<String>,
+    candidates: Vec<String>,
+    own: &str,
+    usable: impl Fn(&str) -> bool,
+) -> Option<String> {
+    saved
+        .into_iter()
+        .chain(candidates)
+        .find(|id| id != own && valid_handler(id) && usable(id))
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::{disable, enable, forward, refresh_registration, status};
 #[cfg(windows)]
@@ -590,14 +605,61 @@ mod windows {
     const REGISTERED: &str = "Software\\RegisteredApplications";
 
     fn user_choice() -> Option<String> {
+        scheme_choice("https")
+    }
+
+    fn scheme_choice(scheme: &str) -> Option<String> {
         RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(
-                "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice",
-            )
+            .open_subkey(format!(
+                "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\{scheme}\\UserChoice"
+            ))
             .ok()?
             .get_value::<String, _>("ProgId")
             .ok()
             .filter(|id| valid_handler(id))
+    }
+
+    /// Browsers to hand other links to, best first: the user's https and
+    /// http choices, then every registered application's https handler. A
+    /// choice can be stale, e.g. `MSEdgeHTM` after Edge was removed.
+    fn candidates() -> Vec<String> {
+        let mut ids: Vec<String> = [scheme_choice("https"), scheme_choice("http")]
+            .into_iter()
+            .flatten()
+            .collect();
+        for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let root = RegKey::predef(root);
+            let Ok(registered) = root.open_subkey(REGISTERED) else {
+                continue;
+            };
+            for (name, _) in registered.enum_values().flatten() {
+                if name == APP_NAME {
+                    continue;
+                }
+                let Ok(path) = registered.get_value::<String, _>(&name) else {
+                    continue;
+                };
+                if let Some(id) = root
+                    .open_subkey(format!("{path}\\URLAssociations"))
+                    .ok()
+                    .and_then(|key| key.get_value::<String, _>("https").ok())
+                    .filter(|id| valid_handler(id))
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// The first usable browser: the saved one, then the candidates.
+    fn browser() -> Option<String> {
+        pick_browser(
+            crate::preferences::load_link_browser(),
+            candidates(),
+            PROG_ID,
+            |id| class_command(id).is_some(),
+        )
     }
 
     fn command(executable: &str) -> String {
@@ -694,9 +756,13 @@ mod windows {
         let enabled = registered();
         let current = user_choice();
         let active = enabled && current.as_deref() == Some(PROG_ID);
-        let browser = crate::preferences::load_link_browser()
-            .filter(|_| enabled)
-            .or_else(|| current.filter(|id| id != PROG_ID));
+        let browser = if enabled {
+            browser()
+        } else {
+            pick_browser(None, candidates(), PROG_ID, |id| {
+                class_command(id).is_some()
+            })
+        };
         Status {
             enabled,
             active,
@@ -705,11 +771,11 @@ mod windows {
     }
 
     pub fn enable() -> Result<(), RouterError> {
-        let previous = user_choice()
-            .filter(|id| id != PROG_ID)
-            .or_else(crate::preferences::load_link_browser)
-            .filter(|id| class_command(id).is_some())
-            .ok_or(RouterError::NoBrowser)?;
+        let previous = pick_browser(None, candidates(), PROG_ID, |id| {
+            class_command(id).is_some()
+        })
+        .or_else(browser)
+        .ok_or(RouterError::NoBrowser)?;
         crate::preferences::save_link_browser(&previous)?;
         register()?;
         // Windows lets only the user change the default link handler.
@@ -748,9 +814,7 @@ mod windows {
 
     pub fn forward(url: &str) -> Result<(), RouterError> {
         use std::os::windows::process::CommandExt;
-        let id = crate::preferences::load_link_browser()
-            .filter(|id| id != PROG_ID)
-            .ok_or(RouterError::NoBrowser)?;
+        let id = browser().ok_or(RouterError::NoBrowser)?;
         let line = class_command(&id).ok_or(RouterError::NoBrowser)?;
         let line = line.trim();
         let (program, rest) = if let Some(quoted) = line.strip_prefix('"') {
@@ -851,6 +915,51 @@ mod tests {
         }
         assert_eq!(
             parse(&format!("https://vk.ru/audio1_2?{}", "a".repeat(MAX_URL))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stale_default_browser_falls_back_to_a_registered_one() {
+        let usable = |id: &str| matches!(id, "ChromeHTML" | "FirefoxURL-1");
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect();
+        assert_eq!(
+            pick_browser(
+                None,
+                ids(&["MSEdgeHTM", "MSEdgeHTM", "ChromeHTML"]),
+                "VKFast.Link",
+                usable
+            )
+            .as_deref(),
+            Some("ChromeHTML")
+        );
+        assert_eq!(
+            pick_browser(
+                Some("FirefoxURL-1".into()),
+                ids(&["ChromeHTML"]),
+                "VKFast.Link",
+                usable
+            )
+            .as_deref(),
+            Some("FirefoxURL-1")
+        );
+        assert_eq!(
+            pick_browser(
+                Some("MSEdgeHTM".into()),
+                ids(&["VKFast.Link"]),
+                "VKFast.Link",
+                |_| true
+            )
+            .as_deref(),
+            Some("MSEdgeHTM")
+        );
+        assert_eq!(
+            pick_browser(
+                None,
+                ids(&["VKFast.Link", "MSEdgeHTM"]),
+                "VKFast.Link",
+                usable
+            ),
             None
         );
     }
