@@ -2391,9 +2391,57 @@ impl MusicApp {
                 keybinds::Command::Next if !self.demo && self.session.is_some() => {
                     self.next_track(ctx)
                 }
+                keybinds::Command::Reload if !self.demo && self.session.is_some() => {
+                    self.reload_page(ctx)
+                }
                 _ => {}
             }
             ctx.request_repaint();
+        }
+    }
+
+    /// Ctrl+R: the same refresh as the open page's own Refresh button.
+    fn reload_page(&mut self, ctx: &egui::Context) {
+        if self.settings_open {
+            return;
+        }
+        match self.page.clone() {
+            MusicPage::Home => {
+                if self.home_request.is_none() && self.catalog_request.is_none() {
+                    self.load_home(ctx);
+                    if self.pending.is_none() {
+                        self.load_page(ctx, true);
+                    }
+                }
+            }
+            MusicPage::Library => {
+                if self.pending.is_none() && self.home_request.is_none() {
+                    self.load_page(ctx, true);
+                }
+            }
+            MusicPage::Collection(id) => {
+                if self.pending.is_none() && self.home_request.is_none() {
+                    self.open_collection(ctx, id, true);
+                }
+            }
+            MusicPage::Search(query) if !query.is_empty() => {
+                if self.search.results_request.is_none() {
+                    self.search.cache.remove(&query);
+                    self.search.results = None;
+                    self.search.results_error = None;
+                    self.start_search_results(ctx, 0);
+                }
+            }
+            MusicPage::Artist(_)
+            | MusicPage::Album(_)
+            | MusicPage::Playlist(_)
+            | MusicPage::Owner(_)
+            | MusicPage::TrackAlbum(..) => {
+                if self.detail_request.is_none() {
+                    self.ensure_detail(ctx, true);
+                }
+            }
+            MusicPage::Search(_) | MusicPage::Recent => {}
         }
     }
 

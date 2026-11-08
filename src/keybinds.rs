@@ -9,6 +9,8 @@ pub enum Command {
     Volume(f32),
     Previous,
     Next,
+    /// Ctrl+R: refresh the open page, like its Refresh button.
+    Reload,
 }
 
 struct Binding {
@@ -24,6 +26,7 @@ fn binding(key: Key, modifiers: Modifiers) -> Option<Binding> {
         let command = match key {
             Key::ArrowLeft => Command::Previous,
             Key::ArrowRight => Command::Next,
+            Key::R => Command::Reload,
             _ => return None,
         };
         return Some(Binding {
@@ -216,6 +219,7 @@ mod tests {
             (Key::Space, Modifiers::NONE, Command::TogglePause, None),
             (Key::ArrowRight, Modifiers::CTRL, Command::Next, None),
             (Key::ArrowLeft, Modifiers::CTRL, Command::Previous, None),
+            (Key::R, Modifiers::CTRL, Command::Reload, None),
             (
                 Key::ArrowRight,
                 Modifiers::NONE,
