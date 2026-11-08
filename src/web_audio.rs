@@ -34,11 +34,15 @@ use crate::{
 mod artist_follow;
 #[path = "web_audio/audio_upload.rs"]
 mod audio_upload;
+mod home_catalog;
 mod owner_page;
 mod playlist_follow;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
 pub use artist_follow::FollowedArtist;
+#[cfg(test)]
+pub use home_catalog::MixTile;
+pub use home_catalog::{ArtistMix, CatalogMix, FriendPlaylist, HomeCatalog};
 pub use owner_page::OwnerPage;
 pub use playlist_follow::PlaylistFollowChange;
 pub use playlist_manage::{
@@ -281,6 +285,8 @@ enum MixSource {
     Personal,
     Track((i64, i64)),
     Playlist((i64, i64)),
+    /// A Home catalog tile; its parameters travel with the request.
+    Catalog(u64),
 }
 
 impl MixSource {
@@ -295,6 +301,7 @@ impl MixSource {
                 ("mix_id", "playlist_mix".into()),
                 ("entity_id", format!("{owner}_{playlist}")),
             ],
+            Self::Catalog(_) => Vec::new(),
         }
     }
 }
@@ -1259,6 +1266,43 @@ impl WebAudioClient {
             canceled,
             |session, params| self.request_stream_mix(session, params),
         )
+    }
+
+    /// Genre, mood and artist mixes advertised by VK's catalog Home. `session`
+    /// is the first-party player's random mix id, reused for every batch.
+    pub fn catalog_mix(
+        &self,
+        expected_owner: i64,
+        mix: &CatalogMix,
+        session: u64,
+        canceled: &AtomicBool,
+    ) -> Result<MixPage, WebAudioError> {
+        self.stream_mix_request(
+            expected_owner,
+            MixSource::Catalog(session),
+            canceled,
+            |token, _| self.request_stream_mix(token, mix.params(session)),
+        )
+    }
+
+    /// VK's catalog Home (`catalog.getAudio`), read for the blocks the legacy
+    /// Home does not render. Preview tracks become playable like Home rows.
+    pub fn home_catalog(
+        &self,
+        expected_owner: i64,
+        canceled: &AtomicBool,
+    ) -> Result<HomeCatalog, WebAudioError> {
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let value = self.detail_request(
+            expected_owner,
+            generation,
+            "catalog.getAudio",
+            vec![("need_blocks", "1".into())],
+            canceled,
+        )?;
+        let (catalog, streams) = home_catalog::parse_home_catalog(&value)?;
+        self.commit_home_streams(expected_owner, generation, streams, canceled)?;
+        Ok(catalog)
     }
 
     fn request_stream_mix(
@@ -2960,6 +3004,7 @@ fn detail_method_is_readonly(method: &str) -> bool {
             | "audio.searchAlbums"
             | "audio.searchArtists"
             | "audio.searchPlaylists"
+            | "catalog.getAudio"
             | "catalog.getAudioArtist"
             | "catalog.getAudioSearch"
             | "users.get"

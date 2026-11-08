@@ -605,7 +605,10 @@ impl Drop for LikeRequest {
 }
 
 enum HomeReply {
-    Catalog(Vec<crate::web_audio::HomeCollection>),
+    Catalog(
+        Vec<crate::web_audio::HomeCollection>,
+        Option<crate::web_audio::HomeCatalog>,
+    ),
     Tracks(String, Vec<Track>),
 }
 
@@ -660,6 +663,8 @@ impl Drop for MixRequest {
 enum MixSeed {
     Track((i64, i64)),
     Playlist((i64, i64)),
+    /// A Home genre, mood or artist mix; the definition is `catalog_mix`.
+    Catalog(u64),
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -1042,6 +1047,8 @@ pub struct MusicApp {
     queue_origin: Option<String>,
     home_collections: Vec<home_ui::Collection>,
     home_sources: Vec<crate::web_audio::HomeCollection>,
+    home_catalog: crate::web_audio::HomeCatalog,
+    catalog_mix: Option<(u64, crate::web_audio::CatalogMix)>,
     home_request: Option<HomeRequest>,
     home_requested: bool,
     home_error: Option<WebAudioError>,
@@ -1361,6 +1368,8 @@ impl MusicApp {
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),
+            home_catalog: Default::default(),
+            catalog_mix: None,
             home_request: None,
             home_requested: false,
             home_error: None,
@@ -1660,6 +1669,8 @@ impl MusicApp {
         self.home_requested = false;
         self.home_collections.clear();
         self.home_sources.clear();
+        self.home_catalog = Default::default();
+        self.catalog_mix = None;
         self.playlist_items.clear();
         self.editable_playlists.clear();
         self.playlist_add_request = None;
@@ -3237,6 +3248,35 @@ impl MusicApp {
         }
     }
 
+    /// Start a Home genre, mood or artist mix, or toggle the one already playing.
+    fn play_catalog_mix(&mut self, ctx: &egui::Context, mix: crate::web_audio::CatalogMix) {
+        if self.demo || !self.search_ready() {
+            return;
+        }
+        if self.mix_active
+            && self.playing.is_some()
+            && let (Some(MixSeed::Catalog(session)), Some((current, active))) =
+                (self.mix_seed, &self.catalog_mix)
+            && session == *current
+            && *active == mix
+        {
+            self.toggle_playback(ctx);
+            return;
+        }
+        // VK's player picks a random 13-digit mix session and reuses it for
+        // every batch of the same mix.
+        let random = getrandom::u64().unwrap_or_else(|_| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+        });
+        let session = 1_000_000_000_000 + random % 9_000_000_000_000;
+        self.mix_request = None;
+        self.track_menu_error = None;
+        self.catalog_mix = Some((session, mix));
+        self.load_mix_from(ctx, true, Some(MixSeed::Catalog(session)));
+    }
+
     fn load_mix(&mut self, ctx: &egui::Context, start: bool) {
         self.load_mix_from(ctx, start, self.mix_seed);
     }
@@ -3275,14 +3315,32 @@ impl MusicApp {
         self.home_autoplay = None;
         self.advance_on_load = false;
         self.mix_error = None;
+        let catalog = match seed {
+            Some(MixSeed::Catalog(session)) => {
+                let Some((_, mix)) = self
+                    .catalog_mix
+                    .as_ref()
+                    .filter(|(current, _)| *current == session)
+                else {
+                    self.mix_load_failed(ctx, start, seed, WebAudioError::NoStream);
+                    return;
+                };
+                Some(mix.clone())
+            }
+            _ => None,
+        };
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let repaint = self.repaint_target.with_context(ctx);
         match thread::Builder::new().name("vk-mix".into()).spawn(move || {
-            let result = match seed {
-                Some(MixSeed::Track(key)) => client.track_mix(owner, key, &worker_cancel),
-                Some(MixSeed::Playlist((owner_id, id))) => client.playlist_mix(
+            let result = match (seed, catalog) {
+                (Some(MixSeed::Catalog(session)), Some(mix)) => {
+                    client.catalog_mix(owner, &mix, session, &worker_cancel)
+                }
+                (Some(MixSeed::Catalog(_)), None) => Err(WebAudioError::NoStream),
+                (Some(MixSeed::Track(key)), _) => client.track_mix(owner, key, &worker_cancel),
+                (Some(MixSeed::Playlist((owner_id, id))), _) => client.playlist_mix(
                     owner,
                     &AlbumRef {
                         owner_id,
@@ -3293,7 +3351,7 @@ impl MusicApp {
                     },
                     &worker_cancel,
                 ),
-                None => client.vk_mix(owner, &worker_cancel),
+                (None, _) => client.vk_mix(owner, &worker_cancel),
             };
             let _ = sender.send(result);
             repaint.request_repaint();
@@ -3381,6 +3439,7 @@ impl MusicApp {
                                 MixSeed::Playlist(key) => {
                                     format!("playlist-mix:{}_{}", key.0, key.1)
                                 }
+                                MixSeed::Catalog(session) => format!("catalog-mix:{session}"),
                             },
                         );
                         self.start_queue_from(ctx, page.tracks, origin);
@@ -4599,7 +4658,11 @@ impl MusicApp {
             .spawn(move || {
                 let result = client
                     .home(owner, &worker_cancel)
-                    .map(HomeReply::Catalog)
+                    .map(|collections| {
+                        // Optional blocks: a catalog failure keeps the legacy Home.
+                        let catalog = client.home_catalog(owner, &worker_cancel).ok();
+                        HomeReply::Catalog(collections, catalog)
+                    })
                     .map_err(|error| client.confirm_expired(owner, error));
                 let _ = sender.send(result);
                 ctx.request_repaint();
@@ -4695,9 +4758,22 @@ impl MusicApp {
             self.track_view_cache.invalidate();
         }
         match result {
-            Ok(HomeReply::Catalog(sources)) => {
+            Ok(HomeReply::Catalog(sources, catalog)) => {
+                if let Some(catalog) = catalog {
+                    self.home_catalog = catalog;
+                }
+                // The legacy Home repeats VK's genre and mood tiles as large
+                // playlist cards; Home shows those tiles as compact chips.
+                let chips: HashSet<&str> = self
+                    .home_catalog
+                    .genres
+                    .iter()
+                    .chain(&self.home_catalog.moods)
+                    .map(|tile| tile.title.as_str())
+                    .collect();
                 self.home_collections = sources
                     .iter()
+                    .filter(|source| !chips.contains(source.title.as_str()))
                     .map(|source| home_ui::Collection {
                         id: source.id.clone(),
                         title: source.title.clone(),
@@ -5898,6 +5974,7 @@ impl MusicApp {
                     .as_ref()
                     .map(|error| error.message(self.language))
             });
+        let catalog_mix = self.catalog_mix.as_ref();
         let action = home_ui::show(
             ui,
             &mut self.covers,
@@ -5921,6 +5998,22 @@ impl MusicApp {
                 loading: self.home_request.is_some()
                     || (!self.home_requested && self.pending.is_some() && self.session.is_some()),
                 collections: &self.home_collections,
+                catalog: &self.home_catalog,
+                active_mix: catalog_mix
+                    .filter(|_| self.mix_active)
+                    .filter(|(session, _)| self.mix_seed == Some(MixSeed::Catalog(*session)))
+                    .map(|(_, mix)| mix),
+                active_mix_playing: matches!(
+                    self.player.snapshot().state,
+                    PlaybackState::Playing | PlaybackState::Loading
+                ),
+                pending_mix: catalog_mix
+                    .filter(|(session, _)| {
+                        self.mix_request.as_ref().is_some_and(|request| {
+                            request.start && request.seed == Some(MixSeed::Catalog(*session))
+                        })
+                    })
+                    .map(|(_, mix)| mix),
                 error: error.as_deref(),
             },
         );
@@ -5967,6 +6060,27 @@ impl MusicApp {
                         self.home_autoplay = Some(id);
                         self.advance_on_load = false;
                     }
+                }
+            }
+            Some(home_ui::Action::PlayCatalogMix(mix)) => self.play_catalog_mix(&ctx, mix),
+            Some(home_ui::Action::OpenPlaylist(reference)) => {
+                self.navigate_music(&ctx, MusicPage::Playlist(reference));
+            }
+            Some(home_ui::Action::PlayFriendTrack(playlist, key)) => {
+                let tracks = self
+                    .home_catalog
+                    .friends
+                    .iter()
+                    .find(|friend| (friend.playlist.owner_id, friend.playlist.id) == playlist)
+                    .map(|friend| friend.tracks.clone())
+                    .unwrap_or_default();
+                if tracks.iter().any(|track| track.key() == key) {
+                    self.leave_mix();
+                    self.replace_play_queue_from(
+                        Some(tracks),
+                        format!("friend-playlist:{}_{}", playlist.0, playlist.1),
+                    );
+                    self.play_track(&ctx, key);
                 }
             }
             Some(home_ui::Action::Refresh) => self.load_home(&ctx),
@@ -8852,6 +8966,8 @@ mod tests {
             queue_origin: None,
             home_collections: Vec::new(),
             home_sources: Vec::new(),
+            home_catalog: Default::default(),
+            catalog_mix: None,
             home_request: None,
             home_requested: false,
             home_error: None,
@@ -9593,7 +9709,11 @@ mod tests {
         app.page = MusicPage::Collection("old-playlist".into());
         app.reset();
         assert!(canceled.load(Ordering::Acquire));
-        assert!(sender.send(Ok(HomeReply::Catalog(Vec::new()))).is_err());
+        assert!(
+            sender
+                .send(Ok(HomeReply::Catalog(Vec::new(), None)))
+                .is_err()
+        );
         assert!(app.recent.is_empty());
         assert!(app.play_queue.is_none());
         assert!(app.home_autoplay.is_none());

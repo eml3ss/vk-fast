@@ -7,8 +7,9 @@ use crate::{
     cover_art::CoverCache,
     i18n::Language,
     icons::{self, Icon},
-    model::Track,
+    model::{AlbumRef, Track},
     theme,
+    web_audio::{ArtistMix, CatalogMix, FriendPlaylist, HomeCatalog},
 };
 
 #[derive(Clone)]
@@ -31,6 +32,11 @@ pub struct HomeView<'a> {
     pub mix_loading: bool,
     pub mix_playing: bool,
     pub collections: &'a [Collection],
+    pub catalog: &'a HomeCatalog,
+    /// The Home catalog mix that is current, and whether it is audible.
+    pub active_mix: Option<&'a CatalogMix>,
+    pub active_mix_playing: bool,
+    pub pending_mix: Option<&'a CatalogMix>,
     pub error: Option<&'a str>,
 }
 
@@ -43,9 +49,16 @@ pub enum Action {
     PlayTrack((i64, i64)),
     OpenCollection(String),
     PlayCollection(String),
+    PlayCatalogMix(CatalogMix),
+    OpenPlaylist(AlbumRef),
+    PlayFriendTrack((i64, i64), (i64, i64)),
     Refresh,
     SignIn,
 }
+
+/// One vertical rhythm for Home: the gap above a section heading equals the
+/// gap between that heading and its content (plus egui's item spacing).
+const SECTION_GAP: f32 = 10.0;
 
 pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> Option<Action> {
     let mut action = None;
@@ -65,10 +78,10 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
     };
     theme::scroll_area(ui, scroll, |ui| {
         action = hero(ui, &view).or(action.take());
-        ui.add_space(22.0);
+        ui.add_space(SECTION_GAP);
         action = shortcuts(ui, covers, &view).or(action.take());
         if let Some(error) = view.error {
-            ui.add_space(18.0);
+            ui.add_space(SECTION_GAP);
             egui::Frame::new()
                 .fill(Color32::from_rgb(54, 35, 39))
                 .corner_radius(12)
@@ -85,7 +98,7 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         }
 
         if !view.recent.is_empty() {
-            ui.add_space(26.0);
+            ui.add_space(SECTION_GAP);
             if section_heading(
                 ui,
                 Icon::Clock,
@@ -95,13 +108,16 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
             ) {
                 action = Some(Action::PlayRecent);
             }
-            ui.add_space(10.0);
+            ui.add_space(SECTION_GAP);
             let columns = ((ui.available_width() + 16.0) / 216.0)
                 .floor()
                 .clamp(1.0, 5.0) as usize;
             let width = cell_width(ui.available_width(), columns);
             let recent = recent_preview(view.recent, columns * 2);
             for (row, tracks) in recent.chunks(columns).enumerate() {
+                if row > 0 {
+                    ui.add_space(4.0);
+                }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
                     for (column, track) in tracks.iter().enumerate() {
@@ -112,11 +128,10 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                         });
                     }
                 });
-                ui.add_space(4.0);
             }
         }
 
-        ui.add_space(26.0);
+        ui.add_space(SECTION_GAP);
         if section_heading(
             ui,
             Icon::Sparkles,
@@ -126,7 +141,7 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         ) {
             action = Some(Action::Refresh);
         }
-        ui.add_space(10.0);
+        ui.add_space(SECTION_GAP);
         if view.collections.is_empty() {
             empty_collections(ui, &view);
         } else {
@@ -150,9 +165,426 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                 ui.add_space(8.0);
             }
         }
+        action = catalog_sections(ui, covers, &view).or(action.take());
         ui.add_space(8.0);
     });
     action
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MixState {
+    Idle,
+    Pending,
+    Playing,
+    Paused,
+}
+
+impl MixState {
+    fn of(view: &HomeView<'_>, mix: &CatalogMix) -> Self {
+        if view.pending_mix == Some(mix) {
+            Self::Pending
+        } else if view.active_mix != Some(mix) {
+            Self::Idle
+        } else if view.active_mix_playing {
+            Self::Playing
+        } else {
+            Self::Paused
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Pending => Icon::Clock,
+            Self::Playing => Icon::Pause,
+            Self::Idle | Self::Paused => Icon::Play,
+        }
+    }
+}
+
+fn catalog_sections(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: &HomeView<'_>,
+) -> Option<Action> {
+    let mut action = None;
+    let language = view.language;
+    for (icon, title, tiles) in [
+        (
+            Icon::Album,
+            language.text("Жанры", "Genres"),
+            &view.catalog.genres,
+        ),
+        (
+            Icon::Heart,
+            language.text("Настроения и занятия", "Moods and activities"),
+            &view.catalog.moods,
+        ),
+    ] {
+        if tiles.is_empty() {
+            continue;
+        }
+        ui.add_space(SECTION_GAP);
+        section_heading(ui, icon, title, None, true);
+        ui.add_space(SECTION_GAP);
+        // Explicit rows: a chip never widens the page past the viewport.
+        let available = ui.available_width();
+        let mut rows: Vec<Vec<_>> = Vec::new();
+        let mut used = f32::INFINITY;
+        for tile in tiles {
+            let width = chip_width(ui, &tile.title);
+            if used + CHIP_GAP + width > available {
+                rows.push(Vec::new());
+                used = width;
+            } else {
+                used += CHIP_GAP + width;
+            }
+            if let Some(row) = rows.last_mut() {
+                row.push(tile);
+            }
+        }
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(CHIP_GAP);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = CHIP_GAP;
+                for tile in row {
+                    ui.push_id(("home-mix-tile", &tile.id), |ui| {
+                        if mix_chip(ui, &tile.title, MixState::of(view, &tile.mix)).clicked() {
+                            action = Some(Action::PlayCatalogMix(tile.mix.clone()));
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    if !view.catalog.friends.is_empty() {
+        ui.add_space(SECTION_GAP);
+        section_heading(
+            ui,
+            Icon::Account,
+            language.text("Слушайте друг друга", "Listen with friends"),
+            None,
+            true,
+        );
+        ui.add_space(SECTION_GAP);
+        let columns = columns(ui.available_width());
+        let width = cell_width(ui.available_width(), columns);
+        for (row, friends) in view.catalog.friends.chunks(columns).enumerate() {
+            if row > 0 {
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                for friend in friends {
+                    let key = (friend.playlist.owner_id, friend.playlist.id);
+                    ui.push_id(("home-friend", key), |ui| {
+                        if let Some(intent) = friend_card(ui, covers, friend, width, language) {
+                            action = Some(intent);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    if !view.catalog.artist_mixes.is_empty() {
+        ui.add_space(SECTION_GAP);
+        section_heading(
+            ui,
+            Icon::Radio,
+            language.text("Микс по артистам", "Artist mixes"),
+            None,
+            true,
+        );
+        ui.add_space(SECTION_GAP);
+        let columns = columns(ui.available_width());
+        let width = cell_width(ui.available_width(), columns);
+        for (row, mixes) in view.catalog.artist_mixes.chunks(columns).enumerate() {
+            if row > 0 {
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                for (column, mix) in mixes.iter().enumerate() {
+                    ui.push_id(("home-artist-mix", row, column), |ui| {
+                        let state = MixState::of(view, &mix.mix);
+                        if artist_mix_card(ui, covers, mix, width, state).clicked() {
+                            action = Some(Action::PlayCatalogMix(mix.mix.clone()));
+                        }
+                    });
+                }
+            });
+        }
+    }
+    action
+}
+
+const CHIP_GAP: f32 = 8.0;
+const CHIP_DISC: f32 = 11.0;
+
+fn chip_galley(ui: &egui::Ui, title: &str) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        title.to_owned(),
+        egui::FontId::new(14.0, theme::semibold()),
+        ui.visuals().text_color(),
+    )
+}
+
+fn chip_width(ui: &egui::Ui, title: &str) -> f32 {
+    7.0 + CHIP_DISC * 2.0 + 8.0 + chip_galley(ui, title).size().x + 16.0
+}
+
+/// A compact genre or mood pill: the app's surface, a blue play disc and the
+/// accent outline while its mix is the current one.
+fn mix_chip(ui: &mut egui::Ui, title: &str, state: MixState) -> Response {
+    let text_color = ui.visuals().text_color();
+    let galley = chip_galley(ui, title);
+    let disc = CHIP_DISC;
+    let size = egui::vec2(chip_width(ui, title), 36.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        response.request_focus();
+    }
+    let hovered = response.hovered() || response.has_focus();
+    let active = state != MixState::Idle;
+    let fill = if active {
+        theme::SELECTED
+    } else if hovered {
+        Color32::from_rgb(31, 38, 49)
+    } else {
+        theme::SURFACE
+    };
+    let radius = rect.height() * 0.5;
+    ui.painter().rect_filled(rect, radius, fill);
+    if active || hovered {
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            Stroke::new(
+                1.0,
+                if active {
+                    theme::ACCENT
+                } else {
+                    theme::PRIMARY
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let center = egui::pos2(rect.left() + 7.0 + disc, rect.center().y);
+    ui.painter().circle_filled(
+        center,
+        disc,
+        if active {
+            theme::ACCENT
+        } else {
+            theme::PRIMARY
+        },
+    );
+    icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+        state.icon(),
+        Color32::WHITE,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            center.x + disc + 8.0,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        text_color,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn friend_card(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    friend: &FriendPlaylist,
+    width: f32,
+    language: Language,
+) -> Option<Action> {
+    const HEADER: f32 = 84.0;
+    const ROW: f32 = 44.0;
+    let rows = friend.tracks.len().min(3);
+    let height = HEADER + 6.0 + ROW * rows as f32 + 6.0;
+    let (rect, response) = card(ui, egui::vec2(width, height), &friend.playlist.title);
+    let header = egui::Rect::from_min_size(rect.min, egui::vec2(width, HEADER));
+    if let Some([red, green, blue]) = friend.color {
+        ui.painter().rect_filled(
+            header,
+            egui::CornerRadius {
+                nw: 12,
+                ne: 12,
+                sw: 0,
+                se: 0,
+            },
+            Color32::from_rgba_unmultiplied(red, green, blue, 46),
+        );
+    }
+    let mut text = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("home-friend-text")
+            .max_rect(header.shrink2(egui::vec2(14.0, 12.0)))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    text.set_clip_rect(ui.clip_rect().intersect(header));
+    text.spacing_mut().item_spacing.y = 3.0;
+    if let Some(percent) = friend.match_percent {
+        text.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "{percent}% · {}",
+                    language.text("совпадение с вашим вкусом", "match with your taste")
+                ))
+                .small()
+                .color(Color32::from_rgb(196, 210, 230)),
+            )
+            .truncate()
+            .selectable(false),
+        );
+    }
+    text.add(
+        egui::Label::new(
+            RichText::new(&friend.playlist.title)
+                .size(16.0)
+                .family(theme::semibold()),
+        )
+        .truncate()
+        .selectable(false),
+    );
+    text.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if friend.owner_photo.is_some() {
+            covers.show_rounded(ui, friend.owner_photo.as_deref(), 16.0, 8);
+        }
+        ui.add(
+            egui::Label::new(
+                RichText::new(&friend.owner_name)
+                    .small()
+                    .color(theme::MUTED),
+            )
+            .truncate()
+            .selectable(false),
+        );
+    });
+
+    let mut intent = None;
+    for (index, track) in friend.tracks.iter().take(rows).enumerate() {
+        let row = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.left() + 6.0,
+                header.bottom() + 6.0 + ROW * index as f32,
+            ),
+            egui::vec2(width - 12.0, ROW),
+        );
+        let hit = ui.interact(row, ui.id().with(("friend-track", index)), Sense::click());
+        if hit.hovered() {
+            ui.painter()
+                .rect_filled(row, 8.0, Color32::from_rgb(36, 44, 57));
+        }
+        image(
+            ui,
+            covers,
+            egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0)),
+            track.cover_url.as_deref(),
+            index + 1,
+        );
+        let mut line = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("home-friend-track", index))
+                .max_rect(egui::Rect::from_min_max(
+                    row.min + egui::vec2(48.0, 5.0),
+                    row.max - egui::vec2(8.0, 4.0),
+                ))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        line.set_clip_rect(ui.clip_rect().intersect(row));
+        line.spacing_mut().item_spacing.y = 1.0;
+        line.add(
+            egui::Label::new(theme::track_title(
+                track,
+                line.visuals().text_color(),
+                egui::FontId::proportional(14.0),
+            ))
+            .truncate()
+            .selectable(false),
+        );
+        line.add(
+            egui::Label::new(RichText::new(&track.artist).small().color(theme::MUTED))
+                .truncate()
+                .selectable(false),
+        );
+        hit.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &track.title));
+        if hit
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            intent = Some(Action::PlayFriendTrack(
+                (friend.playlist.owner_id, friend.playlist.id),
+                track.key(),
+            ));
+        }
+    }
+    intent.or_else(|| {
+        response
+            .clicked()
+            .then(|| Action::OpenPlaylist(friend.playlist.clone()))
+    })
+}
+
+fn artist_mix_card(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    mix: &ArtistMix,
+    width: f32,
+    state: MixState,
+) -> Response {
+    let (rect, response) = card(ui, egui::vec2(width, 194.0), &mix.title);
+    if state != MixState::Idle {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let art =
+        egui::Rect::from_min_size(rect.min + egui::vec2(14.0, 14.0), egui::vec2(112.0, 112.0));
+    let mut photo = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("home-artist-photo")
+            .max_rect(art)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    photo.set_clip_rect(ui.clip_rect().intersect(art));
+    covers.show_rounded(&mut photo, mix.photo_url.as_deref(), art.width(), 56);
+    let badge = art.right_bottom() - egui::vec2(16.0, 16.0);
+    ui.painter().circle_filled(badge, 20.0, Color32::WHITE);
+    icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(badge, egui::vec2(20.0, 20.0)),
+        state.icon(),
+        theme::BACKGROUND,
+    );
+    card_text(
+        ui,
+        egui::Rect::from_min_max(
+            rect.min + egui::vec2(14.0, 142.0),
+            rect.max - egui::vec2(14.0, 12.0),
+        ),
+        RichText::new(&mix.title)
+            .size(16.0)
+            .family(theme::semibold()),
+        &mix.description,
+    );
+    response
 }
 
 fn columns(width: f32) -> usize {
@@ -481,6 +913,9 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
     let width = cell_width(ui.available_width(), columns);
     let mut action = None;
     for (row, entries) in entries.chunks(columns).enumerate() {
+        if row > 0 {
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
             for (column, (title, subtitle, tracks, icon, intent)) in entries.iter().enumerate() {
@@ -515,7 +950,6 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
                 });
             }
         });
-        ui.add_space(8.0);
     }
     action
 }
@@ -734,6 +1168,10 @@ mod tests {
                         mix_loading: state.loading,
                         mix_playing: state.playing,
                         collections: &[],
+                        catalog: &HomeCatalog::default(),
+                        active_mix: None,
+                        active_mix_playing: false,
+                        pending_mix: None,
                         error: None,
                     },
                 );
@@ -851,6 +1289,10 @@ mod tests {
                         mix_loading: false,
                         mix_playing: false,
                         collections: std::slice::from_ref(collection),
+                        catalog: &HomeCatalog::default(),
+                        active_mix: None,
+                        active_mix_playing: false,
+                        pending_mix: None,
                         error: None,
                     },
                 );
@@ -858,6 +1300,167 @@ mod tests {
         );
         output.textures_delta.clear();
         (output, action)
+    }
+
+    fn catalog_frame(
+        context: &egui::Context,
+        covers: &mut CoverCache,
+        catalog: &HomeCatalog,
+        tick: u32,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<Action>) {
+        let mut action = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 2000.0),
+                )),
+                time: Some(f64::from(tick) * 0.1),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                action = show(
+                    ui,
+                    covers,
+                    HomeView {
+                        language: Language::Russian,
+                        library: &[],
+                        library_total: None,
+                        recent: &[],
+                        playing: None,
+                        connected: true,
+                        loading: false,
+                        mix_loading: false,
+                        mix_playing: false,
+                        collections: &[],
+                        catalog,
+                        active_mix: catalog.genres.first().map(|tile| &tile.mix),
+                        active_mix_playing: true,
+                        pending_mix: None,
+                        error: None,
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+        (output, action)
+    }
+
+    fn text_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"))
+    }
+
+    #[test]
+    fn catalog_chips_friend_rows_and_artist_mixes_produce_their_own_intents() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let template = crate::model::demo_tracks().remove(0);
+        let track = |id: i64, title: &str| Track {
+            id,
+            owner_id: 7,
+            title: title.into(),
+            artist: "Synthetic Artist".into(),
+            cover_url: None,
+            ..template.clone()
+        };
+        let genre = CatalogMix::Common {
+            options: vec![("additionals".into(), "pop".into())],
+        };
+        let mood = CatalogMix::Common {
+            options: vec![("vibes".into(), "happy".into())],
+        };
+        let artist = CatalogMix::Artist {
+            entity_id: "3424231346320955355".into(),
+        };
+        let playlist = AlbumRef {
+            id: 36,
+            owner_id: 7,
+            title: "Friend list".into(),
+            access_key: None,
+            cover_url: None,
+        };
+        let catalog = HomeCatalog {
+            genres: vec![crate::web_audio::MixTile {
+                id: "pop_genre".into(),
+                title: "Поп".into(),
+                mix: genre.clone(),
+            }],
+            moods: vec![crate::web_audio::MixTile {
+                id: "happy_vibe".into(),
+                title: "Радостно".into(),
+                mix: mood.clone(),
+            }],
+            friends: vec![FriendPlaylist {
+                playlist: playlist.clone(),
+                owner_name: "Synthetic Friend".into(),
+                owner_photo: None,
+                match_percent: Some(96),
+                color: Some([0x36, 0x81, 0xFF]),
+                tracks: vec![track(1, "Friend track one"), track(2, "Friend track two")],
+            }],
+            artist_mixes: vec![ArtistMix {
+                title: "Synthetic Mix Artist".into(),
+                description: "A, B, C".into(),
+                photo_url: None,
+                mix: artist.clone(),
+            }],
+        };
+        let mut output = catalog_frame(&context, &mut covers, &catalog, 1, Vec::new()).0;
+        for tick in 2..4 {
+            output = catalog_frame(&context, &mut covers, &catalog, tick, Vec::new()).0;
+        }
+        for heading in [
+            "Жанры",
+            "Настроения и занятия",
+            "Слушайте друг друга",
+            "Микс по артистам",
+        ] {
+            text_center(&output, heading);
+        }
+        text_center(&output, "96% · совпадение с вашим вкусом");
+        let mut tick = 4;
+        let mut click = |label: &str| {
+            let position = text_center(&output, label);
+            catalog_frame(
+                &context,
+                &mut covers,
+                &catalog,
+                tick,
+                pointer(position, true),
+            );
+            let (_, action) = catalog_frame(
+                &context,
+                &mut covers,
+                &catalog,
+                tick + 1,
+                pointer(position, false),
+            );
+            tick += 2;
+            action
+        };
+        assert_eq!(click("Поп"), Some(Action::PlayCatalogMix(genre)));
+        assert_eq!(click("Радостно"), Some(Action::PlayCatalogMix(mood)));
+        assert_eq!(
+            click("Friend track two"),
+            Some(Action::PlayFriendTrack((7, 36), (7, 2)))
+        );
+        assert_eq!(click("Friend list"), Some(Action::OpenPlaylist(playlist)));
+        assert_eq!(
+            click("Synthetic Mix Artist"),
+            Some(Action::PlayCatalogMix(artist))
+        );
     }
 
     fn pointer(position: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
@@ -916,6 +1519,10 @@ mod tests {
                             mix_loading: false,
                             mix_playing: false,
                             collections: &[],
+                            catalog: &HomeCatalog::default(),
+                            active_mix: None,
+                            active_mix_playing: false,
+                            pending_mix: None,
                             error: None,
                         },
                     );
@@ -1050,6 +1657,10 @@ mod tests {
                                     mix_loading: false,
                                     mix_playing: false,
                                     collections: &[],
+                                    catalog: &HomeCatalog::default(),
+                                    active_mix: None,
+                                    active_mix_playing: false,
+                                    pending_mix: None,
                                     error: None,
                                 },
                             );
