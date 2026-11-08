@@ -42,10 +42,21 @@ pub enum Action {
     },
 }
 
+/// Library tags under the header, like VK's own sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LibraryFilter {
+    Playlists,
+    Albums,
+    Artists,
+}
+
 #[derive(Default)]
 pub struct SearchState {
     open: bool,
     query: String,
+    filter: Option<LibraryFilter>,
+    /// Within playlists: only the ones this account created.
+    own: bool,
     stamp: Option<(String, u64)>,
     items: Vec<PlaylistItem>,
     artists: Vec<FollowedArtist>,
@@ -72,12 +83,22 @@ impl SearchState {
         for item in artists {
             (&item.artist.id, &item.artist.name, &item.image_url).hash(&mut hasher);
         }
+        (self.filter, self.own).hash(&mut hasher);
         let stamp = (query.clone(), hasher.finish());
         if self.stamp.as_ref() == Some(&stamp) {
             return;
         }
+        let (filter, own) = (self.filter, self.own);
         self.items = items
             .iter()
+            .filter(|item| match filter {
+                None => true,
+                Some(LibraryFilter::Playlists) => {
+                    item.kind == CollectionKind::Playlist && (!own || item.can_edit)
+                }
+                Some(LibraryFilter::Albums) => item.kind == CollectionKind::Album,
+                Some(LibraryFilter::Artists) => false,
+            })
             .filter(|item| {
                 item.reference.title.to_lowercase().contains(&query)
                     || item.subtitle.to_lowercase().contains(&query)
@@ -86,6 +107,7 @@ impl SearchState {
             .collect();
         self.artists = artists
             .iter()
+            .filter(|_| matches!(filter, None | Some(LibraryFilter::Artists)))
             .filter(|item| item.artist.name.to_lowercase().contains(&query))
             .cloned()
             .collect();
@@ -206,9 +228,18 @@ pub fn show_sidebar(
             });
         ui.add_space(4.0);
     }
-    let filtering = search.open && !search.query.trim().is_empty();
-    let query = search.query.trim().to_lowercase();
+    filter_chips(ui, language, search, items, artists);
+    let searching = search.open && !search.query.trim().is_empty();
+    let filtering = searching || search.filter.is_some();
+    let query = if searching {
+        search.query.trim().to_lowercase()
+    } else {
+        String::new()
+    };
     let (items, artists) = if filtering {
+        if !searching {
+            search.query.clear();
+        }
         search.filter(items, artists);
         ui.ctx().data_mut(|data| data.remove::<DragMemory>(drag_id));
         (search.items.as_slice(), search.artists.as_slice())
@@ -280,7 +311,7 @@ pub fn show_sidebar(
         theme::scroll_rows(
             ui,
             egui::ScrollArea::vertical()
-                .id_salt(("sidebar-playlists", &query))
+                .id_salt(("sidebar-playlists", &query, search.filter, search.own))
                 .max_height(height)
                 .min_scrolled_height(0.0)
                 .auto_shrink([false, false]),
@@ -295,7 +326,7 @@ pub fn show_sidebar(
                         items,
                         selected,
                         drag_id: if filtering {
-                            drag_id.with(("query", &query))
+                            drag_id.with(("query", &query, search.filter, search.own))
                         } else {
                             drag_id
                         },
@@ -779,6 +810,121 @@ fn menu_row(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::
     .inner
 }
 
+/// Tags under the header. Picking one hides the others behind a reset
+/// button; playlists also offer "Created by you".
+fn filter_chips(
+    ui: &mut egui::Ui,
+    language: Language,
+    search: &mut SearchState,
+    items: &[PlaylistItem],
+    artists: &[FollowedArtist],
+) {
+    let available = |filter| match filter {
+        LibraryFilter::Playlists => items
+            .iter()
+            .any(|item| item.kind == CollectionKind::Playlist),
+        LibraryFilter::Albums => items.iter().any(|item| item.kind == CollectionKind::Album),
+        LibraryFilter::Artists => !artists.is_empty(),
+    };
+    let label = |filter| match filter {
+        LibraryFilter::Playlists => language.text("Плейлисты", "Playlists"),
+        LibraryFilter::Albums => language.text("Альбомы", "Albums"),
+        LibraryFilter::Artists => language.text("Исполнители", "Artists"),
+    };
+    let all = [
+        LibraryFilter::Playlists,
+        LibraryFilter::Albums,
+        LibraryFilter::Artists,
+    ];
+    if search.filter.is_none() && all.iter().filter(|filter| available(**filter)).count() < 2 {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        ui.add_space(2.0);
+        match search.filter {
+            None => {
+                for filter in all.into_iter().filter(|filter| available(*filter)) {
+                    if chip(ui, label(filter), false).clicked() {
+                        search.filter = Some(filter);
+                        search.own = false;
+                    }
+                }
+            }
+            Some(filter) => {
+                if reset_chip(ui, language.text("Сбросить фильтр", "Clear filter")).clicked()
+                {
+                    search.filter = None;
+                    search.own = false;
+                    return;
+                }
+                if chip(ui, label(filter), true).clicked() {
+                    search.filter = None;
+                    search.own = false;
+                    return;
+                }
+                if filter == LibraryFilter::Playlists
+                    && items
+                        .iter()
+                        .any(|item| item.kind == CollectionKind::Playlist && item.can_edit)
+                    && chip(ui, language.text("Созданные вами", "By you"), search.own).clicked()
+                {
+                    search.own = !search.own;
+                }
+            }
+        }
+    });
+    ui.add_space(8.0);
+}
+
+const CHIP_HEIGHT: f32 = 28.0;
+
+fn chip_paint(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, selected: bool) {
+    let hovered = response.hovered() || response.has_focus();
+    let fill = match (selected, hovered) {
+        (true, false) => theme::ACCENT,
+        (true, true) => Color32::from_rgb(72, 132, 216),
+        (false, false) => Color32::from_rgb(35, 41, 50),
+        (false, true) => Color32::from_rgb(45, 53, 65),
+    };
+    ui.painter().rect_filled(rect, rect.height() * 0.5, fill);
+}
+
+fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), Color32::WHITE);
+    let size = egui::vec2(galley.size().x + 24.0, CHIP_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    chip_paint(ui, rect, &response, selected);
+    let color = if selected {
+        Color32::WHITE
+    } else {
+        ui.visuals().text_color()
+    };
+    ui.painter()
+        .galley(rect.center() - galley.size() * 0.5, galley, color);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, selected, text)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn reset_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(CHIP_HEIGHT), Sense::click());
+    chip_paint(ui, rect, &response, false);
+    icons::paint(
+        ui.painter(),
+        rect.shrink(8.0),
+        Icon::Close,
+        ui.visuals().text_color(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
 fn header_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
     ui.add_enabled_ui(enabled, |ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
@@ -1128,7 +1274,8 @@ mod tests {
             h.search.query = "Saved".into();
             let (filtered_album, _) = h.draw(Vec::new());
             assert!(
-                text_rect(&filtered_album, "Saved release").unwrap().top() < 130.0,
+                // Below the header, the search field and the wrapped tags.
+                text_rect(&filtered_album, "Saved release").unwrap().top() < 200.0,
                 "Filtered rows must appear immediately at the start of the list"
             );
             let (closed, _) = h.click(search_button);
@@ -1140,6 +1287,127 @@ mod tests {
             let (_, action) = h.click(point);
             assert_eq!(action, Some(Action::OpenAlbum(album.reference)));
         }
+    }
+
+    #[test]
+    fn library_tags_show_one_kind_and_reset_to_the_whole_library() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut search = SearchState::default();
+        let mut own = item(1);
+        own.reference.title = "My playlist".into();
+        own.can_edit = true;
+        let mut saved = item(2);
+        saved.reference.title = "Saved playlist".into();
+        let mut album = item(3);
+        album.reference.title = "Saved release".into();
+        album.kind = CollectionKind::Album;
+        let items = vec![own, saved, album];
+        let artists = vec![FollowedArtist {
+            artist: ArtistRef {
+                id: "subscribed".into(),
+                name: "Subscribed".into(),
+            },
+            image_url: None,
+        }];
+        let mut tick = 0;
+        let mut draw = |search: &mut SearchState, events: Vec<egui::Event>| {
+            tick += 1;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(232.0, 400.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    show_sidebar(
+                        ui,
+                        &mut covers,
+                        search,
+                        SidebarView {
+                            language: Language::Russian,
+                            items: &items,
+                            artists: &artists,
+                            selected: None,
+                            selected_artist: None,
+                            loading: false,
+                            error: None,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |point: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        draw(&mut search, Vec::new());
+        let all = draw(&mut search, Vec::new());
+        for tag in ["Плейлисты", "Альбомы", "Исполнители"] {
+            assert!(text_rect(&all, tag).is_some(), "{tag}");
+        }
+        let albums = text_rect(&all, "Альбомы").unwrap().center();
+        draw(&mut search, click(albums));
+        let only_albums = draw(&mut search, Vec::new());
+        assert_eq!(search.filter, Some(LibraryFilter::Albums));
+        assert!(text_rect(&only_albums, "Saved release").is_some());
+        assert!(text_rect(&only_albums, "My playlist").is_none());
+        assert!(text_rect(&only_albums, "Subscribed").is_none());
+        assert!(text_rect(&only_albums, "Плейлисты").is_none());
+        let reset = only_albums
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - CHIP_HEIGHT).abs() < 0.5
+                        && (rect.rect.height() - CHIP_HEIGHT).abs() < 0.5 =>
+                {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            })
+            .expect("Reset tag");
+        draw(&mut search, click(reset));
+        let restored = draw(&mut search, Vec::new());
+        assert_eq!(search.filter, None);
+        assert!(text_rect(&restored, "My playlist").is_some());
+        assert!(text_rect(&restored, "Subscribed").is_some());
+        let playlists = text_rect(&restored, "Плейлисты").unwrap().center();
+        draw(&mut search, click(playlists));
+        let only_playlists = draw(&mut search, Vec::new());
+        assert!(text_rect(&only_playlists, "Saved playlist").is_some());
+        assert!(text_rect(&only_playlists, "Saved release").is_none());
+        let by_you = text_rect(&only_playlists, "Созданные вами")
+            .unwrap()
+            .center();
+        draw(&mut search, click(by_you));
+        let own_only = draw(&mut search, Vec::new());
+        assert!(search.own);
+        assert!(text_rect(&own_only, "My playlist").is_some());
+        assert!(text_rect(&own_only, "Saved playlist").is_none());
+        let selected = text_rect(&own_only, "Плейлисты").unwrap().center();
+        draw(&mut search, click(selected));
+        assert_eq!((search.filter, search.own), (None, false));
     }
 
     fn item(id: i64) -> PlaylistItem {

@@ -357,6 +357,9 @@ fn collection_header(
     background(ui.painter(), rect, color);
     let art = egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size));
     artwork(ui, covers, art, view.image_url, "album-cover");
+    if !playlist && let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
+        cover_viewer(ui, covers, art, url, view.language);
+    }
     let text_origin = if wide {
         egui::pos2(art.right() + 24.0, inner.top() + 4.0)
     } else {
@@ -944,6 +947,46 @@ fn artwork(
     covers.show(&mut image, url, rect.width());
 }
 
+/// A release cover opens full size over a dimmed window. Any click, or
+/// Escape, closes it. Playlist covers are not clickable.
+fn cover_viewer(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    art: egui::Rect,
+    url: &str,
+    language: Language,
+) {
+    let label = language.text("Открыть обложку", "Open cover");
+    let id = egui::Id::new(("release-cover-viewer", url));
+    let open = ui.interact(art, id.with("open"), Sense::click());
+    open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let frame = ui.ctx().cumulative_frame_nr();
+    if open.on_hover_cursor(egui::CursorIcon::ZoomIn).clicked() {
+        ui.data_mut(|data| data.insert_temp(id, frame));
+    }
+    // The viewer belongs to the page that opened it: leaving the page for a
+    // frame closes it instead of reopening it on a later visit.
+    let shown = ui.data(|data| data.get_temp::<u64>(id));
+    if !shown.is_some_and(|last| last + 1 >= frame) {
+        ui.data_mut(|data| data.remove::<u64>(id));
+        return;
+    }
+    ui.data_mut(|data| data.insert_temp(id, frame));
+    let screen = ui.ctx().content_rect();
+    let size = (screen.width().min(screen.height()) * 0.82).clamp(120.0, 512.0);
+    let modal = egui::Modal::new(id.with("modal"))
+        .frame(egui::Frame::NONE)
+        .backdrop_color(Color32::from_black_alpha(205))
+        .show(ui.ctx(), |ui| {
+            let image = covers.show_high_resolution(ui, Some(url), Some(url), size, 10);
+            ui.interact(image.rect, id.with("image"), Sense::click())
+                .clicked()
+        });
+    if modal.inner || modal.should_close() {
+        ui.data_mut(|data| data.remove::<u64>(id));
+    }
+}
+
 fn kicker(ui: &mut egui::Ui, text: &str) {
     ui.add(
         egui::Label::new(
@@ -1412,6 +1455,90 @@ mod tests {
                 .any(|shape| matches!(&shape.shape,egui::Shape::Text(text)
             if text.galley.text()=="›" || text.galley.text()==artist.name))
         );
+    }
+
+    #[test]
+    fn release_cover_opens_full_size_and_closes_while_playlist_covers_stay_static() {
+        for is_playlist in [false, true] {
+            let context = egui::Context::default();
+            theme::install(&context);
+            let mut covers = CoverCache::new();
+            let mut tick = 0;
+            let mut frame = |events: Vec<egui::Event>| {
+                tick += 1;
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 700.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let view = AlbumView {
+                            language: Language::Russian,
+                            title: "Release",
+                            artists: &[],
+                            creator: None,
+                            image_url: Some("https://images.example.test/cover.jpg"),
+                            subtitle: "",
+                            track_count: 1,
+                            loading: false,
+                            playing: false,
+                            can_edit_playlist: false,
+                            follow: None,
+                        };
+                        if is_playlist {
+                            playlist_header(ui, &mut covers, view);
+                        } else {
+                            album_header(ui, &mut covers, view);
+                        }
+                    },
+                );
+                output.textures_delta.clear();
+                output
+            };
+            let dimmed = |output: &egui::FullOutput| {
+                output.shapes.iter().any(|shape| {
+                    // The backdrop fades in, so its alpha is still rising.
+                    matches!(&shape.shape, egui::Shape::Rect(rect)
+                        if rect.rect.width() >= 900.0
+                            && rect.fill.a() > 0
+                            && rect.fill.r() == 0
+                            && rect.fill.g() == 0
+                            && rect.fill.b() == 0)
+                })
+            };
+            frame(Vec::new());
+            let point = egui::pos2(110.0, 110.0);
+            frame(vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            frame(vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            let opened = frame(Vec::new());
+            assert_eq!(dimmed(&opened), !is_playlist, "playlist: {is_playlist}");
+            frame(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            assert!(!dimmed(&frame(Vec::new())));
+        }
     }
 
     #[test]
