@@ -77,7 +77,8 @@ const PLAYER_PADDING_Y: i8 = 8;
 /// Default outer widths of the left navigation and the right lyrics/queue panel.
 pub(crate) const DEFAULT_PANEL_WIDTHS: [f32; 2] = [252.0, 340.0];
 /// Allowed outer widths; the central page always keeps `MIN_CONTENT_WIDTH`.
-pub(crate) const LEFT_PANEL_WIDTHS: (f32, f32) = (220.0, 420.0);
+/// The minimum keeps the Russian "Библиотека" heading clear of its buttons.
+pub(crate) const LEFT_PANEL_WIDTHS: (f32, f32) = (238.0, 420.0);
 pub(crate) const RIGHT_PANEL_WIDTHS: (f32, f32) = (260.0, 560.0);
 const MIN_CONTENT_WIDTH: f32 = 380.0;
 const LEFT_PANEL_ID: &str = "account";
@@ -4205,10 +4206,13 @@ impl MusicApp {
                         ui.add_space(4.0);
                     }
                     theme::inset_heading(ui, |ui| {
-                        ui.label(
-                            RichText::new(language.text("Треки", "Tracks"))
-                                .size(20.0)
-                                .family(theme::semibold()),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(language.text("Треки", "Tracks"))
+                                    .size(20.0)
+                                    .family(theme::semibold()),
+                            )
+                            .selectable(false),
                         )
                     });
                     ui.add_space(4.0);
@@ -5947,14 +5951,17 @@ impl MusicApp {
                 }
                 ui.add_space(20.0);
                 theme::inset_heading(ui, |ui| {
-                    ui.label(
-                        RichText::new(if artist.is_some() {
-                            language.text("Популярное", "Popular")
-                        } else {
-                            language.text("Треки", "Tracks")
-                        })
-                        .size(20.0)
-                        .family(theme::semibold()),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(if artist.is_some() {
+                                language.text("Популярное", "Popular")
+                            } else {
+                                language.text("Треки", "Tracks")
+                            })
+                            .size(20.0)
+                            .family(theme::semibold()),
+                        )
+                        .selectable(false),
                     )
                 });
                 ui.add_space(8.0);
@@ -6193,7 +6200,14 @@ impl MusicApp {
         let mut refresh = false;
         ui.horizontal(|ui| {
             theme::inset_heading(ui, |ui| {
-                ui.heading(RichText::new(self.language.text("Главная", "Home")).size(26.0))
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(self.language.text("Главная", "Home"))
+                            .text_style(egui::TextStyle::Heading)
+                            .size(26.0),
+                    )
+                    .selectable(false),
+                )
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 refresh = icons::compact_button(
@@ -6546,7 +6560,8 @@ impl MusicApp {
                             egui::Label::new(
                                 RichText::new(&heading).size(26.0).family(theme::semibold()),
                             )
-                            .truncate(),
+                            .truncate()
+                            .selectable(false),
                         );
                         if let Some(number) = number {
                             let center_y = response.rect.center().y
@@ -6738,7 +6753,12 @@ impl MusicApp {
                 let top_gap = ((ui.available_height() - hero_height) * 0.25).clamp(0.0, 60.0);
                 ui.add_space(top_gap);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(t("Музыка рядом", "Your music, closer")).size(24.0));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t("Музыка рядом", "Your music, closer")).size(24.0),
+                        )
+                        .selectable(false),
+                    );
                     ui.label(t(
                         "Войдите в VK, чтобы слушать свою музыку.",
                         "Sign in with VK to listen to your music.",
@@ -6970,6 +6990,16 @@ impl MusicApp {
                 }
             }
             track_menu::Action::RefreshPlaylists => self.load_playlists(ctx, true),
+            track_menu::Action::CopyDetails(detail) => {
+                let text = detail.text(track);
+                if !text.is_empty() {
+                    ctx.copy_text(text);
+                    self.track_menu_notice = Some((
+                        self.language.text("Скопировано", "Copied").into(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                }
+            }
         }
     }
 
@@ -7941,10 +7971,13 @@ impl MusicApp {
                 },
             )
         };
-        ui.label(
-            RichText::new(t("Хранилище", "Storage"))
-                .size(18.0)
-                .family(theme::semibold()),
+        ui.add(
+            egui::Label::new(
+                RichText::new(t("Хранилище", "Storage"))
+                    .size(18.0)
+                    .family(theme::semibold()),
+            )
+            .selectable(false),
         );
         ui.add_space(8.0);
         let audio = self.cache_stats.as_ref().map_or_else(

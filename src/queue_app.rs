@@ -125,10 +125,13 @@ impl MusicApp {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 ui.horizontal(|ui| {
                     ui.set_min_height(32.0);
-                    ui.label(
-                        RichText::new(t("Очередь", "Queue"))
-                            .size(20.0)
-                            .family(theme::semibold()),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t("Очередь", "Queue"))
+                                .size(20.0)
+                                .family(theme::semibold()),
+                        )
+                        .selectable(false),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let (rect, _) =

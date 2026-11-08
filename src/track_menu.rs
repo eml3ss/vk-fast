@@ -41,6 +41,28 @@ pub enum Action {
     CopyLink,
     RefreshPlaylists,
     ToggleDislike,
+    CopyDetails(Detail),
+}
+
+/// Which track text "Копировать данные" puts on the clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    Title,
+    Artist,
+    ArtistAndTitle,
+}
+
+impl Detail {
+    pub fn text(self, track: &Track) -> String {
+        let title = track.display_title();
+        let artist = track.artist.trim();
+        match self {
+            Self::Title => title.trim().to_owned(),
+            Self::Artist => artist.to_owned(),
+            Self::ArtistAndTitle if artist.is_empty() => title.trim().to_owned(),
+            Self::ArtistAndTitle => format!("{artist} — {}", title.trim()),
+        }
+    }
 }
 
 pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
@@ -236,6 +258,37 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
         action = Some(Action::Album);
     }
     separator(ui);
+    let response = row(
+        ui,
+        Icon::Copy,
+        language.text("Копировать данные", "Copy details"),
+        true,
+        true,
+        false,
+    );
+    if let Some(result) = egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+        ui.set_width(WIDTH);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let mut action = None;
+        for (detail, label) in [
+            (Detail::Title, language.text("Название трека", "Song title")),
+            (Detail::Artist, language.text("Исполнитель", "Artist")),
+            (
+                Detail::ArtistAndTitle,
+                language.text("Исполнитель и название трека", "Artist and song title"),
+            ),
+        ] {
+            if plain_row(ui, label, !detail.text(view.track).is_empty()).clicked() {
+                action = Some(Action::CopyDetails(detail));
+            }
+        }
+        if action.is_some() {
+            ui.close();
+        }
+        action
+    }) {
+        action = result.inner.or(action.take());
+    }
     if row(
         ui,
         Icon::CopyLink,
@@ -285,6 +338,39 @@ fn separator(ui: &mut egui::Ui) {
     ui.add_space(5.0);
 }
 
+/// A text-only submenu row, aligned with the icon rows' labels.
+fn plain_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let width = ui.available_width().max(1.0);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), Sense::click());
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+        }
+        let color = if ui.is_enabled() {
+            ui.visuals().text_color()
+        } else {
+            theme::MUTED
+        };
+        let galley = ui.painter().layout(
+            label.into(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            color,
+            rect.width() - 24.0,
+        );
+        ui.painter().galley(
+            egui::pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        response
+    })
+    .inner
+}
+
 fn row(
     ui: &mut egui::Ui,
     icon: Icon,
@@ -305,8 +391,15 @@ fn row(
         } else {
             theme::MUTED
         };
+        // The playlist glyph's bars sit at its left edge; 1 px aligns it
+        // optically with the other menu icons.
+        let nudge = if matches!(icon, Icon::PlaylistAdd) {
+            1.0
+        } else {
+            0.0
+        };
         let icon_rect = egui::Rect::from_center_size(
-            rect.left_center() + egui::vec2(15.0, 0.0),
+            rect.left_center() + egui::vec2(15.0 + nudge, 0.0),
             egui::vec2(17.0, 17.0),
         );
         if pending {
@@ -615,6 +708,53 @@ mod tests {
             .center();
         h.click(guest);
         assert_eq!(h.action, Some(Action::Artist(h.track.artists[1].clone())));
+    }
+
+    #[test]
+    fn copy_details_submenu_copies_the_chosen_track_text() {
+        for (caption, detail) in [
+            ("Song title", Detail::Title),
+            ("Artist", Detail::Artist),
+            ("Artist and song title", Detail::ArtistAndTitle),
+        ] {
+            let mut h = Harness::new(Language::English);
+            let output = h.warm();
+            let copy_link = text_rect(&output, "Copy link").unwrap();
+            let parent = text_rect(&output, "Copy details").unwrap();
+            assert!(parent.bottom() < copy_link.top());
+            assert!(copy_link.top() - parent.bottom() < ROW_HEIGHT);
+            let parent = parent.center();
+            h.frame(vec![egui::Event::PointerMoved(parent)]);
+            let mut output = h.frame(vec![egui::Event::PointerMoved(parent)]);
+            for _ in 0..2 {
+                output = h.frame(vec![egui::Event::PointerMoved(parent)]);
+            }
+            let choice = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == caption => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .max_by(|a, b| a.left().total_cmp(&b.left()))
+                .expect("Copy submenu");
+            h.click(choice.center());
+            assert_eq!(h.action, Some(Action::CopyDetails(detail)));
+        }
+        let mut track = track();
+        track.title = "Song".into();
+        track.subtitle = Some("(Live)".into());
+        assert_eq!(Detail::Title.text(&track), "Song (Live)");
+        assert_eq!(Detail::Artist.text(&track), "Fallback Artist");
+        assert_eq!(
+            Detail::ArtistAndTitle.text(&track),
+            "Fallback Artist — Song (Live)"
+        );
+        track.artist = " ".into();
+        assert_eq!(Detail::Artist.text(&track), "");
+        assert_eq!(Detail::ArtistAndTitle.text(&track), "Song (Live)");
     }
 
     #[test]

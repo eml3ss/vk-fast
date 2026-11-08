@@ -32,6 +32,8 @@ pub enum Icon {
     HeartFilled,
     /// A thumbs-down: VK's "Не нравится".
     Dislike,
+    /// Two stacked sheets: copy text.
+    Copy,
     QueueAdd,
     Queue,
     Lyrics,
@@ -795,6 +797,16 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 (17.0, 11.0),
             ]);
         }
+        Icon::Copy => {
+            line(&[
+                (9.0, 9.0),
+                (20.0, 9.0),
+                (20.0, 20.0),
+                (9.0, 20.0),
+                (9.0, 9.0),
+            ]);
+            line(&[(4.5, 15.0), (4.5, 4.5), (15.0, 4.5)]);
+        }
         Icon::Heart | Icon::HeartFilled => {
             let contour = heart_path(rect);
             if matches!(icon, Icon::HeartFilled) {
@@ -1109,6 +1121,7 @@ mod tests {
             Icon::Radio,
             Icon::Album,
             Icon::CopyLink,
+            Icon::Copy,
             Icon::Edit,
             Icon::Trash,
             Icon::RemoveFromLibrary,

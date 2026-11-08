@@ -1540,6 +1540,46 @@ mod tests {
         })
     }
 
+    #[test]
+    fn russian_library_heading_clears_its_buttons_at_the_narrowest_panel() {
+        // The navigation panel's inner width: its minimum minus 18 px margins.
+        let width = crate::app::LEFT_PANEL_WIDTHS.0 - 36.0;
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut search = SearchState::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                show_sidebar(
+                    ui,
+                    &mut covers,
+                    &mut search,
+                    SidebarView {
+                        language: Language::Russian,
+                        items: &[item(1)],
+                        artists: &[],
+                        selected: None,
+                        selected_artist: None,
+                        loading: false,
+                        error: None,
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let heading = text_rect(&output, "Библиотека").expect("the heading must not be cut");
+        // Three 24 px header buttons with 4 px gaps sit at the right edge.
+        let search_button = width - 3.0 * 24.0 - 2.0 * 4.0;
+        assert!(heading.right() + 4.0 <= search_button, "{heading:?}");
+    }
+
     struct MenuHarness {
         context: egui::Context,
         covers: CoverCache,

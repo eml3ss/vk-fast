@@ -46,10 +46,13 @@ pub fn show(
             }
             ui.add_space(20.0);
             theme::inset_heading(ui, |ui| {
-                ui.label(
-                    RichText::new(language.text("Плейлисты", "Playlists"))
-                        .size(20.0)
-                        .family(theme::semibold()),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(language.text("Плейлисты", "Playlists"))
+                            .size(20.0)
+                            .family(theme::semibold()),
+                    )
+                    .selectable(false),
                 )
             });
             ui.add_space(10.0);

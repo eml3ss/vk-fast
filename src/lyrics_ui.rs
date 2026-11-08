@@ -4,18 +4,22 @@ use crate::{
     i18n::Language,
     icons::{self, Icon},
     lyrics::{Error, Lyrics},
-    model::Track,
+    model::{ArtistRef, Track},
     theme,
 };
 use eframe::egui::{self, Align, Color32, FontId, Rect, Sense};
 use std::sync::Arc;
 
+#[derive(Debug, PartialEq)]
 pub enum Action {
     Close,
     Fullscreen,
     Retry,
     Settings,
     Seek(f64),
+    /// Open the playing track's album or single.
+    Album,
+    Artist(ArtistRef),
 }
 pub struct View<'a> {
     pub language: Language,
@@ -191,8 +195,7 @@ pub fn show(
             || t("Выберите трек", "Choose a track").to_owned(),
             |track| track.display_title().into_owned(),
         );
-        let artist = view.track.map_or("", |track| track.artist.as_str());
-        caption(
+        let title_rect = caption(
             ui,
             Rect::from_min_size(
                 artwork.left_bottom() + egui::vec2(0.0, 16.0),
@@ -202,16 +205,20 @@ pub fn show(
             FontId::new(21.0, theme::semibold()),
             ui.visuals().text_color(),
         );
-        caption(
-            ui,
-            Rect::from_min_size(
-                artwork.left_bottom() + egui::vec2(0.0, 47.0),
-                egui::vec2(art_size, 22.0),
-            ),
-            artist,
-            FontId::proportional(14.0),
-            theme::MUTED,
+        let artist_rect = Rect::from_min_size(
+            artwork.left_bottom() + egui::vec2(0.0, 47.0),
+            egui::vec2(art_size, 22.0),
         );
+        if let Some(track) = view.track {
+            if album_link(ui, artwork, "artwork", view.language)
+                || album_link(ui, title_rect, "title", view.language)
+            {
+                action = Some(Action::Album);
+            }
+            if let Some(artist) = artist_links(ui, artist_rect, track, FontId::proportional(14.0)) {
+                action = Some(Action::Artist(artist));
+            }
+        }
         content.min.x = artwork.right() + gap;
     } else if let Some(track) = view.track {
         let metadata = Rect::from_min_size(content.min, egui::vec2(content.width(), 52.0));
@@ -219,7 +226,7 @@ pub fn show(
         ui.scope_builder(egui::UiBuilder::new().max_rect(cover), |ui| {
             covers.show(ui, cover_url, 40.0);
         });
-        caption_job(
+        let title_rect = caption_job(
             ui,
             Rect::from_min_size(
                 metadata.min + egui::vec2(50.0, 0.0),
@@ -231,16 +238,22 @@ pub fn show(
                 FontId::new(14.0, theme::semibold()),
             ),
         );
-        caption(
+        if album_link(ui, cover, "cover", view.language)
+            || album_link(ui, title_rect, "title", view.language)
+        {
+            action = Some(Action::Album);
+        }
+        if let Some(artist) = artist_links(
             ui,
             Rect::from_min_size(
                 metadata.min + egui::vec2(50.0, 23.0),
                 egui::vec2((metadata.width() - 50.0).max(0.0), 20.0),
             ),
-            &track.artist,
+            track,
             FontId::proportional(12.0),
-            theme::MUTED,
-        );
+        ) {
+            action = Some(Action::Artist(artist));
+        }
         content.min.y += 62.0;
     }
     if let Some(lyrics) = view.lyrics {
@@ -371,23 +384,47 @@ fn centered(ui: &mut egui::Ui, rect: Rect, text: &str) {
     );
 }
 
-fn caption(ui: &mut egui::Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+/// Paint one truncated line and return the rect its text occupies.
+fn caption(ui: &mut egui::Ui, rect: Rect, text: &str, font: FontId, color: Color32) -> Rect {
     caption_job(
         ui,
         rect,
         egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color),
-    );
+    )
 }
-fn caption_job(ui: &mut egui::Ui, rect: Rect, mut job: egui::text::LayoutJob) {
+fn caption_job(ui: &mut egui::Ui, rect: Rect, mut job: egui::text::LayoutJob) -> Rect {
     job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0));
     let galley = ui.painter().layout_job(job);
+    let at = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
+    let text = Rect::from_min_size(at, galley.size()).intersect(rect);
     ui.painter()
         .with_clip_rect(ui.clip_rect().intersect(rect))
-        .galley(
-            egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5),
-            galley,
-            Color32::WHITE,
-        );
+        .galley(at, galley, Color32::WHITE);
+    text
+}
+
+/// The cover and the title open the track's album or single, like the player.
+fn album_link(ui: &mut egui::Ui, rect: Rect, salt: &str, language: Language) -> bool {
+    if !rect.is_positive() {
+        return false;
+    }
+    let label = language.text("Открыть альбом / сингл", "Open album / single");
+    let response = ui.interact(rect, ui.id().with(("lyrics-album", salt)), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, label));
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+        .clicked()
+}
+
+/// Each artist name is its own link, vertically centred in `rect`.
+fn artist_links(ui: &mut egui::Ui, rect: Rect, track: &Track, font: FontId) -> Option<ArtistRef> {
+    let height = ui.fonts_mut(|fonts| fonts.row_height(&font)).max(16.0);
+    let line = Rect::from_center_size(rect.center(), egui::vec2(rect.width(), height));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(line), |ui| {
+        crate::detail_ui::artist_links_with_font(ui, &track.artists, &track.artist, font)
+    })
+    .inner
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -610,6 +647,124 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    #[test]
+    fn cover_title_and_artists_open_the_album_and_each_artist_in_both_layouts() {
+        let track = Track {
+            id: 5,
+            owner_id: 4,
+            artist: "First, Second".into(),
+            title: "Linked song".into(),
+            subtitle: None,
+            duration: 180,
+            url: None,
+            cover_url: None,
+            artists: vec![
+                ArtistRef {
+                    id: "first".into(),
+                    name: "First".into(),
+                },
+                ArtistRef {
+                    id: "second".into(),
+                    name: "Second".into(),
+                },
+            ],
+            album: None,
+            library_liked: None,
+            release_key: None,
+            library_source_key: None,
+            unavailable: None,
+        };
+        for fullscreen in [false, true] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut covers = CoverCache::new();
+            let mut state = State::default();
+            let mut time = 0.0;
+            let mut frame = |events: Vec<egui::Event>| {
+                time += 0.1;
+                let mut action = None;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(if fullscreen { 1000.0 } else { 320.0 }, 600.0),
+                        )),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        action = show(
+                            ui,
+                            &mut state,
+                            &mut covers,
+                            View {
+                                language: Language::English,
+                                track: Some(&track),
+                                lyrics: None,
+                                error: None,
+                                loading: false,
+                                position: 0.0,
+                                playing: false,
+                                fullscreen,
+                                retry_allowed: true,
+                            },
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                (output, action)
+            };
+            let click = |point: egui::Pos2| {
+                [true, false].map(|pressed| {
+                    vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                })
+            };
+            let (output, _) = frame(Vec::new());
+            let text = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(text.visual_bounding_rect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing {label}"))
+            };
+            let title = text("Linked song");
+            let second = text("Second");
+            let cover = if fullscreen {
+                title.left_top() - egui::vec2(-20.0, 40.0)
+            } else {
+                title.left_center() - egui::vec2(30.0, 0.0)
+            };
+            for (point, expected) in [
+                (title.center(), Action::Album),
+                (cover, Action::Album),
+                (second.center(), Action::Artist(track.artists[1].clone())),
+            ] {
+                let [press, release] = click(point);
+                frame(press);
+                let (_, action) = frame(release);
+                assert_eq!(
+                    action,
+                    Some(expected),
+                    "fullscreen={fullscreen} at {point:?}"
+                );
+            }
+        }
     }
 
     fn radii(output: &egui::FullOutput) -> Vec<f32> {

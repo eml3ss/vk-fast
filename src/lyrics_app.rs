@@ -296,6 +296,24 @@ impl MusicApp {
                 self.finished_handled = false;
                 self.commit_playback_seek(at);
             }
+            lyrics_ui::Action::Album => {
+                if let Some(track) = self.playing.clone() {
+                    if self.lyrics.fullscreen {
+                        self.set_lyrics_fullscreen(ctx, false);
+                    }
+                    let action = track.album.as_ref().map_or_else(
+                        || TrackAction::TrackAlbum(track.key(), track.display_title().into_owned()),
+                        |album| TrackAction::Album(album.clone()),
+                    );
+                    self.handle_track_action(ctx, action);
+                }
+            }
+            lyrics_ui::Action::Artist(artist) => {
+                if self.lyrics.fullscreen {
+                    self.set_lyrics_fullscreen(ctx, false);
+                }
+                self.navigate_music(ctx, MusicPage::Artist(artist));
+            }
         }
         ctx.request_repaint();
     }
