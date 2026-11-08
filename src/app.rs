@@ -9377,6 +9377,36 @@ impl MusicApp {
     }
 }
 
+/// Background threads that only read from VK or the compositor, safe to
+/// leave behind when the application exits.
+fn read_only_worker(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some(
+            "vk-api"
+                | "vk-home"
+                | "vk-home-catalog"
+                | "vk-home-playlist"
+                | "vk-search"
+                | "vk-artist-album"
+                | "vk-track-metadata"
+                | "vk-track-prefetch"
+                | "vk-resolve-audio"
+                | "vk-lyrics"
+                | "vk-mix"
+                | "vk-mix-settings"
+                | "vk-playlists"
+                | "vk-owner-playlists"
+                | "vk-library-artists"
+                | "vk-link-track"
+                | "vk-discord-links"
+                | "vk-playlist-play"
+                | "vk-qr-login"
+                | "vk-window-focus"
+        )
+    )
+}
+
 impl Drop for MusicApp {
     fn drop(&mut self) {
         self.tray.detach();
@@ -9411,7 +9441,12 @@ impl Drop for MusicApp {
             let _ = preferences::save_cache_limit_mb(self.cache_limit_mb);
         }
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            // Canceled reads may still wait for VK's answer (up to the HTTP
+            // timeout); the process exits without them. Saves and account
+            // changes are still awaited.
+            if worker.is_finished() || !read_only_worker(worker.thread().name()) {
+                let _ = worker.join();
+            }
         }
         let recent_failed = self
             .recent_save_pending
@@ -12331,6 +12366,40 @@ mod tests {
         app.poll_link_track(&ctx);
         assert_eq!(app.track_menu_error, Some(WebAudioError::NoStream));
         assert_eq!(app.playing.as_ref().map(Track::key), Some(linked.key()));
+    }
+
+    #[test]
+    fn exit_leaves_pending_reads_behind_but_waits_for_saves() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let saved = Arc::new(AtomicBool::new(false));
+        let done = saved.clone();
+        app.workers.push(
+            thread::Builder::new()
+                .name("vk-search".into())
+                .spawn(|| thread::sleep(Duration::from_secs(5)))
+                .unwrap(),
+        );
+        app.workers.push(
+            thread::Builder::new()
+                .name("vk-recent-cache".into())
+                .spawn(move || {
+                    thread::sleep(Duration::from_millis(100));
+                    done.store(true, Ordering::Release);
+                })
+                .unwrap(),
+        );
+        let started = Instant::now();
+        drop(app);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(saved.load(Ordering::Acquire), "a save is not cut off");
+        assert!(read_only_worker(Some("vk-home")));
+        assert!(!read_only_worker(Some("vk-playlist-add")));
+        assert!(!read_only_worker(None));
     }
 
     #[test]
