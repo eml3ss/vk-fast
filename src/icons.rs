@@ -986,9 +986,32 @@ pub fn heart_button(
     liked: bool,
     pending: bool,
 ) -> Response {
+    track_button(
+        ui,
+        if liked {
+            Icon::HeartFilled
+        } else {
+            Icon::Heart
+        },
+        label,
+        enabled,
+        liked,
+        pending,
+    )
+}
+
+/// Small track actions share the heart's spacing, colors and pending state.
+pub fn track_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    enabled: bool,
+    selected: bool,
+    pending: bool,
+) -> Response {
     ui.add_enabled_ui(enabled && !pending, |ui| {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
-        let base = if liked {
+        let base = if selected {
             crate::theme::ACCENT
         } else {
             crate::theme::MUTED
@@ -1003,19 +1026,19 @@ pub fn heart_button(
                 .color(color)
                 .paint_at(ui, rect.shrink(2.0));
         } else {
-            paint(
-                ui.painter(),
-                rect.shrink(2.0),
-                if liked {
-                    Icon::HeartFilled
-                } else {
-                    Icon::Heart
-                },
-                color,
-            );
+            paint(ui.painter(), rect.shrink(2.0), icon, color);
         }
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), liked, label)
+            egui::WidgetInfo::selected(
+                if matches!(icon, Icon::Heart | Icon::HeartFilled | Icon::Dislike) {
+                    egui::WidgetType::Checkbox
+                } else {
+                    egui::WidgetType::Button
+                },
+                ui.is_enabled(),
+                selected,
+                label,
+            )
         });
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)

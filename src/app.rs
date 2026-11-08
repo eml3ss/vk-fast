@@ -5255,6 +5255,43 @@ impl MusicApp {
         response
     }
 
+    fn dislike_button(&self, ui: &mut egui::Ui, track: &Track) -> egui::Response {
+        let disliked = self.disliked.contains(&track.key());
+        let response = icons::track_button(
+            ui,
+            Icon::Dislike,
+            if disliked {
+                self.language
+                    .text("Убрать из «Не нравится»", "Remove dislike")
+            } else {
+                self.language.text("Не нравится", "Dislike")
+            },
+            !self.demo
+                && self.search_ready()
+                && self.dislike_request.is_none()
+                && track.unavailable != Some(true),
+            disliked,
+            self.dislike_request
+                .as_ref()
+                .is_some_and(|request| request.key == track.key()),
+        );
+        release_pointer_focus(&response);
+        response
+    }
+
+    fn track_mix_button(&self, ui: &mut egui::Ui) -> egui::Response {
+        let response = icons::track_button(
+            ui,
+            Icon::Radio,
+            self.language.text("Микс по треку", "Go to track mix"),
+            !self.demo && self.search_ready(),
+            false,
+            false,
+        );
+        release_pointer_focus(&response);
+        response
+    }
+
     /// Mark or unmark VK's "Не нравится" for a track. Like VK's player, a
     /// disliked track that is playing is skipped.
     fn toggle_dislike(&mut self, ctx: &egui::Context, track: &Track) {
@@ -7425,7 +7462,7 @@ impl MusicApp {
         let index_width = track_index_width(ui, self.view_tracks().len().max(index + 1));
         let unavailable = track.unavailable == Some(true);
         let mut action = None;
-        let mut heart_contains_pointer = false;
+        let mut controls_contain_pointer = false;
         let mut index_contains_pointer = false;
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -7481,7 +7518,7 @@ impl MusicApp {
                     );
                 }
                 self.covers.show(ui, track.cover_url.as_deref(), 40.0);
-                let width = (ui.available_width() - 86.0).max(0.0);
+                let width = (ui.available_width() - 142.0).max(0.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, 40.0),
                     Layout::top_down(Align::Min),
@@ -7510,8 +7547,24 @@ impl MusicApp {
                         }
                     },
                 );
+                let mix = self.track_mix_button(ui);
+                controls_contain_pointer |= mix.contains_pointer();
+                if mix.clicked() {
+                    action = Some(TrackAction::Menu(
+                        track.clone(),
+                        track_menu::Action::TrackMix,
+                    ));
+                }
+                let dislike = self.dislike_button(ui, track);
+                controls_contain_pointer |= dislike.contains_pointer();
+                if dislike.clicked() {
+                    action = Some(TrackAction::Menu(
+                        track.clone(),
+                        track_menu::Action::ToggleDislike,
+                    ));
+                }
                 let heart = self.like_button(ui, track);
-                heart_contains_pointer = heart.contains_pointer();
+                controls_contain_pointer |= heart.contains_pointer();
                 if heart.clicked() {
                     action = Some(TrackAction::ToggleLike(track.clone()));
                 }
@@ -7527,7 +7580,7 @@ impl MusicApp {
         release_pointer_focus(&response);
         ui.advance_cursor_after_rect(rect);
         let row_clicked = action.is_none()
-            && !heart_contains_pointer
+            && !controls_contain_pointer
             && !index_contains_pointer
             && response.clicked_by(egui::PointerButton::Primary);
         let play = if self.double_click_to_play {
