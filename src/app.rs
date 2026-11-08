@@ -1047,6 +1047,11 @@ struct Library {
     offset: usize,
     fresh_prefix: usize,
     exhausted: bool,
+    /// The signed-in account. Rows its heart would show as not saved are
+    /// kept out: VK's music page can list recently played tracks there.
+    owner: Option<i64>,
+    /// Rows VK sent that were kept out, so the shown total matches.
+    hidden: usize,
 }
 
 impl Library {
@@ -1057,6 +1062,17 @@ impl Library {
         }
     }
 
+    /// The same rule as the heart: VK's saved mark, else the account's own copy.
+    fn saved(owner: i64, track: &Track) -> bool {
+        track.library_liked.unwrap_or(track.owner_id == owner)
+    }
+
+    fn for_owner(mut self, owner: i64) -> Self {
+        self.owner = Some(owner);
+        self.tracks.retain(|track| Self::saved(owner, track));
+        self
+    }
+
     fn refresh(&mut self, page: AudioPage) {
         if page.count == Some(0) && page.items.is_empty() {
             self.tracks.clear();
@@ -1064,12 +1080,22 @@ impl Library {
         self.offset = 0;
         self.fresh_prefix = 0;
         self.exhausted = false;
+        self.hidden = 0;
         self.append(page);
     }
 
-    fn append(&mut self, page: AudioPage) {
+    fn append(&mut self, mut page: AudioPage) {
+        // VK's offsets count every row it sent, shown or not.
         let received = page.items.len();
-        self.total = page.count.or(self.total);
+        if let Some(owner) = self.owner {
+            page.items.retain(|track| Self::saved(owner, track));
+            self.hidden += received - page.items.len();
+            if received != page.items.len() {
+                crate::diagnostics::event("library", "unsaved_rows_hidden");
+            }
+        }
+        let raw_total = page.count.map(|count| count.saturating_sub(self.hidden));
+        self.total = raw_total.or(self.total);
         self.offset = self.offset.saturating_add(received);
         let known_metadata: HashMap<_, _> = self
             .tracks
@@ -1105,8 +1131,14 @@ impl Library {
             self.total = None;
         }
         self.exhausted = page.exhausted.unwrap_or_else(|| {
-            received == 0 || self.total.is_some_and(|total| self.offset >= total)
+            received == 0
+                || self
+                    .total
+                    .is_some_and(|total| self.offset >= total + self.hidden)
         });
+        if self.exhausted && self.hidden > 0 {
+            self.total = Some(self.tracks.len());
+        }
     }
 }
 
@@ -2798,9 +2830,15 @@ impl MusicApp {
             let _ = library_cache::load_total;
             None
         };
-        Library {
+        let library = Library {
             total,
             ..Library::from_cached(latest.map_or(fallback, |tracks| tracks.as_ref().clone()))
+        };
+        // Synthetic app tests use rows of other owners as library tracks.
+        if cfg!(test) {
+            library
+        } else {
+            library.for_owner(owner)
         }
     }
 

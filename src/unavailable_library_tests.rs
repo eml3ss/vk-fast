@@ -263,3 +263,37 @@ fn muted_rows_still_emit_the_original_play_or_artist_intent_for_the_caller_to_ha
         assert!(app.selected.is_none() && app.playback_pending.is_none());
     }
 }
+
+#[test]
+fn rows_the_heart_shows_as_not_saved_stay_out_of_my_music() {
+    let mut played = page(2, &[7, 8]);
+    for track in &mut played.items {
+        track.owner_id = -100;
+    }
+    let mut saved = page(1, &[9]).items.remove(0);
+    saved.owner_id = 42;
+    let mut marked = page(1, &[10]).items.remove(0);
+    marked.library_liked = Some(true);
+    played.items.extend([saved, marked]);
+    played.count = Some(4);
+    played.exhausted = Some(true);
+    let mut library = Library::from_cached(page(1, &[7]).items).for_owner(42);
+    assert!(
+        library.tracks.is_empty(),
+        "cached unsaved rows are dropped too"
+    );
+    library.refresh(played);
+    let ids: Vec<_> = library.tracks.iter().map(|track| track.id).collect();
+    assert_eq!(ids, [9, 10]);
+    assert_eq!(library.total, Some(2));
+    assert_eq!(library.offset, 4, "VK's offset still counts every row");
+    let mut only_played = page(2, &[7, 8]);
+    for track in &mut only_played.items {
+        track.owner_id = 55;
+    }
+    let mut library = Library::default().for_owner(42);
+    library.refresh(only_played);
+    assert!(library.tracks.is_empty());
+    assert_eq!(library.total, Some(0));
+    assert!(library.exhausted);
+}
