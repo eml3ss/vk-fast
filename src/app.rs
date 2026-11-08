@@ -7747,7 +7747,7 @@ impl MusicApp {
                     }
                 }
                 let cover_gap = ui.spacing().item_spacing.x;
-                let heart_gap = 6.0;
+                let heart_gap = 12.0;
                 let max_text_width = (metadata.width()
                     - artwork_size
                     - cover_gap
