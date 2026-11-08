@@ -2,9 +2,7 @@
 
 <img src="assets/vk-fast-icon.png" width="80" height="80" align="right" alt="VK Fast">
 
-Неофициальный плеер VK Music для **Linux и Windows** на Rust и egui. Русский и английский интерфейс, тёмная тема, PipeWire на Linux и WASAPI на Windows.
-
-Декодирование и обработка звука выполняются на Rust: **Symphonia**, **Rubato** и **ebur128**. [Устройство аудиотракта](docs/native-audio.md).
+Неофициальный плеер VK Music для **Linux и Windows** на Rust и egui. Русский и английский интерфейс, тёмная тема.
 
 Готовые выпуски: [GitHub Releases](https://github.com/eml3ss/vk-fast/releases). [Список изменений](CHANGELOG.md). Текущая ветка разработки может отличаться от опубликованного выпуска.
 
