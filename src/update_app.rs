@@ -70,7 +70,8 @@ impl State {
             receiver: None,
             canceled: None,
             automatic,
-            next_check: automatic.then(|| Instant::now() + Duration::from_secs(10)),
+            // The first check runs as soon as the app opens.
+            next_check: automatic.then(Instant::now),
             save_failed: false,
             open: false,
         }

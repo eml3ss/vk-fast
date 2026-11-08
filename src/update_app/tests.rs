@@ -57,19 +57,18 @@ fn only_confirmed_helper_handoff_requests_real_exit_including_when_in_tray() {
 }
 
 #[test]
-fn automatic_check_is_delayed_can_be_disabled_and_has_no_per_frame_request_loop() {
+fn automatic_check_runs_at_launch_once_can_be_disabled_and_has_no_per_frame_request_loop() {
     let mut state = State::new(true);
     let target = RepaintTarget::default();
-    assert!(state.next_check_in().unwrap() > Duration::from_secs(8));
-    for _ in 0..20 {
-        assert!(!state.tick(&target));
-    }
-    assert_eq!(state.phase, Phase::Idle);
-    assert!(state.receiver.is_none());
-    state.next_check = Some(Instant::now());
+    assert_eq!(state.next_check_in(), Some(Duration::ZERO));
     state.tick(&target);
     assert_eq!(state.phase, Phase::Checking);
     assert!(state.next_check.is_none());
+    for _ in 0..20 {
+        assert!(!state.tick(&target));
+    }
+    assert_eq!(state.phase, Phase::Checking);
+    assert!(state.next_check_in().is_none());
     let mut disabled = State::new(false);
     disabled.tick(&target);
     assert!(disabled.next_check_in().is_none());
