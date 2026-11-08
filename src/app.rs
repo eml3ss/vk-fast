@@ -605,10 +605,7 @@ impl Drop for LikeRequest {
 }
 
 enum HomeReply {
-    Catalog(
-        Vec<crate::web_audio::HomeCollection>,
-        Option<crate::web_audio::HomeCatalog>,
-    ),
+    Catalog(Vec<crate::web_audio::HomeCollection>),
     Tracks(String, Vec<Track>),
 }
 
@@ -617,6 +614,20 @@ struct HomeRequest {
     collection: Option<String>,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Result<HomeReply, WebAudioError>>,
+}
+
+/// VK's catalog Home blocks load beside the legacy Home, so neither waits
+/// for the other.
+struct CatalogRequest {
+    owner: i64,
+    canceled: Arc<AtomicBool>,
+    receiver: Receiver<Result<crate::web_audio::HomeCatalog, WebAudioError>>,
+}
+
+impl Drop for CatalogRequest {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+    }
 }
 
 struct PlaylistRequest {
@@ -1048,6 +1059,7 @@ pub struct MusicApp {
     home_collections: Vec<home_ui::Collection>,
     home_sources: Vec<crate::web_audio::HomeCollection>,
     home_catalog: crate::web_audio::HomeCatalog,
+    catalog_request: Option<CatalogRequest>,
     catalog_mix: Option<(u64, crate::web_audio::CatalogMix)>,
     home_request: Option<HomeRequest>,
     home_requested: bool,
@@ -1369,6 +1381,7 @@ impl MusicApp {
             home_collections: Vec::new(),
             home_sources: Vec::new(),
             home_catalog: Default::default(),
+            catalog_request: None,
             catalog_mix: None,
             home_request: None,
             home_requested: false,
@@ -1595,7 +1608,10 @@ impl MusicApp {
             }
         }
         if self.page == MusicPage::Home {
-            if self.pending.is_some() || self.home_request.is_some() {
+            if self.pending.is_some()
+                || self.home_request.is_some()
+                || self.catalog_request.is_some()
+            {
                 self.screenshot_ready_at = None;
                 return;
             }
@@ -1670,6 +1686,7 @@ impl MusicApp {
         self.home_collections.clear();
         self.home_sources.clear();
         self.home_catalog = Default::default();
+        self.catalog_request = None;
         self.catalog_mix = None;
         self.playlist_items.clear();
         self.editable_playlists.clear();
@@ -4649,6 +4666,7 @@ impl MusicApp {
         let owner = session.profile.id;
         self.home_requested = true;
         self.home_error = None;
+        self.load_home_catalog(ctx, client.clone(), owner);
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -4658,11 +4676,7 @@ impl MusicApp {
             .spawn(move || {
                 let result = client
                     .home(owner, &worker_cancel)
-                    .map(|collections| {
-                        // Optional blocks: a catalog failure keeps the legacy Home.
-                        let catalog = client.home_catalog(owner, &worker_cancel).ok();
-                        HomeReply::Catalog(collections, catalog)
-                    })
+                    .map(HomeReply::Catalog)
                     .map_err(|error| client.confirm_expired(owner, error));
                 let _ = sender.send(result);
                 ctx.request_repaint();
@@ -4774,6 +4788,92 @@ impl MusicApp {
         }
     }
 
+    fn load_home_catalog(
+        &mut self,
+        ctx: &egui::Context,
+        client: crate::web_audio::WebAudioClient,
+        owner: i64,
+    ) {
+        if self.catalog_request.is_some() {
+            return;
+        }
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-home-catalog".into())
+            .spawn(move || {
+                let _ = sender.send(client.home_catalog(owner, &worker_cancel));
+                ctx.request_repaint();
+            })
+        {
+            self.workers.push(worker);
+            self.catalog_request = Some(CatalogRequest {
+                owner,
+                canceled,
+                receiver,
+            });
+        }
+    }
+
+    /// Optional blocks: a failed catalog keeps the legacy Home as it is.
+    fn poll_home_catalog(&mut self) {
+        let Some(request) = &self.catalog_request else {
+            return;
+        };
+        let owner = request.owner;
+        let result = match request.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        self.catalog_request = None;
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.profile.id != owner)
+        {
+            return;
+        }
+        if let Ok(catalog) = result {
+            self.home_catalog = catalog;
+            self.rebuild_home_collections();
+        }
+    }
+
+    /// The legacy Home repeats VK's genre and mood tiles as large playlist
+    /// cards; Home shows those tiles as compact chips instead. Tracks already
+    /// loaded into a card are kept.
+    fn rebuild_home_collections(&mut self) {
+        let chips: HashSet<&str> = self
+            .home_catalog
+            .genres
+            .iter()
+            .chain(&self.home_catalog.moods)
+            .map(|tile| tile.title.as_str())
+            .collect();
+        let previous = std::mem::take(&mut self.home_collections);
+        self.home_collections = self
+            .home_sources
+            .iter()
+            .filter(|source| !chips.contains(source.title.as_str()))
+            .map(|source| home_ui::Collection {
+                id: source.id.clone(),
+                title: source.title.clone(),
+                subtitle: source.subtitle.clone(),
+                cover_url: source.cover_url.clone(),
+                tracks: previous
+                    .iter()
+                    .find(|collection| collection.id == source.id && !collection.tracks.is_empty())
+                    .map_or_else(
+                        || source.tracks.clone(),
+                        |collection| collection.tracks.clone(),
+                    ),
+            })
+            .collect();
+    }
+
     fn poll_home(&mut self, ctx: &egui::Context) {
         let Some(request) = &self.home_request else {
             return;
@@ -4796,31 +4896,9 @@ impl MusicApp {
             self.track_view_cache.invalidate();
         }
         match result {
-            Ok(HomeReply::Catalog(sources, catalog)) => {
-                if let Some(catalog) = catalog {
-                    self.home_catalog = catalog;
-                }
-                // The legacy Home repeats VK's genre and mood tiles as large
-                // playlist cards; Home shows those tiles as compact chips.
-                let chips: HashSet<&str> = self
-                    .home_catalog
-                    .genres
-                    .iter()
-                    .chain(&self.home_catalog.moods)
-                    .map(|tile| tile.title.as_str())
-                    .collect();
-                self.home_collections = sources
-                    .iter()
-                    .filter(|source| !chips.contains(source.title.as_str()))
-                    .map(|source| home_ui::Collection {
-                        id: source.id.clone(),
-                        title: source.title.clone(),
-                        subtitle: source.subtitle.clone(),
-                        cover_url: source.cover_url.clone(),
-                        tracks: source.tracks.clone(),
-                    })
-                    .collect();
+            Ok(HomeReply::Catalog(sources)) => {
                 self.home_sources = sources;
+                self.rebuild_home_collections();
                 self.home_error = None;
             }
             Ok(HomeReply::Tracks(id, tracks)) => {
@@ -5990,9 +6068,31 @@ impl MusicApp {
     }
 
     fn home_content(&mut self, ui: &mut egui::Ui) {
-        theme::inset_heading(ui, |ui| {
-            ui.heading(RichText::new(self.language.text("Главная", "Home")).size(26.0))
+        // The same title row as My music: refresh sits at the top right.
+        let refresh_enabled = (self.session.is_some() || self.demo)
+            && self.home_request.is_none()
+            && self.catalog_request.is_none()
+            && !(self.pending.is_some() && !self.home_requested);
+        let mut refresh = false;
+        ui.horizontal(|ui| {
+            theme::inset_heading(ui, |ui| {
+                ui.heading(RichText::new(self.language.text("Главная", "Home")).size(26.0))
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                refresh = icons::compact_button(
+                    ui,
+                    Icon::Refresh,
+                    self.language.text("Обновить", "Refresh"),
+                    refresh_enabled,
+                    false,
+                )
+                .clicked();
+            });
         });
+        if refresh {
+            let ctx = ui.ctx().clone();
+            self.load_home(&ctx);
+        }
         ui.add_space(8.0);
         #[cfg(feature = "screenshot")]
         ui.ctx().data_mut(|data| {
@@ -6113,7 +6213,6 @@ impl MusicApp {
                     self.play_track(&ctx, key);
                 }
             }
-            Some(home_ui::Action::Refresh) => self.load_home(&ctx),
             Some(home_ui::Action::SignIn) => self.connect_browser(&ctx),
             None => {}
         }
@@ -8496,6 +8595,7 @@ impl MusicApp {
         self.poll(ctx);
         self.poll_profile_cleanup();
         self.poll_home(ctx);
+        self.poll_home_catalog();
         self.poll_playlists(ctx);
         self.poll_library_artists(ctx);
         if !self.playlists_requested && self.playlist_ready() {
@@ -8997,6 +9097,7 @@ mod tests {
             home_collections: Vec::new(),
             home_sources: Vec::new(),
             home_catalog: Default::default(),
+            catalog_request: None,
             catalog_mix: None,
             home_request: None,
             home_requested: false,
@@ -9537,6 +9638,64 @@ mod tests {
     }
 
     #[test]
+    fn a_late_catalog_hides_duplicate_genre_cards_and_keeps_loaded_tracks() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.session = Some(Session {
+            profile: Profile {
+                id: 42,
+                first_name: "Test".into(),
+                last_name: "User".into(),
+                avatar_url: None,
+            },
+            client: None,
+            music: None,
+            cache_warning: false,
+        });
+        let source = |id: &str, title: &str| crate::web_audio::HomeCollection {
+            id: id.into(),
+            owner_id: 42,
+            playlist_id: 5,
+            title: title.into(),
+            subtitle: String::new(),
+            cover_url: None,
+            access_key: None,
+            tracks: Vec::new(),
+        };
+        app.home_sources = vec![source("for-you", "Для вас"), source("pop", "Поп")];
+        app.rebuild_home_collections();
+        assert_eq!(app.home_collections.len(), 2, "legacy Home shows first");
+        app.home_collections[0].tracks = page(2, &[7, 8]).items;
+
+        let mut catalog = crate::web_audio::HomeCatalog::default();
+        catalog.genres.push(crate::web_audio::MixTile {
+            id: "pop_genre".into(),
+            title: "Поп".into(),
+            mix: crate::web_audio::CatalogMix::Common {
+                options: vec![("additionals".into(), "pop".into())],
+            },
+        });
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.catalog_request = Some(CatalogRequest {
+            owner: 42,
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        sender.send(Ok(catalog)).unwrap();
+        app.poll_home_catalog();
+        assert!(app.catalog_request.is_none());
+        assert_eq!(
+            app.home_collections
+                .iter()
+                .map(|collection| collection.id.as_str())
+                .collect::<Vec<_>>(),
+            ["for-you"]
+        );
+        assert_eq!(app.home_collections[0].tracks.len(), 2);
+        assert_eq!(app.home_catalog.genres.len(), 1);
+    }
+
+    #[test]
     fn home_play_button_starts_a_collection_without_opening_its_page() {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, Language::English);
@@ -9774,11 +9933,7 @@ mod tests {
         app.page = MusicPage::Collection("old-playlist".into());
         app.reset();
         assert!(canceled.load(Ordering::Acquire));
-        assert!(
-            sender
-                .send(Ok(HomeReply::Catalog(Vec::new(), None)))
-                .is_err()
-        );
+        assert!(sender.send(Ok(HomeReply::Catalog(Vec::new()))).is_err());
         assert!(app.recent.is_empty());
         assert!(app.play_queue.is_none());
         assert!(app.home_autoplay.is_none());

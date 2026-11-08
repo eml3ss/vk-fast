@@ -55,7 +55,6 @@ pub enum Action {
     PlayCatalogMix(CatalogMix),
     OpenPlaylist(AlbumRef),
     PlayFriendTrack((i64, i64), (i64, i64)),
-    Refresh,
     SignIn,
 }
 
@@ -135,15 +134,13 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         }
 
         ui.add_space(SECTION_GAP);
-        if section_heading(
+        section_heading(
             ui,
             Icon::Sparkles,
             view.language.text("Подборки для вас", "Made for you"),
-            Some((Icon::Refresh, view.language.text("Обновить", "Refresh"))),
-            view.connected && !view.loading,
-        ) {
-            action = Some(Action::Refresh);
-        }
+            None,
+            true,
+        );
         ui.add_space(SECTION_GAP);
         if view.collections.is_empty() {
             empty_collections(ui, &view);
@@ -192,7 +189,8 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
 
 const CARD_GAP: f32 = 16.0;
 const COLLECTION_HEIGHT: f32 = 194.0;
-const CAROUSEL_SECONDS: f32 = 0.32;
+/// Time constant of the slide; it settles in about three of these.
+const CAROUSEL_EASE: f32 = 0.055;
 
 fn fixed_spans(count: usize, width: f32) -> Vec<(f32, f32)> {
     (0..count)
@@ -240,13 +238,39 @@ fn carousel(
     let content = spans.last().map_or(0.0, |(x, width)| x + width);
     let max = (content - visible).max(0.0);
     let id = egui::Id::new(("home-carousel", key));
-    let target = ui
+    let mut target = ui
         .data(|data| data.get_temp::<f32>(id))
         .unwrap_or(0.0)
         .clamp(0.0, max);
-    let offset = ui
-        .ctx()
-        .animate_value_with_time(id.with("offset"), target, CAROUSEL_SECONDS);
+    let hovered = ui.rect_contains_pointer(rect);
+    // Shift + wheel arrives as horizontal scroll; it moves only this row.
+    let wheel = if hovered && max > 0.0 {
+        ui.input_mut(|input| std::mem::take(&mut input.smooth_scroll_delta.x))
+    } else {
+        0.0
+    };
+    if wheel != 0.0 {
+        target = (target - wheel).clamp(0.0, max);
+        ui.data_mut(|data| data.insert_temp(id, target));
+    }
+    let offset_id = id.with("offset");
+    let previous = ui
+        .data(|data| data.get_temp::<f32>(offset_id))
+        .unwrap_or(target);
+    let offset = if wheel != 0.0 {
+        // The wheel is already smoothed by egui; follow it without lag.
+        target
+    } else {
+        let dt = ui.input(|input| input.stable_dt).clamp(0.0, 0.1);
+        let eased = previous + (target - previous) * (1.0 - (-dt / CAROUSEL_EASE).exp());
+        if (target - eased).abs() < 0.5 {
+            target
+        } else {
+            ui.ctx().request_repaint();
+            eased
+        }
+    };
+    ui.data_mut(|data| data.insert_temp(offset_id, offset));
     // Keep card outlines and focus rings, but never draw past the row ends.
     let clip = egui::Rect::from_min_max(
         egui::pos2(rect.left(), rect.top() - 2.0),
@@ -271,7 +295,6 @@ fn carousel(
         item(&mut child, index);
     }
 
-    let hovered = ui.rect_contains_pointer(rect);
     let mut moved = None;
     for (next, available) in [(false, target > 0.5), (true, target < max - 0.5)] {
         if !available {
@@ -369,11 +392,31 @@ impl PlayState {
 
     fn icon(self) -> Icon {
         match self {
-            Self::Pending => Icon::Clock,
             Self::Playing => Icon::Pause,
-            Self::Idle | Self::Paused => Icon::Play,
+            Self::Idle | Self::Paused | Self::Pending => Icon::Play,
         }
     }
+}
+
+/// Play or pause, or a spinning arc while the mix or playlist is loading.
+fn state_icon(ui: &egui::Ui, rect: egui::Rect, state: PlayState, color: Color32) {
+    if state != PlayState::Pending {
+        icons::paint(ui.painter(), rect, state.icon(), color);
+        return;
+    }
+    let radius = rect.width().min(rect.height()) * 0.42;
+    let start = ui.input(|input| input.time) as f32 * 6.0;
+    let points = (0..=28)
+        .map(|step| {
+            let angle = start + 4.4 * step as f32 / 28.0;
+            rect.center() + radius * egui::vec2(angle.cos(), angle.sin())
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new((radius * 0.32).max(1.6), color),
+    ));
+    ui.ctx().request_repaint();
 }
 
 fn catalog_sections(
@@ -548,10 +591,10 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
             theme::PRIMARY
         },
     );
-    icons::paint(
-        ui.painter(),
+    state_icon(
+        ui,
         egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
-        state.icon(),
+        state,
         Color32::WHITE,
     );
     ui.painter().galley(
@@ -737,10 +780,10 @@ fn artist_mix_card(
     covers.show_rounded(&mut photo, mix.photo_url.as_deref(), art.width(), 56);
     let badge = art.right_bottom() - egui::vec2(16.0, 16.0);
     ui.painter().circle_filled(badge, 20.0, Color32::WHITE);
-    icons::paint(
-        ui.painter(),
+    state_icon(
+        ui,
         egui::Rect::from_center_size(badge, egui::vec2(20.0, 20.0)),
-        state.icon(),
+        state,
         theme::BACKGROUND,
     );
     card_text(
@@ -1198,12 +1241,7 @@ fn collection_card(
         Color32::WHITE
     };
     ui.painter().circle_filled(play_rect.center(), 20.0, fill);
-    icons::paint(
-        ui.painter(),
-        play_rect.shrink(10.0),
-        state.icon(),
-        theme::BACKGROUND,
-    );
+    state_icon(ui, play_rect.shrink(10.0), state, theme::BACKGROUND);
     if play.has_focus() {
         ui.painter()
             .circle_stroke(play_rect.center(), 22.0, Stroke::new(1.5, theme::ACCENT));
@@ -1667,12 +1705,55 @@ mod tests {
         assert_eq!(next_stop(&chips, 0.0, 400.0, 44.0), 44.0);
     }
 
-    #[test]
-    fn hovering_a_row_shows_an_edge_arrow_that_slides_to_the_next_cards() {
-        let context = egui::Context::default();
-        theme::install(&context);
-        let mut covers = CoverCache::new();
-        let collections: Vec<Collection> = (0..8)
+    fn collections_frame(
+        context: &egui::Context,
+        covers: &mut CoverCache,
+        collections: &[Collection],
+        tick: u32,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(660.0, 1100.0),
+                )),
+                time: Some(f64::from(tick) / 60.0),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                show(
+                    ui,
+                    covers,
+                    HomeView {
+                        language: Language::Russian,
+                        library: &[],
+                        library_total: None,
+                        recent: &[],
+                        playing: None,
+                        connected: true,
+                        loading: false,
+                        mix_loading: false,
+                        mix_playing: false,
+                        collections,
+                        active_collection: None,
+                        pending_collection: None,
+                        catalog: &HomeCatalog::default(),
+                        active_mix: None,
+                        active_mix_playing: false,
+                        pending_mix: None,
+                        error: None,
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn eight_collections() -> Vec<Collection> {
+        (0..8)
             .map(|index| Collection {
                 id: format!("c{index}"),
                 title: format!("Collection {index}"),
@@ -1680,46 +1761,58 @@ mod tests {
                 cover_url: None,
                 tracks: Vec::new(),
             })
-            .collect();
+            .collect()
+    }
+
+    fn fully_visible(output: &egui::FullOutput, label: &str) -> bool {
+        output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text)
+                if text.galley.text() == label
+                    && text.visual_bounding_rect().left() >= 0.0
+                    && text.visual_bounding_rect().right() <= 660.0)
+        })
+    }
+
+    #[test]
+    fn shift_wheel_scrolls_only_the_hovered_row_sideways() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let collections = eight_collections();
+        let output = collections_frame(&context, &mut covers, &collections, 1, Vec::new());
+        let first = text_center(&output, "Collection 0");
+        assert!(!fully_visible(&output, "Collection 3"));
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::SHIFT,
+            phase: egui::TouchPhase::Move,
+        };
+        collections_frame(
+            &context,
+            &mut covers,
+            &collections,
+            2,
+            vec![egui::Event::PointerMoved(first), wheel],
+        );
+        let mut output = collections_frame(&context, &mut covers, &collections, 3, Vec::new());
+        for tick in 4..90 {
+            output = collections_frame(&context, &mut covers, &collections, tick, Vec::new());
+        }
+        assert!(
+            fully_visible(&output, "Collection 3"),
+            "the row moved sideways"
+        );
+    }
+
+    #[test]
+    fn hovering_a_row_shows_an_edge_arrow_that_slides_to_the_next_cards() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let collections = eight_collections();
         let mut frame = |tick: u32, events: Vec<egui::Event>| {
-            let mut output = context.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(660.0, 1100.0),
-                    )),
-                    time: Some(f64::from(tick) * 0.1),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    show(
-                        ui,
-                        &mut covers,
-                        HomeView {
-                            language: Language::Russian,
-                            library: &[],
-                            library_total: None,
-                            recent: &[],
-                            playing: None,
-                            connected: true,
-                            loading: false,
-                            mix_loading: false,
-                            mix_playing: false,
-                            collections: &collections,
-                            active_collection: None,
-                            pending_collection: None,
-                            catalog: &HomeCatalog::default(),
-                            active_mix: None,
-                            active_mix_playing: false,
-                            pending_mix: None,
-                            error: None,
-                        },
-                    );
-                },
-            );
-            output.textures_delta.clear();
-            output
+            collections_frame(&context, &mut covers, &collections, tick, events)
         };
         let arrows = |output: &egui::FullOutput| -> Vec<egui::Pos2> {
             output
