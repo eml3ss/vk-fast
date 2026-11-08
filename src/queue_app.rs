@@ -13,6 +13,8 @@ pub(super) struct PanelState {
     upcoming: Vec<Upcoming>,
     source_stamp: Option<(usize, usize, u64)>,
     source_indices: HashMap<TrackKey, usize>,
+    /// The queue's share of the height when lyrics are open below it.
+    pub(super) split: f32,
 }
 
 enum Action {
@@ -89,6 +91,29 @@ impl MusicApp {
     }
 
     pub(super) fn queue_panel(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.queue_ui.open;
+        let mut close = false;
+        let shown = self
+            .right_side_panel(ui)
+            .show_collapsible(ui, &mut open, |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                close = self.queue_contents(ui);
+            });
+        // The edge only resizes: a drag or double click must not close it.
+        self.queue_ui.open &= !close;
+        if let Some(shown) = shown {
+            self.remember_panel_width(
+                ui.ctx(),
+                1,
+                super::RIGHT_PANEL_ID,
+                shown.response.rect.width(),
+            );
+        }
+    }
+
+    /// The queue itself, in its own panel or above the lyrics. Returns
+    /// whether its close button was clicked.
+    pub(super) fn queue_contents(&mut self, ui: &mut egui::Ui) -> bool {
         let mut panel = std::mem::take(&mut self.queue_ui);
         let source = self.play_queue.as_deref().unwrap_or(&self.library.tracks);
         let source_stamp = (
@@ -114,15 +139,12 @@ impl MusicApp {
             };
             panel.stamp = Some(stamp);
         }
-        let mut open = panel.open;
         let mut close = false;
         let mut action = None;
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
-        let shown = self
-            .right_side_panel(ui)
-            .show_collapsible(ui, &mut open, |ui| {
-                ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+        {
+            {
                 ui.horizontal(|ui| {
                     ui.set_min_height(32.0);
                     ui.add(
@@ -244,18 +266,9 @@ impl MusicApp {
                         },
                     );
                 }
-            });
-        // The edge only resizes: a drag or double click must not close it.
-        panel.open &= !close;
-        self.queue_ui = panel;
-        if let Some(shown) = shown {
-            self.remember_panel_width(
-                ui.ctx(),
-                1,
-                super::RIGHT_PANEL_ID,
-                shown.response.rect.width(),
-            );
+            }
         }
+        self.queue_ui = panel;
         let ctx = ui.ctx();
         match action {
             Some(Action::Play(index))
@@ -275,6 +288,7 @@ impl MusicApp {
             Some(Action::Track(action)) => self.handle_track_action(ctx, *action),
             _ => {}
         }
+        close
     }
 
     fn queue_row(

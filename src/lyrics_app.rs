@@ -156,7 +156,6 @@ impl MusicApp {
         if self.lyrics.fullscreen {
             self.set_lyrics_fullscreen(ctx, false);
         }
-        self.queue_ui.open = false;
         self.lyrics.active = true;
         self.lyrics.open = next;
         if !next {
@@ -172,9 +171,6 @@ impl MusicApp {
         if self.lyrics.fullscreen {
             self.set_lyrics_fullscreen(ctx, false);
         }
-        self.lyrics.open = false;
-        self.lyrics.cancel_pending();
-        self.lyrics.active = false;
         self.queue_ui.open = next;
         if next {
             self.synchronize_order();
@@ -191,7 +187,6 @@ impl MusicApp {
                 ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
             self.lyrics.previous_maximized =
                 ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-            self.queue_ui.open = false;
             self.lyrics.open = true;
             self.lyrics.active = true;
         }
@@ -219,7 +214,12 @@ impl MusicApp {
     }
 
     pub(super) fn right_panel(&mut self, ui: &mut egui::Ui) {
-        if !self.lyrics.active {
+        let lyrics = self.lyrics.active && self.lyrics.open;
+        if lyrics && self.queue_ui.open {
+            self.queue_and_lyrics_panel(ui);
+            return;
+        }
+        if self.queue_ui.open || !self.lyrics.active {
             self.queue_panel(ui);
             return;
         }
@@ -232,6 +232,94 @@ impl MusicApp {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 action = self.lyrics_contents(ui, false);
             });
+        if let Some(shown) = shown {
+            self.remember_panel_width(
+                ui.ctx(),
+                1,
+                super::RIGHT_PANEL_ID,
+                shown.response.rect.width(),
+            );
+        }
+        if let Some(action) = action {
+            self.handle_lyrics_action(ui.ctx(), action);
+        }
+    }
+
+    /// Queue on top, lyrics below, split by a draggable divider.
+    fn queue_and_lyrics_panel(&mut self, ui: &mut egui::Ui) {
+        const MIN_PART: f32 = 140.0;
+        let mut open = true;
+        let mut close_queue = false;
+        let mut action = None;
+        let shown = self
+            .right_side_panel(ui)
+            .show_collapsible(ui, &mut open, |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                let full = ui.available_rect_before_wrap();
+                let split = if self.queue_ui.split > 0.0 {
+                    self.queue_ui.split
+                } else {
+                    0.5
+                };
+                let low = (MIN_PART / full.height().max(1.0)).min(0.5);
+                let divider = full.top() + full.height() * split.clamp(low, 1.0 - low);
+                let top =
+                    egui::Rect::from_min_max(full.min, egui::pos2(full.right(), divider - 8.0));
+                let bottom =
+                    egui::Rect::from_min_max(egui::pos2(full.left(), divider + 8.0), full.max);
+                let clip = ui.clip_rect();
+                close_queue = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("queue-above-lyrics")
+                            .max_rect(top),
+                        |ui| {
+                            ui.set_clip_rect(clip.intersect(top));
+                            self.queue_contents(ui)
+                        },
+                    )
+                    .inner;
+                let handle = egui::Rect::from_min_max(
+                    egui::pos2(full.left(), divider - 6.0),
+                    egui::pos2(full.right(), divider + 6.0),
+                );
+                let response =
+                    ui.interact(handle, ui.id().with("queue-lyrics-divider"), Sense::drag());
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                if response.dragged()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    self.queue_ui.split =
+                        ((pointer.y - full.top()) / full.height().max(1.0)).clamp(low, 1.0 - low);
+                }
+                ui.painter().hline(
+                    full.x_range(),
+                    divider,
+                    egui::Stroke::new(
+                        1.0,
+                        if response.hovered() || response.dragged() {
+                            theme::ACCENT
+                        } else {
+                            ui.visuals().widgets.noninteractive.bg_stroke.color
+                        },
+                    ),
+                );
+                action = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("lyrics-below-queue")
+                            .max_rect(bottom),
+                        |ui| {
+                            ui.set_clip_rect(clip.intersect(bottom));
+                            self.lyrics_contents(ui, false)
+                        },
+                    )
+                    .inner;
+                ui.allocate_rect(full, Sense::hover());
+            });
+        self.queue_ui.open &= !close_queue;
         if let Some(shown) = shown {
             self.remember_panel_width(
                 ui.ctx(),

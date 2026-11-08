@@ -23,13 +23,13 @@ fn prepared(ctx: &egui::Context, language: Language) -> MusicApp {
 }
 
 #[test]
-fn lyrics_and_queue_replace_one_another_and_fullscreen_restores_the_drawer_on_escape() {
+fn lyrics_open_below_the_queue_and_fullscreen_restores_the_drawer_on_escape() {
     for language in [Language::Russian, Language::English] {
         let ctx = egui::Context::default();
         let mut app = prepared(&ctx, language);
         app.queue_ui.open = true;
         app.toggle_lyrics(&ctx);
-        assert!(app.lyrics.open && app.lyrics.active && !app.queue_ui.open);
+        assert!(app.lyrics.open && app.lyrics.active && app.queue_ui.open);
         let size = egui::vec2(1040.0, 720.0);
         let mut frame = 0;
         let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
@@ -38,7 +38,9 @@ fn lyrics_and_queue_replace_one_another_and_fullscreen_restores_the_drawer_on_es
         }
         let heading = account_ui_text_rect(&output, language.text("Текст", "Lyrics")).unwrap();
         assert!(heading.left() > size.x * 0.5);
-        assert!(account_ui_text_rect(&output, language.text("Очередь", "Queue")).is_none());
+        // Both share the right panel: the queue on top, the lyrics below.
+        let queue = account_ui_text_rect(&output, language.text("Очередь", "Queue")).unwrap();
+        assert!(queue.left() > size.x * 0.5 && queue.bottom() < heading.top());
         app.set_lyrics_fullscreen(&ctx, true);
         let command = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         assert!(
@@ -78,7 +80,7 @@ fn lyrics_and_queue_replace_one_another_and_fullscreen_restores_the_drawer_on_es
         );
         assert!(!app.lyrics.fullscreen && app.lyrics.open);
         app.toggle_queue(&ctx);
-        assert!(app.queue_ui.open && !app.lyrics.open && !app.lyrics.active);
+        assert!(!app.queue_ui.open && app.lyrics.open && app.lyrics.active);
     }
 }
 
@@ -191,9 +193,9 @@ fn lyric_button_sits_to_the_left_of_queue_in_both_player_layouts() {
         }
         let lyrics = egui::pos2(size.x - if compact { 220.0 } else { 240.0 }, size.y - 50.0);
         account_ui_click(&ctx, &mut app, size, &mut frame, lyrics);
-        assert!(app.lyrics.open && app.lyrics.active && !app.queue_ui.open);
+        assert!(app.lyrics.open && app.lyrics.active && app.queue_ui.open);
         let queue = egui::pos2(size.x - if compact { 172.0 } else { 192.0 }, size.y - 50.0);
         account_ui_click(&ctx, &mut app, size, &mut frame, queue);
-        assert!(app.queue_ui.open && !app.lyrics.open && !app.lyrics.active);
+        assert!(!app.queue_ui.open && app.lyrics.open && app.lyrics.active);
     }
 }
