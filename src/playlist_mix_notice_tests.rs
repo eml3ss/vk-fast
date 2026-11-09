@@ -175,8 +175,15 @@ fn notice_cancel_is_localized_and_rendering_does_not_extend_its_deadline_or_dela
                 ],
             );
         }
-        assert!(app.playlist_controls.mix_notice.is_none());
+        // Cancel fades the notice out like it faded in, then hides it.
+        let fading = app.playlist_controls.mix_notice.unwrap();
+        assert!(fading < until);
+        assert!(
+            fading <= Instant::now() + Duration::from_secs_f32(ctx.global_style().animation_time)
+        );
+        std::thread::sleep(fading.saturating_duration_since(Instant::now()));
         let output = frame(&ctx, &mut app, &mut tick, Vec::new());
+        assert!(app.playlist_controls.mix_notice.is_none());
         assert!(text_rect(&output, caption).is_none());
         app.playlist_controls.mix_notice = Some(Instant::now() - Duration::from_millis(1));
         let output = frame(&ctx, &mut app, &mut tick, Vec::new());

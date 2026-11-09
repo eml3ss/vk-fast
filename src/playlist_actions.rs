@@ -1166,10 +1166,12 @@ fn timed_notice(
         return false;
     }
     let mut cancel = false;
+    let opacity = notice_fade::opacity(ctx, until);
     egui::Area::new(egui::Id::new(id))
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -112.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
+            ui.multiply_opacity(opacity);
             Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
                 ui.set_max_width(360.0);
                 ui.horizontal(|ui| {
@@ -1180,10 +1182,8 @@ fn timed_notice(
                 });
             });
         });
-    if cancel {
-        *deadline = None;
-    } else {
-        ctx.request_repaint_after(until.saturating_duration_since(Instant::now()));
+    if cancel && let Some(until) = deadline {
+        notice_fade::dismiss(ctx, until);
     }
     true
 }

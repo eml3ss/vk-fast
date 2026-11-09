@@ -27,6 +27,8 @@ mod library_app;
 mod library_membership_tests;
 #[path = "lyrics_app.rs"]
 mod lyrics_app;
+#[path = "notice_fade.rs"]
+mod notice_fade;
 #[cfg(test)]
 #[path = "owner_page_tests.rs"]
 mod owner_page_tests;
@@ -605,9 +607,19 @@ enum LibraryChange {
     Removed(Vec<(i64, i64)>),
 }
 
+/// A track just removed from My music, kept to restore it in place.
+struct LibraryUndo {
+    owner: i64,
+    row: Track,
+    index: Option<usize>,
+    until: Instant,
+}
+
 struct LikeRequest {
     owner: i64,
     source: Track,
+    /// Where an undone removal returns in the visible library.
+    restore_index: Option<usize>,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Result<LibraryChange, WebAudioError>>,
 }
@@ -1191,6 +1203,10 @@ pub struct MusicApp {
     audio_upload: audio_upload_app::State,
     track_menu_error: Option<WebAudioError>,
     track_menu_notice: Option<(String, Instant)>,
+    /// Undo for the notice whose deadline it shares.
+    library_undo: Option<LibraryUndo>,
+    /// A dismissed error notice fading out until this moment.
+    error_closing: Option<Instant>,
     playlist_request: Option<PlaylistRequest>,
     playlists_requested: bool,
     playlist_error: Option<WebAudioError>,
@@ -1550,6 +1566,8 @@ impl MusicApp {
             audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
+            library_undo: None,
+            error_closing: None,
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -1885,6 +1903,8 @@ impl MusicApp {
         self.library_browser = library_app::State::default();
         self.track_menu_error = None;
         self.track_menu_notice = None;
+        self.library_undo = None;
+        self.error_closing = None;
         self.playlist_request = None;
         self.playlists_requested = false;
         self.playlist_error = None;
@@ -5635,6 +5655,7 @@ impl MusicApp {
                 self.like_request = Some(LikeRequest {
                     owner,
                     source,
+                    restore_index: None,
                     canceled,
                     receiver,
                 });
@@ -5821,7 +5842,30 @@ impl MusicApp {
             return;
         }
         match result {
-            Ok(change) => self.apply_library_change(ctx, &request.source, change),
+            Ok(change) => {
+                let undo = match &change {
+                    LibraryChange::Removed(owned) => {
+                        self.removal_undo(request.owner, &request.source, owned)
+                    }
+                    LibraryChange::Added(owned) => {
+                        if let Some(index) = request.restore_index {
+                            self.reinsert_library_row(&request.source, *owned, index);
+                        }
+                        None
+                    }
+                    LibraryChange::AlreadyAdded => None,
+                };
+                self.apply_library_change(ctx, &request.source, change);
+                if let Some(undo) = undo {
+                    self.track_menu_notice = Some((
+                        self.language
+                            .text("Трек удалён из моей музыки", "Removed from My music")
+                            .into(),
+                        undo.until,
+                    ));
+                    self.library_undo = Some(undo);
+                }
+            }
             Err(WebAudioError::Canceled) => {}
             Err(error @ WebAudioError::WrongAccount) => {
                 self.reset();
@@ -5830,6 +5874,114 @@ impl MusicApp {
             Err(error) => self.like_error = Some(error),
         }
         ctx.request_repaint();
+    }
+
+    /// The owned row a removal deleted, so its notice can restore it. VK
+    /// restores only the account's own copy.
+    fn removal_undo(
+        &self,
+        owner: i64,
+        source: &Track,
+        owned: &[(i64, i64)],
+    ) -> Option<LibraryUndo> {
+        let mut identities: HashSet<_> = owned.iter().copied().collect();
+        identities.insert(source.key());
+        identities.extend(source.library_source_key);
+        identities.extend(self.owned_library_key(source));
+        let (index, row) = match self
+            .library
+            .tracks
+            .iter()
+            .position(|track| track.owner_id == owner && identities.contains(&track.key()))
+        {
+            Some(index) => (Some(index), self.library.tracks[index].clone()),
+            None => {
+                let key = owned
+                    .iter()
+                    .copied()
+                    .chain(self.owned_library_key(source))
+                    .chain(std::iter::once(source.key()))
+                    .find(|key| key.0 == owner)?;
+                let mut row = source.clone();
+                if row.key() != key {
+                    row.library_source_key = row.library_source_key.or(Some(source.key()));
+                }
+                (row.owner_id, row.id) = key;
+                row.url = None;
+                (None, row)
+            }
+        };
+        Some(LibraryUndo {
+            owner,
+            row,
+            index,
+            until: Instant::now() + Duration::from_secs(5),
+        })
+    }
+
+    /// An undone removal returns to its old place instead of the top.
+    fn reinsert_library_row(&mut self, row: &Track, owned: (i64, i64), index: usize) {
+        if self.library.tracks.iter().any(|track| track.key() == owned) {
+            return;
+        }
+        let mut row = row.clone();
+        (row.owner_id, row.id) = owned;
+        row.library_liked = Some(true);
+        let index = index.min(self.library.tracks.len());
+        if index <= self.library.fresh_prefix {
+            self.library.fresh_prefix += 1;
+        }
+        self.library.tracks.insert(index, row);
+        self.track_view_cache.invalidate();
+    }
+
+    /// "Undo" in the removal notice: VK restores the deleted copy.
+    fn undo_library_removal(&mut self, ctx: &egui::Context) {
+        let Some(undo) = self.library_undo.take() else {
+            return;
+        };
+        if self.demo
+            || self.like_request.is_some()
+            || self.playlist_add_request.is_some()
+            || !self.search_ready()
+        {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        if session.profile.id != undo.owner {
+            return;
+        }
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = undo.owner;
+        let key = undo.row.key();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker_ctx = self.repaint_target.with_context(ctx);
+        self.like_error = None;
+        match thread::Builder::new()
+            .name("vk-library-restore".into())
+            .spawn(move || {
+                let result = client
+                    .restore_to_library(owner, key, &worker_cancel)
+                    .map(LibraryChange::Added);
+                let _ = sender.send(result);
+                worker_ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.like_request = Some(LikeRequest {
+                    owner,
+                    source: undo.row,
+                    restore_index: Some(undo.index.unwrap_or(0)),
+                    canceled,
+                    receiver,
+                });
+            }
+            Err(_) => self.like_error = Some(WebAudioError::Network),
+        }
     }
 
     fn hydrate_metadata(&mut self, ctx: &egui::Context, keys: Vec<(i64, i64)>) {
@@ -10052,10 +10204,14 @@ impl MusicApp {
                     error.localized(self.language)
                 };
                 let mut dismiss = false;
+                let opacity = self
+                    .error_closing
+                    .map_or(1.0, |until| notice_fade::opacity(ui.ctx(), until));
                 egui::Area::new(egui::Id::new("library-action-error"))
                     .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -112.0))
                     .order(egui::Order::Foreground)
                     .show(ui.ctx(), |ui| {
+                        ui.multiply_opacity(opacity);
                         Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
                             ui.set_max_width(340.0);
                             ui.horizontal(|ui| {
@@ -10087,26 +10243,63 @@ impl MusicApp {
                             ui.label(message);
                         });
                     });
-                if dismiss {
+                if dismiss && self.error_closing.is_none() {
+                    self.error_closing = Some(notice_fade::closing(ui.ctx()));
+                }
+                if self
+                    .error_closing
+                    .is_some_and(|until| Instant::now() >= until)
+                {
                     self.like_error = None;
                     self.track_menu_error = None;
+                    self.error_closing = None;
                 }
             } else if let Some((message, until)) = &self.track_menu_notice {
-                if Instant::now() >= *until {
+                self.error_closing = None;
+                let until = *until;
+                if Instant::now() >= until {
                     self.track_menu_notice = None;
+                    self.library_undo = None;
                 } else {
+                    // The undo belongs to this notice only, not to a newer one.
+                    let undo = self
+                        .library_undo
+                        .as_ref()
+                        .filter(|undo| undo.until == until)
+                        .map(|_| {
+                            self.like_request.is_none() && self.playlist_add_request.is_none()
+                        });
+                    let opacity = notice_fade::opacity(ui.ctx(), until);
+                    let mut undone = false;
                     egui::Area::new(egui::Id::new("track-menu-notice"))
                         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -112.0))
                         .order(egui::Order::Foreground)
                         .show(ui.ctx(), |ui| {
+                            ui.multiply_opacity(opacity);
                             Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
-                                ui.set_max_width(340.0);
-                                ui.label(message);
+                                ui.set_max_width(360.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(message);
+                                    if let Some(enabled) = undo {
+                                        let response = ui.add_enabled(
+                                            enabled,
+                                            egui::Button::new(self.language.text("Отмена", "Undo")),
+                                        );
+                                        undone = response.clicked();
+                                        release_pointer_focus(&response);
+                                    }
+                                });
                             });
                         });
-                    ui.ctx()
-                        .request_repaint_after(until.saturating_duration_since(Instant::now()));
+                    if undone {
+                        self.undo_library_removal(ui.ctx());
+                        if let Some((_, until)) = &mut self.track_menu_notice {
+                            notice_fade::dismiss(ui.ctx(), until);
+                        }
+                    }
                 }
+            } else {
+                self.error_closing = None;
             }
         }
         if ui.ctx().current_pass_index() == 0
@@ -10731,6 +10924,8 @@ mod tests {
             audio_upload: audio_upload_app::State::default(),
             track_menu_error: None,
             track_menu_notice: None,
+            library_undo: None,
+            error_closing: None,
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -13453,6 +13648,7 @@ mod tests {
         LikeRequest {
             owner,
             source,
+            restore_index: None,
             canceled: Arc::new(AtomicBool::new(false)),
             receiver,
         }
@@ -13476,6 +13672,7 @@ mod tests {
         app.like_request = Some(LikeRequest {
             owner: 42,
             source: source.clone(),
+            restore_index: None,
             canceled: Arc::new(AtomicBool::new(false)),
             receiver,
         });
@@ -13570,6 +13767,39 @@ mod tests {
         app.apply_library_change(&ctx, &original, LibraryChange::Added(original.key()));
         assert!(app.track_is_liked(&original));
         assert_eq!(app.library.tracks[0].key(), original.key());
+    }
+
+    #[test]
+    fn removal_notice_offers_undo_that_restores_the_row_in_place() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.library.refresh(like_test_page(3, &[1, 2, 3]));
+        let track = app.library.tracks[1].clone();
+        app.like_request = Some(like_reply(
+            42,
+            track.clone(),
+            Ok(LibraryChange::Removed(vec![track.key()])),
+        ));
+        app.poll_like(&ctx);
+        assert_eq!(app.library.tracks.len(), 2);
+        let (_, until) = app.track_menu_notice.clone().unwrap();
+        let undo = app.library_undo.as_ref().unwrap();
+        assert_eq!(undo.until, until, "the undo belongs to this notice");
+        assert_eq!((undo.row.key(), undo.index), (track.key(), Some(1)));
+        // A newer notice hides the button; its own expiry drops the undo.
+        app.playlist_notice("Link copied");
+        assert_ne!(app.track_menu_notice.as_ref().unwrap().1, until);
+        let undo = app.library_undo.take().unwrap();
+        let mut request = like_reply(42, undo.row, Ok(LibraryChange::Added(track.key())));
+        request.restore_index = undo.index;
+        app.like_request = Some(request);
+        app.poll_like(&ctx);
+        let keys: Vec<_> = app.library.tracks.iter().map(Track::key).collect();
+        assert_eq!(keys, [(42, 1), (42, 2), (42, 3)]);
+        assert!(app.track_is_liked(&track));
+        assert!(app.library_undo.is_none(), "restoring offers no new undo");
+        app.reset();
+        assert!(app.library_undo.is_none() && app.error_closing.is_none());
     }
 
     #[test]
