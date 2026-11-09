@@ -5185,6 +5185,7 @@ fn parse_track(value: &Value) -> Result<Track, WebAudioError> {
         artist.name = html_escape::decode_html_entities(&artist.name).into_owned();
     }
     Ok(Track {
+        added: value.get("date").and_then(number).filter(|date| *date > 0),
         id,
         owner_id,
         title: text(title)?,

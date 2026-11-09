@@ -462,6 +462,7 @@ mod tests {
 
     fn track() -> Track {
         Track {
+            added: None,
             id: 8,
             owner_id: -9,
             artist: "Fallback Artist".into(),

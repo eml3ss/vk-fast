@@ -508,6 +508,7 @@ pub(crate) fn decode_bounded(
         }
         if seen.insert((track.owner_id, track.id)) {
             tracks.push(Track {
+                added: None,
                 id: track.id,
                 owner_id: track.owner_id,
                 artist: track.artist,
@@ -680,6 +681,7 @@ mod tests {
 
     fn track(id: i64) -> Track {
         Track {
+            added: None,
             id,
             owner_id: -7,
             artist: "Исполнитель".into(),

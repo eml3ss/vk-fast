@@ -108,6 +108,7 @@ mod tests {
     }
     fn track(id: i64) -> Track {
         Track {
+            added: None,
             id,
             owner_id: -7,
             artist: "Artist".into(),

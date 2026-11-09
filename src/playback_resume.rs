@@ -173,6 +173,7 @@ mod tests {
         Snapshot {
             position,
             track: Track {
+                added: None,
                 id,
                 owner_id: -7,
                 artist: "Artist".into(),

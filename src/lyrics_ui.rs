@@ -749,6 +749,7 @@ mod tests {
     #[test]
     fn cover_title_and_artists_open_the_album_and_each_artist_in_both_layouts() {
         let track = Track {
+            added: None,
             id: 5,
             owner_id: 4,
             artist: "First, Second".into(),

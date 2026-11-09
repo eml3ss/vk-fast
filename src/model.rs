@@ -137,6 +137,9 @@ pub struct Track {
     pub library_source_key: Option<(i64, i64)>,
     /// Explicit VK restriction state. Missing stream URLs are not evidence.
     pub unavailable: Option<bool>,
+    /// When the track was added to the list it came from (Unix seconds), as
+    /// VK's API reports it; website rows do not carry it.
+    pub added: Option<i64>,
 }
 
 /// Canonical VK identity, kept separately from the display-only artist string.
@@ -441,6 +444,8 @@ struct TrackWire {
     #[serde(default)]
     library_liked: Option<serde_json::Value>,
     #[serde(default)]
+    date: Option<serde_json::Value>,
+    #[serde(default)]
     release_audio_id: Option<serde_json::Value>,
     #[serde(default, rename = "trackPageId")]
     web_release_audio_id: Option<serde_json::Value>,
@@ -519,6 +524,11 @@ impl From<TrackWire> for Track {
             release_key,
             library_source_key: None,
             unavailable,
+            added: wire
+                .date
+                .as_ref()
+                .and_then(serde_json::Value::as_i64)
+                .filter(|date| *date > 0),
         }
     }
 }
@@ -702,6 +712,7 @@ pub fn demo_tracks() -> Vec<Track> {
     .into_iter()
     .enumerate()
     .map(|(i, (title, artist, duration))| Track {
+        added: None,
         id: i as i64,
         owner_id: 0,
         artist: artist.into(),

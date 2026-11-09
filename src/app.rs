@@ -38,6 +38,8 @@ mod queue_app;
 mod screen_cache_app;
 #[path = "system_media_app.rs"]
 mod system_media_app;
+#[path = "track_sort.rs"]
+mod track_sort;
 #[path = "track_view_cache.rs"]
 mod track_view_cache;
 #[path = "tray_app.rs"]
@@ -1269,6 +1271,10 @@ pub struct MusicApp {
     mix_after_queue_save_failed: bool,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
     screen_cache_owner: Option<i64>,
+    /// Column sort per track list, by its queue origin.
+    track_sorts: HashMap<String, track_sort::Sort>,
+    /// The last sorted row order and what it was built from.
+    sort_cache: Option<track_sort::Cached>,
     broadcast: bool,
     broadcast_save_failed: bool,
     window_reopen: bool,
@@ -1614,6 +1620,8 @@ impl MusicApp {
             mix_after_queue_save_failed: false,
             screen_cache: None,
             screen_cache_owner: None,
+            track_sorts: HashMap::new(),
+            sort_cache: None,
             broadcast: preferences::load_broadcast(),
             broadcast_save_failed: false,
             window_reopen: false,
@@ -3747,7 +3755,90 @@ impl MusicApp {
         } else {
             None
         };
+        // A sorted list plays in the order it is shown.
+        let sort = self.current_sort();
+        let queue = if sort.active() {
+            let tracks = queue.as_deref().unwrap_or(&self.library.tracks);
+            Some(
+                track_sort::order(tracks, 0..tracks.len(), sort)
+                    .into_iter()
+                    .map(|index| tracks[index].clone())
+                    .collect(),
+            )
+        } else {
+            queue
+        };
         self.replace_play_queue(queue);
+    }
+
+    fn current_sort(&self) -> track_sort::Sort {
+        self.track_sorts
+            .get(&self.view_queue_origin())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn set_sort(&mut self, column: track_sort::Column) {
+        let next = self.current_sort().clicked(column);
+        let origin = self.view_queue_origin();
+        if next.active() {
+            self.track_sorts.insert(origin, next);
+        } else {
+            self.track_sorts.remove(&origin);
+        }
+        self.sort_cache = None;
+    }
+
+    /// "Date added" only for the account's own lists, and only when VK sent
+    /// the dates.
+    fn show_date_column(&self) -> bool {
+        let owner = self.session.as_ref().map(|session| session.profile.id);
+        let own = match &self.page {
+            MusicPage::Library => true,
+            MusicPage::Playlist(reference) => owner == Some(reference.owner_id),
+            _ => false,
+        };
+        own && self.view_tracks().iter().any(|track| track.added.is_some())
+    }
+
+    /// The list's visible rows in the chosen order, reused until the list,
+    /// its filter or the sort changes.
+    fn sorted_rows(
+        &mut self,
+        visible: track_view_cache::VisibleRows,
+    ) -> track_view_cache::VisibleRows {
+        let sort = self.current_sort();
+        if !sort.active() {
+            return visible;
+        }
+        let origin = self.view_queue_origin();
+        let revision = self.track_view_cache.revision();
+        let length = self.view_tracks().len();
+        if let Some((cached_origin, cached_sort, cached_revision, cached_length, filter, rows)) =
+            &self.sort_cache
+            && *cached_origin == origin
+            && *cached_sort == sort
+            && *cached_revision == revision
+            && *cached_length == length
+            && *filter == self.filter
+        {
+            return track_view_cache::VisibleRows::Matching(rows.clone());
+        }
+        let rows: Arc<[usize]> = track_sort::order(
+            self.view_tracks(),
+            (0..visible.len()).map(|row| visible.source_index(row)),
+            sort,
+        )
+        .into();
+        self.sort_cache = Some((
+            origin,
+            sort,
+            revision,
+            length,
+            self.filter.clone(),
+            rows.clone(),
+        ));
+        track_view_cache::VisibleRows::Matching(rows)
     }
 
     fn search_ready(&self) -> bool {
@@ -4513,7 +4604,7 @@ impl MusicApp {
             self.player.snapshot().state,
             PlaybackState::Playing | PlaybackState::Loading
         );
-        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows")
+        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows", false)
     }
 
     // Reserve the complete list height, but lay out only rows in the viewport.
@@ -4526,6 +4617,7 @@ impl MusicApp {
         columns: usize,
         active: bool,
         id: &'static str,
+        show_date: bool,
     ) -> Option<TrackAction> {
         if tracks.is_empty() {
             return None;
@@ -4562,7 +4654,9 @@ impl MusicApp {
                     let row_id = ui.make_persistent_id(("clipped-track-row", row));
                     ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
                         if columns == 1 {
-                            if let Some(intent) = self.track_row(ui, &tracks[row], row, active) {
+                            if let Some(intent) =
+                                self.track_row(ui, &tracks[row], row, active, show_date)
+                            {
                                 action = Some(intent);
                             }
                         } else {
@@ -4571,7 +4665,7 @@ impl MusicApp {
                                     let index = row * columns + column;
                                     if let Some(track) = tracks.get(index)
                                         && let Some(intent) =
-                                            self.track_row(column_ui, track, index, active)
+                                            self.track_row(column_ui, track, index, active, false)
                                     {
                                         action = Some(intent);
                                     }
@@ -6294,12 +6388,35 @@ impl MusicApp {
                 } else {
                     1
                 };
+                // Albums and playlists sort from their column header; an
+                // artist's top tracks keep VK's order.
+                let show_date = artist.is_none() && self.show_date_column();
+                let sorted = if artist.is_none() && !tracks.is_empty() {
+                    let sort = self.current_sort();
+                    let index_width = track_index_width(ui, tracks.len());
+                    if let Some(column) =
+                        track_sort::header(ui, language, sort, show_date, index_width, false)
+                    {
+                        self.set_sort(column);
+                        ui.ctx().request_repaint();
+                    }
+                    let sort = self.current_sort();
+                    sort.active().then(|| {
+                        track_sort::order(tracks, 0..tracks.len(), sort)
+                            .into_iter()
+                            .map(|index| tracks[index].clone())
+                            .collect::<Vec<_>>()
+                    })
+                } else {
+                    None
+                };
                 track_action = self.clipped_track_rows(
                     ui,
-                    &tracks[..count],
+                    &sorted.as_deref().unwrap_or(tracks)[..count],
                     columns,
                     active,
                     "detail-track-rows",
+                    show_date,
                 );
                 if let Some(DetailPage::Album(release) | DetailPage::Playlist(release)) = data {
                     release_info::show(ui, language, tracks, &release.stats);
@@ -7082,6 +7199,18 @@ impl MusicApp {
         let visible = self
             .track_view_cache
             .visible(self.view_tracks(), &self.filter);
+        let show_date = self.show_date_column();
+        if !visible.is_empty() {
+            let index_width = track_index_width(ui, self.view_tracks().len());
+            let sort = self.current_sort();
+            if let Some(column) =
+                track_sort::header(ui, self.language, sort, show_date, index_width, true)
+            {
+                self.set_sort(column);
+                ui.ctx().request_repaint();
+            }
+        }
+        let visible = self.sorted_rows(visible);
         if visible.is_empty() {
             theme::inset_heading(ui, |ui| {
                 ui.label(t(
@@ -7128,7 +7257,7 @@ impl MusicApp {
                             {
                                 metadata_keys.push(track.key());
                             }
-                            if let Some(action) = self.track_row(ui, &track, i, active) {
+                            if let Some(action) = self.track_row(ui, &track, i, active, show_date) {
                                 track_action = Some(action);
                             }
                         }
@@ -7434,6 +7563,7 @@ impl MusicApp {
         track: &Track,
         index: usize,
         active: bool,
+        show_date: bool,
     ) -> Option<TrackAction> {
         let highlighted = self.selected == Some(track.key())
             || self
@@ -7520,7 +7650,12 @@ impl MusicApp {
                     );
                 }
                 self.covers.show(ui, track.cover_url.as_deref(), 40.0);
-                let width = (ui.available_width() - 142.0).max(0.0);
+                let date_width = if show_date {
+                    track_sort::DATE_WIDTH + 6.0
+                } else {
+                    0.0
+                };
+                let width = (ui.available_width() - 142.0 - date_width).max(0.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, 40.0),
                     Layout::top_down(Align::Min),
@@ -7549,6 +7684,24 @@ impl MusicApp {
                         }
                     },
                 );
+                if show_date {
+                    let label = track
+                        .added
+                        .map(|added| track_sort::date_label(added, self.language))
+                        .unwrap_or_default();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(track_sort::DATE_WIDTH, 40.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.set_min_width(track_sort::DATE_WIDTH);
+                            ui.add(
+                                egui::Label::new(RichText::new(label).color(MUTED))
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                        },
+                    );
+                }
                 let mix = self.track_mix_button(ui);
                 controls_contain_pointer |= mix.contains_pointer();
                 if mix.clicked() {
@@ -10183,6 +10336,7 @@ mod tests {
             for duration in [0, 180, 600, 3661] {
                 let mut first_track = None;
                 app.playing = Some(Track {
+                    added: None,
                     unavailable: None,
                     id: 77,
                     owner_id: 42,
@@ -10403,6 +10557,8 @@ mod tests {
             mix_after_queue_save_failed: false,
             screen_cache: None,
             screen_cache_owner: None,
+            track_sorts: HashMap::new(),
+            sort_cache: None,
             broadcast: false,
             broadcast_save_failed: false,
             window_reopen: false,
@@ -10633,6 +10789,7 @@ mod tests {
                     let count = if connected { 4 } else { 100 };
                     app.library.tracks = (1..=count)
                         .map(|id| Track {
+                            added: None,
                             unavailable: None,
                             id,
                             owner_id: 42,
@@ -11813,6 +11970,7 @@ mod tests {
                     music: None,
                 });
                 let track = Track {
+                    added: None,
                     unavailable: None,
                     id: 2,
                     owner_id: 42,
@@ -12754,6 +12912,7 @@ mod tests {
             items: ids
                 .iter()
                 .map(|id| Track {
+                    added: None,
                     unavailable: None,
                     id: *id,
                     owner_id: 1,
@@ -13262,7 +13421,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    action = app.track_row(ui, &track, 0, false);
+                    action = app.track_row(ui, &track, 0, false, false);
                 },
             );
             let duration = account_ui_text_rect(&output, &track.duration_label());
@@ -13314,7 +13473,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    enabled_action = app.track_row(ui, &track, 0, false);
+                    enabled_action = app.track_row(ui, &track, 0, false, false);
                 },
             );
             output.textures_delta.clear();
@@ -13450,7 +13609,7 @@ mod tests {
                 },
                 |ui| {
                     ui.add_enabled_ui(false, |ui| {
-                        assert!(app.track_row(ui, &track, 0, false).is_none());
+                        assert!(app.track_row(ui, &track, 0, false, false).is_none());
                     });
                 },
             );
@@ -16531,6 +16690,7 @@ mod tests {
                                         columns,
                                         false,
                                         "test-rows",
+                                        false,
                                     );
                                 },
                             );
@@ -16635,6 +16795,7 @@ mod tests {
                                 columns,
                                 false,
                                 "stable-track-rows",
+                                false,
                             );
                         },
                     );
