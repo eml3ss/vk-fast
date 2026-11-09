@@ -5954,6 +5954,9 @@ impl MusicApp {
                     saved.owner_id = owned.0;
                     saved.id = owned.1;
                     saved.url = None;
+                    // The source's date is its release or when it joined
+                    // another list; this copy was added to My music now.
+                    saved.added = Some(chrono::Utc::now().timestamp());
                     saved.library_liked = Some(true);
                     saved.library_source_key = confirmed_source;
                     saved.release_key = source
@@ -6287,7 +6290,9 @@ impl MusicApp {
         self.track_view_cache.invalidate();
         let removed = &self.removed_from_library;
         let added = &self.like_aliases;
-        let enrich = |track: &mut Track| {
+        // `library`: a My music row, whose own copy's VK date outranks any
+        // date it brought from elsewhere. A playlist row keeps its own date.
+        let enrich = |track: &mut Track, library: bool| {
             let Some(metadata) = fresh.get(&track.key()) else {
                 return false;
             };
@@ -6338,7 +6343,10 @@ impl MusicApp {
                 changed = true;
             }
             // An own copy's VK date is when it was added to My music.
-            if track.added.is_none() && metadata.added.is_some() && track.owner_id == request.owner
+            if metadata.added.is_some()
+                && metadata.added != track.added
+                && (library || track.added.is_none())
+                && track.owner_id == request.owner
             {
                 track.added = metadata.added;
                 changed = true;
@@ -6347,7 +6355,7 @@ impl MusicApp {
         };
         let mut library_changed = false;
         for track in &mut self.library.tracks {
-            library_changed |= enrich(track);
+            library_changed |= enrich(track, true);
         }
         for track in self
             .recent
@@ -6356,14 +6364,14 @@ impl MusicApp {
             .chain(self.queued_tracks.values_mut())
             .chain(self.playing.iter_mut())
         {
-            enrich(track);
+            enrich(track, false);
         }
         for track in self
             .home_collections
             .iter_mut()
             .flat_map(|collection| &mut collection.tracks)
         {
-            enrich(track);
+            enrich(track, false);
         }
         for page in self.details.values_mut() {
             let tracks = match Arc::make_mut(page) {
@@ -6372,7 +6380,7 @@ impl MusicApp {
                 DetailPage::Owner(_) => continue,
             };
             for track in tracks {
-                enrich(track);
+                enrich(track, false);
             }
         }
         for result in self
@@ -6382,7 +6390,7 @@ impl MusicApp {
             .chain(self.search.cache.values_mut())
         {
             for track in &mut Arc::make_mut(result).tracks {
-                enrich(track);
+                enrich(track, false);
             }
         }
         if library_changed {
@@ -14159,6 +14167,74 @@ mod tests {
         assert!(app.library_undo.is_none(), "restoring offers no new undo");
         app.reset();
         assert!(app.library_undo.is_none() && app.error_closing.is_none());
+    }
+
+    #[test]
+    fn my_music_dates_are_when_the_copy_was_added_not_the_sources() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        // A track from someone's playlist: its date is when it joined that
+        // playlist, or its release.
+        let mut source = like_test_page(1, &[9]).items.remove(0);
+        source.owner_id = -10;
+        source.added = Some(1_500_000_000);
+        let before = chrono::Utc::now().timestamp();
+        app.apply_library_change(&ctx, &source, LibraryChange::Added((42, 77)));
+        let saved = app
+            .library
+            .tracks
+            .iter()
+            .find(|track| track.key() == (42, 77))
+            .unwrap();
+        assert!(saved.added.is_some_and(|added| added >= before));
+        // VK's own date for the copy replaces a wrong one in My music, but a
+        // playlist row keeps the date it joined that playlist.
+        let mut wrong = like_test_page(1, &[5]).items.remove(0);
+        wrong.added = Some(1_400_000_000);
+        app.library.tracks.push(wrong.clone());
+        let album = AlbumRef {
+            owner_id: 42,
+            id: 3,
+            title: "Mine".into(),
+            access_key: None,
+            cover_url: None,
+        };
+        let mut in_playlist = wrong.clone();
+        in_playlist.added = Some(1_450_000_000);
+        app.details.insert(
+            MusicPage::Playlist(album.clone()).detail_key().unwrap(),
+            Arc::new(DetailPage::Playlist(crate::web_audio::AlbumPage {
+                album,
+                artists: Vec::new(),
+                year: None,
+                description: None,
+                creator: None,
+                tracks: vec![in_playlist],
+                total_tracks: Some(1),
+                stats: crate::web_audio::AlbumStats::default(),
+            })),
+        );
+        let mut fresh = wrong.clone();
+        fresh.added = Some(1_700_000_000);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(Ok(vec![fresh])).ok().unwrap();
+        app.metadata_request = Some(MetadataRequest {
+            owner: 42,
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        app.poll_metadata(&ctx);
+        let library = app
+            .library
+            .tracks
+            .iter()
+            .find(|track| track.key() == wrong.key())
+            .unwrap();
+        assert_eq!(library.added, Some(1_700_000_000));
+        let DetailPage::Playlist(page) = app.details.values().next().unwrap().as_ref() else {
+            panic!()
+        };
+        assert_eq!(page.tracks[0].added, Some(1_450_000_000));
     }
 
     #[test]

@@ -21,6 +21,9 @@ const AVAILABILITY_REVISION: u8 = 2;
 // Older positive flags could have spread through a shared public track page.
 // Refresh those flags, retaining metadata and explicit removals from history.
 const MEMBERSHIP_REVISION: u8 = 1;
+/// Dates saved before revision 1 could be a track's release date or when
+/// it was added to someone else's playlist; they are read again from VK.
+const ADDED_REVISION: u8 = 1;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TRACKS: usize = 50_000;
 const MAX_TEXT: usize = 4096;
@@ -100,6 +103,8 @@ struct StoredTrack {
     /// When the track was added to My music (Unix seconds).
     #[serde(default)]
     added: Option<i64>,
+    #[serde(default)]
+    added_revision: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +160,8 @@ struct BorrowedTrack<'a> {
     availability_revision: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     added: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added_revision: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -376,6 +383,7 @@ pub(crate) fn encode_bounded(
                 unavailable: track.unavailable,
                 availability_revision: track.unavailable.map(|_| AVAILABILITY_REVISION),
                 added: track.added,
+                added_revision: track.added.map(|_| ADDED_REVISION),
             });
         }
     }
@@ -514,7 +522,10 @@ pub(crate) fn decode_bounded(
         }
         if seen.insert((track.owner_id, track.id)) {
             tracks.push(Track {
-                added: track.added.filter(|added| *added > 0),
+                added: track
+                    .added
+                    .filter(|added| *added > 0)
+                    .filter(|_| track.added_revision == Some(ADDED_REVISION)),
                 id: track.id,
                 owner_id: track.owner_id,
                 artist: track.artist,
@@ -715,6 +726,18 @@ mod tests {
         let restored = load_at(&path, 42).unwrap().unwrap();
         assert_eq!(restored[0].added, Some(1_660_000_000));
         assert_eq!(restored[1].added, None);
+        // A date saved before the revision may be a release date or another
+        // list's: it is dropped once, to be read again from VK.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["tracks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("added_revision");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let reloaded = load_at(&path, 42).unwrap().unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0].added, None);
     }
 
     #[test]
