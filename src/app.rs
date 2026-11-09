@@ -1215,8 +1215,10 @@ pub struct MusicApp {
     track_menu_notice: Option<(String, Instant)>,
     /// Undo for the notice whose deadline it shares.
     library_undo: Option<LibraryUndo>,
-    /// A dismissed error notice fading out until this moment.
+    /// When the shown error notice hides, and which errors it shows: a
+    /// new error starts its own time.
     error_closing: Option<Instant>,
+    error_shown: Option<(Option<WebAudioError>, Option<WebAudioError>)>,
     playlist_removal: playlist_removal::State,
     /// Set while a reorderable list draws its rows: rows may then be dragged.
     row_drag_enabled: bool,
@@ -1585,6 +1587,7 @@ impl MusicApp {
             track_menu_notice: None,
             library_undo: None,
             error_closing: None,
+            error_shown: None,
             playlist_removal: playlist_removal::State::default(),
             row_drag_enabled: false,
             row_drag_started: None,
@@ -1927,6 +1930,7 @@ impl MusicApp {
         self.track_menu_notice = None;
         self.library_undo = None;
         self.error_closing = None;
+        self.error_shown = None;
         self.playlist_removal.reset();
         self.reorder_request = None;
         self.album_titles.reset();
@@ -10494,6 +10498,13 @@ impl MusicApp {
                     error.localized(self.language)
                 };
                 let mut dismiss = false;
+                // Errors hide by themselves too, given longer to read than
+                // the short notices.
+                let shown = (self.track_menu_error.clone(), self.like_error.clone());
+                if self.error_shown.as_ref() != Some(&shown) {
+                    self.error_shown = Some(shown);
+                    self.error_closing = Some(Instant::now() + Duration::from_secs(6));
+                }
                 let opacity = self
                     .error_closing
                     .map_or(1.0, |until| notice_fade::opacity(ui.ctx(), until));
@@ -10504,18 +10515,22 @@ impl MusicApp {
                         ui.multiply_opacity(opacity);
                         Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
                             ui.set_max_width(340.0);
+                            ui.spacing_mut().item_spacing.y = 2.0;
                             ui.horizontal(|ui| {
-                                ui.label(if menu_error {
-                                    self.language.text(
-                                        "Не удалось выполнить действие",
-                                        "Could not complete the action",
-                                    )
-                                } else {
-                                    self.language.text(
-                                        "Не удалось обновить мою музыку",
-                                        "Could not update My music",
-                                    )
-                                });
+                                ui.label(
+                                    RichText::new(if menu_error {
+                                        self.language.text(
+                                            "Не удалось выполнить действие",
+                                            "Could not complete the action",
+                                        )
+                                    } else {
+                                        self.language.text(
+                                            "Не удалось обновить мою музыку",
+                                            "Could not update My music",
+                                        )
+                                    })
+                                    .color(Color32::WHITE),
+                                );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let (rect, _) = ui.allocate_exact_size(
                                         egui::Vec2::splat(22.0),
@@ -10530,11 +10545,11 @@ impl MusicApp {
                                     .clicked();
                                 });
                             });
-                            ui.label(message);
+                            ui.label(RichText::new(message).color(MUTED));
                         });
                     });
-                if dismiss && self.error_closing.is_none() {
-                    self.error_closing = Some(notice_fade::closing(ui.ctx()));
+                if dismiss && let Some(until) = &mut self.error_closing {
+                    notice_fade::dismiss(ui.ctx(), until);
                 }
                 if self
                     .error_closing
@@ -10543,9 +10558,11 @@ impl MusicApp {
                     self.like_error = None;
                     self.track_menu_error = None;
                     self.error_closing = None;
+                    self.error_shown = None;
                 }
             } else if let Some((message, until)) = &self.track_menu_notice {
                 self.error_closing = None;
+                self.error_shown = None;
                 let until = *until;
                 if Instant::now() >= until {
                     self.track_menu_notice = None;
@@ -10576,9 +10593,14 @@ impl MusicApp {
                             ui.multiply_opacity(opacity);
                             Frame::popup(ui.style()).inner_margin(12).show(ui, |ui| {
                                 ui.set_max_width(360.0);
+                                let Some(enabled) = undo else {
+                                    // Text alone: no row sized for a button.
+                                    ui.label(message);
+                                    return;
+                                };
                                 ui.horizontal(|ui| {
                                     ui.label(message);
-                                    if let Some(enabled) = undo {
+                                    {
                                         let response = ui.add_enabled(
                                             enabled,
                                             egui::Button::new(self.language.text("Отмена", "Undo")),
@@ -10602,6 +10624,7 @@ impl MusicApp {
                 }
             } else {
                 self.error_closing = None;
+                self.error_shown = None;
             }
         }
         if ui.ctx().current_pass_index() == 0
@@ -11238,6 +11261,7 @@ mod tests {
             track_menu_notice: None,
             library_undo: None,
             error_closing: None,
+            error_shown: None,
             playlist_removal: playlist_removal::State::default(),
             row_drag_enabled: false,
             row_drag_started: None,
@@ -14134,6 +14158,54 @@ mod tests {
         app.apply_library_change(&ctx, &original, LibraryChange::Added(original.key()));
         assert!(app.track_is_liked(&original));
         assert_eq!(app.library.tracks[0].key(), original.key());
+    }
+
+    #[test]
+    fn error_notices_hide_by_themselves_and_short_notices_fit_their_text() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let size = egui::vec2(1100.0, 760.0);
+        let mut frame = 0;
+        app.track_menu_error = Some(WebAudioError::Network);
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..2 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let until = app.error_closing.expect("errors hide by themselves");
+        assert!(until > Instant::now() + Duration::from_secs(5));
+        let color = |label: &str| {
+            account_ui_shapes(&output)
+                .into_iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.job.sections[0].format.color)
+                    }
+                    _ => None,
+                })
+        };
+        let title = color("Could not complete the action").unwrap();
+        let body = color(&WebAudioError::Network.localized(Language::English)).unwrap();
+        assert_eq!((title, body), (Color32::WHITE, MUTED));
+        // The same error keeps its time; it ends with a fade.
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert_eq!(app.error_closing, Some(until));
+        app.error_closing = Some(Instant::now());
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert!(app.track_menu_error.is_none() && app.error_closing.is_none());
+        // A short notice is its text plus the frame's margins.
+        app.playlist_notice("Link copied");
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..2 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let text = account_ui_text_rect(&output, "Link copied").unwrap();
+        let area = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("track-menu-notice")))
+            .unwrap();
+        assert!(
+            area.height() <= text.height() + 2.0 * 12.0 + 6.0,
+            "{area:?} for {text:?}"
+        );
     }
 
     #[test]

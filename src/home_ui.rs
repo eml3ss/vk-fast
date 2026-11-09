@@ -501,13 +501,11 @@ fn friend_card(
             ui.painter()
                 .rect_filled(row, 8.0, Color32::from_rgb(36, 44, 57));
         }
-        image(
-            ui,
-            covers,
-            egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0)),
-            track.cover_url.as_deref(),
-            index + 1,
-        );
+        let art = egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0));
+        image(ui, covers, art, track.cover_url.as_deref(), index + 1);
+        if hit.hovered() {
+            hover_play(ui.painter(), art);
+        }
         let mut line = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt(("home-friend-track", index))
@@ -910,11 +908,8 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
                     );
                     collage(ui, covers, art, tracks, *icon);
                     if response.hovered() && matches!(intent, Action::PlayTrack(_)) {
-                        // "Continue" plays its track: dim the cover under a
-                        // play sign, as a queue row and a recent card do.
-                        ui.painter()
-                            .rect_filled(art, 6.0, Color32::from_black_alpha(165));
-                        icons::paint(ui.painter(), art.shrink(16.0), Icon::Play, Color32::WHITE);
+                        // "Continue" plays its track, as a recent card does.
+                        hover_play(ui.painter(), art);
                     }
                     icons::paint(
                         ui.painter(),
@@ -944,15 +939,24 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
     action
 }
 
+/// A hovered track's cover, as in a queue row: dimmed under a play sign
+/// half its size.
+fn hover_play(painter: &egui::Painter, art: egui::Rect) {
+    painter.rect_filled(art, 6.0, Color32::from_black_alpha(165));
+    icons::paint(
+        painter,
+        art.shrink(art.width() * 0.25),
+        Icon::Play,
+        Color32::WHITE,
+    );
+}
+
 fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width: f32) -> Response {
     let (rect, response) = card(ui, egui::vec2(width, 72.0), &track.title);
     let art = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), egui::vec2(48.0, 48.0));
     image(ui, covers, art, track.cover_url.as_deref(), 0);
     if response.hovered() {
-        // As a queue row on hover: the cover dims under a play sign.
-        ui.painter()
-            .rect_filled(art, 6.0, Color32::from_black_alpha(165));
-        icons::paint(ui.painter(), art.shrink(12.0), Icon::Play, Color32::WHITE);
+        hover_play(ui.painter(), art);
     }
     card_text(
         ui,
@@ -1458,6 +1462,35 @@ mod tests {
             click("Synthetic Mix Artist"),
             Some(Action::PlayCatalogMix(artist))
         );
+        // A friend's track dims its cover under a play sign on hover.
+        let dimmed = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| {
+                    matches!(&shape.shape, egui::Shape::Rect(rect)
+                        if rect.fill == Color32::from_black_alpha(165)
+                            && (rect.rect.width() - 32.0).abs() < 0.1)
+                })
+                .count()
+        };
+        let row = text_center(&output, "Friend track one");
+        catalog_frame(
+            &context,
+            &mut covers,
+            &catalog,
+            40,
+            vec![egui::Event::PointerMoved(row)],
+        );
+        let hovered = catalog_frame(
+            &context,
+            &mut covers,
+            &catalog,
+            41,
+            vec![egui::Event::PointerMoved(row)],
+        )
+        .0;
+        assert_eq!(dimmed(&hovered), 1);
     }
 
     #[test]

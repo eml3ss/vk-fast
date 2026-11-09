@@ -26,13 +26,6 @@ pub(super) fn dismiss(ctx: &egui::Context, until: &mut Instant) {
     ctx.request_repaint();
 }
 
-/// The deadline of a notice dismissed now.
-pub(super) fn closing(ctx: &egui::Context) -> Instant {
-    let mut until = Instant::now() + Duration::from_secs(60);
-    dismiss(ctx, &mut until);
-    until
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
