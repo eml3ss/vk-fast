@@ -40,6 +40,7 @@ fn right_panel_layout_survives_reopening_and_restoring_the_last_track() {
             let mut reopened = prepared(&ctx, Language::English);
             reopened.restore_right_panel_state(saved);
             let snapshot = playback_resume::Snapshot {
+                queue: None,
                 track: reopened.playing.clone().unwrap(),
                 position: 25.0,
             };

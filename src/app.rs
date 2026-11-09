@@ -2149,12 +2149,30 @@ impl MusicApp {
         let key = saved.track.key();
         self.selected = Some(key);
         self.playing = Some(saved.track.clone());
-        if !self.library.tracks.iter().any(|track| track.key() == key) {
+        let queue = saved.queue.take().unwrap_or_default();
+        let in_library = self.library.tracks.iter().any(|track| track.key() == key);
+        if queue.tracks.iter().any(|track| track.key() == key) {
+            // The source it played from, such as an artist's page.
+            self.play_queue = Some(queue.tracks);
+            self.queue_origin = Some(queue.origin);
+        } else if queue.tracks.is_empty() && in_library {
+            self.queue_origin = Some(if queue.origin.is_empty() {
+                "library".into()
+            } else {
+                queue.origin
+            });
+        } else if !in_library {
             self.play_queue = Some(vec![saved.track]);
             self.queue_origin = Some("resume".into());
         }
         self.resume_position = Some(position);
         self.synchronize_order();
+        for mut track in queue.added {
+            track.url = None;
+            if self.play_order.enqueue(track.key()) {
+                self.queued_tracks.insert(track.key(), track);
+            }
+        }
     }
 
     fn playback_snapshot(&self) -> crate::playback::Snapshot {
@@ -2201,9 +2219,46 @@ impl MusicApp {
             owner,
             playback_resume::Snapshot {
                 position: bounded_track_position(position, track.duration),
+                queue: Some(self.saved_queue(track.key())),
                 track,
             },
         ))
+    }
+
+    /// The queue to reopen with: its source (My music is cached apart, so
+    /// it saves no tracks) around the current track, and the added tracks.
+    fn saved_queue(&self, current: (i64, i64)) -> playback_resume::Queue {
+        let tracks = self.play_queue.as_deref().map_or_else(Vec::new, |tracks| {
+            let at = tracks
+                .iter()
+                .position(|track| track.key() == current)
+                .unwrap_or(0);
+            // Keep some history before the current track and the rest ahead.
+            let start = at
+                .saturating_sub(playback_resume::MAX_QUEUE / 10)
+                .min(tracks.len().saturating_sub(playback_resume::MAX_QUEUE));
+            tracks
+                .iter()
+                .skip(start)
+                .take(playback_resume::MAX_QUEUE)
+                .cloned()
+                .collect()
+        });
+        let added = self
+            .play_order
+            .queued()
+            .iter()
+            .filter_map(|entry| self.queued_tracks.get(&entry.key).cloned())
+            .take(playback_resume::MAX_ADDED)
+            .collect();
+        playback_resume::Queue {
+            origin: self
+                .queue_origin
+                .clone()
+                .unwrap_or_else(|| "library".into()),
+            tracks,
+            added,
+        }
     }
 
     fn play_track(&mut self, ctx: &egui::Context, key: (i64, i64)) {
@@ -13383,7 +13438,11 @@ mod tests {
         });
         track.library_liked = Some(false);
         track.release_key = Some((-7, 8));
-        playback_resume::Snapshot { track, position }
+        playback_resume::Snapshot {
+            track,
+            position,
+            queue: None,
+        }
     }
 
     #[test]
@@ -13415,6 +13474,52 @@ mod tests {
             Some(UiError::Music(WebAudioError::Network))
         ));
         assert!(app.workers.is_empty() && app.playback_pending.is_none());
+    }
+
+    #[test]
+    fn the_queue_an_artist_page_started_comes_back_after_a_restart() {
+        let ctx = egui::Context::default();
+        let mut app = resume_test_app(&ctx);
+        let mut source = page(3, &[6, 7, 8]).items;
+        for track in &mut source {
+            track.title = format!("Artist song {}", track.id);
+        }
+        let mut added = page(1, &[90]).items.remove(0);
+        added.owner_id = -5;
+        app.play_queue = Some(source.clone());
+        app.queue_origin = Some("artist:canonical".into());
+        app.playing = Some(source[1].clone());
+        app.selected = Some(source[1].key());
+        app.synchronize_order();
+        app.play_order.enqueue(added.key());
+        app.queued_tracks.insert(added.key(), added.clone());
+        let (owner, saved) = app.playback_resume_snapshot().unwrap();
+        let queue = saved.queue.as_ref().unwrap();
+        assert_eq!(queue.origin, "artist:canonical");
+        assert_eq!(queue.tracks.len(), 3);
+        assert_eq!(queue.added[0].key(), added.key());
+        // A fresh start of the app with that snapshot.
+        let mut restarted = resume_test_app(&ctx);
+        restarted.restore_playback_resume(owner, Some(saved));
+        assert_eq!(restarted.queue_origin.as_deref(), Some("artist:canonical"));
+        let keys: Vec<_> = restarted
+            .play_queue
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(Track::key)
+            .collect();
+        assert_eq!(keys, source.iter().map(Track::key).collect::<Vec<_>>());
+        assert_eq!(restarted.playing.as_ref().unwrap().key(), source[1].key());
+        let upcoming: Vec<_> = restarted
+            .play_order
+            .upcoming(Some(source[1].key()), false)
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(upcoming, [added.key(), source[2].key()]);
+        assert_eq!(restarted.player.snapshot().state, PlaybackState::Stopped);
+        assert!(restarted.workers.is_empty());
     }
 
     #[test]

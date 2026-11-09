@@ -1,4 +1,5 @@
-//! Last selected track and committed position, separate from the audio budget.
+//! Last selected track, committed position and the queue it played from,
+//! separate from the audio budget.
 //! Metadata uses the same account-bound projection as the library and history;
 //! streams, cookies and release access keys never enter the saved snapshot.
 use std::{
@@ -10,13 +11,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::{library_cache, model::Track};
 
-const FORMAT_VERSION: u8 = 1;
-const MAX_BYTES: u64 = 256 * 1024;
+const FORMAT_VERSION: u8 = 2;
+/// Snapshots written before the queue was saved.
+const TRACK_ONLY_VERSION: u8 = 1;
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
+const TRACK_BYTES: u64 = 256 * 1024;
+/// The saved source keeps this many tracks around the current one.
+pub const MAX_QUEUE: usize = 5_000;
+pub const MAX_ADDED: usize = 1_000;
+const MAX_ORIGIN: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub track: Track,
     pub position: f64,
+    pub queue: Option<Queue>,
+}
+
+/// Where playback came from: the source's tracks (none for My music, which
+/// is cached on its own) and the tracks added to the queue by hand.
+#[derive(Clone, Debug, Default)]
+pub struct Queue {
+    pub origin: String,
+    pub tracks: Vec<Track>,
+    pub added: Vec<Track>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -25,6 +43,34 @@ struct StoredResume {
     format_version: u8,
     position: f64,
     metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue: Option<StoredQueue>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredQueue {
+    origin: String,
+    tracks: serde_json::Value,
+    added: serde_json::Value,
+}
+
+fn valid_origin(origin: &str) -> bool {
+    !origin.is_empty() && origin.len() <= MAX_ORIGIN && !origin.chars().any(char::is_control)
+}
+
+fn encode_tracks(account_id: i64, tracks: &[Track], limit: usize) -> io::Result<serde_json::Value> {
+    let bytes = library_cache::encode_bounded(account_id, tracks, MAX_BYTES, limit)?;
+    serde_json::from_slice(&bytes).map_err(|_| invalid())
+}
+
+fn decode_tracks(
+    account_id: i64,
+    value: &serde_json::Value,
+    limit: usize,
+) -> io::Result<Vec<Track>> {
+    let bytes = serde_json::to_vec(value).map_err(|_| invalid())?;
+    library_cache::decode_bounded(&bytes, account_id, MAX_BYTES, limit)
 }
 
 fn invalid() -> io::Error {
@@ -80,14 +126,29 @@ fn encode(account_id: i64, snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     let metadata = library_cache::encode_bounded(
         account_id,
         std::slice::from_ref(&snapshot.track),
-        MAX_BYTES,
+        TRACK_BYTES,
         1,
     )?;
     let metadata = serde_json::from_slice(&metadata).map_err(|_| invalid())?;
+    // A queue that cannot be stored never costs the track and position.
+    let queue = snapshot.queue.as_ref().and_then(|queue| {
+        if !valid_origin(&queue.origin)
+            || queue.tracks.len() > MAX_QUEUE
+            || queue.added.len() > MAX_ADDED
+        {
+            return None;
+        }
+        Some(StoredQueue {
+            origin: queue.origin.clone(),
+            tracks: encode_tracks(account_id, &queue.tracks, MAX_QUEUE).ok()?,
+            added: encode_tracks(account_id, &queue.added, MAX_ADDED).ok()?,
+        })
+    });
     let bytes = serde_json::to_vec(&StoredResume {
         format_version: FORMAT_VERSION,
         position,
         metadata,
+        queue,
     })
     .map_err(|_| invalid())?;
     if bytes.len() as u64 > MAX_BYTES {
@@ -101,17 +162,34 @@ fn decode(account_id: i64, bytes: &[u8]) -> io::Result<Snapshot> {
         return Err(invalid());
     }
     let stored: StoredResume = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    if stored.format_version != FORMAT_VERSION {
+    if stored.format_version != FORMAT_VERSION
+        && !(stored.format_version == TRACK_ONLY_VERSION && stored.queue.is_none())
+    {
         return Err(invalid());
     }
     let metadata = serde_json::to_vec(&stored.metadata).map_err(|_| invalid())?;
-    let mut tracks = library_cache::decode_bounded(&metadata, account_id, MAX_BYTES, 1)?;
+    let mut tracks = library_cache::decode_bounded(&metadata, account_id, TRACK_BYTES, 1)?;
     if tracks.len() != 1 {
         return Err(invalid());
     }
     let track = tracks.remove(0);
     let position = position_for(&track, stored.position)?;
-    Ok(Snapshot { track, position })
+    // A damaged queue only loses the queue.
+    let queue = stored.queue.and_then(|queue| {
+        if !valid_origin(&queue.origin) {
+            return None;
+        }
+        Some(Queue {
+            origin: queue.origin,
+            tracks: decode_tracks(account_id, &queue.tracks, MAX_QUEUE).ok()?,
+            added: decode_tracks(account_id, &queue.added, MAX_ADDED).ok()?,
+        })
+    });
+    Ok(Snapshot {
+        track,
+        position,
+        queue,
+    })
 }
 
 fn load_at(path: &Path, account_id: i64) -> io::Result<Option<Snapshot>> {
@@ -171,6 +249,7 @@ mod tests {
 
     fn snapshot(id: i64, position: f64) -> Snapshot {
         Snapshot {
+            queue: None,
             position,
             track: Track {
                 added: None,
@@ -229,6 +308,57 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_survives_reopening_without_credentials_and_old_files_still_load() {
+        let fixture = Fixture::new();
+        let path = fixture.path(42);
+        let mut saved = snapshot(8, 12.5);
+        saved.queue = Some(Queue {
+            origin: "artist:canonical-artist".into(),
+            tracks: vec![
+                snapshot(7, 0.0).track,
+                snapshot(8, 0.0).track,
+                snapshot(9, 0.0).track,
+            ],
+            added: vec![snapshot(30, 0.0).track],
+        });
+        save_at(&path, 42, &saved).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        for forbidden in [
+            "synthetic-stream-secret",
+            "synthetic-album-secret",
+            "access_key",
+        ] {
+            assert!(!raw.contains(forbidden));
+        }
+        let restored = load_at(&path, 42).unwrap().unwrap();
+        let queue = restored.queue.unwrap();
+        assert_eq!(queue.origin, "artist:canonical-artist");
+        let keys: Vec<_> = queue.tracks.iter().map(Track::key).collect();
+        assert_eq!(keys, [(-7, 7), (-7, 8), (-7, 9)]);
+        assert_eq!(queue.added[0].key(), (-7, 30));
+        assert!(queue.tracks.iter().all(|track| track.url.is_none()));
+        // A file from before queues were saved still restores its track.
+        let mut old: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        old["format_version"] = 1.into();
+        old.as_object_mut().unwrap().remove("queue");
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let restored = load_at(&path, 42).unwrap().unwrap();
+        assert_eq!(restored.track.key(), (-7, 8));
+        assert!(restored.queue.is_none());
+        // A damaged queue only loses the queue.
+        let mut damaged: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        damaged["queue"]["tracks"] = serde_json::json!({"tracks": "broken"});
+        fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
+        let restored = load_at(&path, 42).unwrap().unwrap();
+        assert_eq!(restored.position, 12.5);
+        assert!(restored.queue.is_none());
+        // An origin with control characters is not stored.
+        saved.queue.as_mut().unwrap().origin = "bad\norigin".into();
+        save_at(&path, 42, &saved).unwrap();
+        assert!(load_at(&path, 42).unwrap().unwrap().queue.is_none());
+    }
+
+    #[test]
     fn saved_state_is_account_bound_and_does_not_replace_other_accounts() {
         let fixture = Fixture::new();
         let first = fixture.path(42);
@@ -282,7 +412,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let mut invalid_states = Vec::new();
         let mut state = original.clone();
-        state["format_version"] = 2.into();
+        state["format_version"] = 3.into();
         invalid_states.push(state);
         let mut state = original.clone();
         state["position"] = (-1).into();
