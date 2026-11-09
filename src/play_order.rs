@@ -737,7 +737,30 @@ impl PlaybackOrder {
             self.revision = self.revision.wrapping_add(1);
             self.mark_visited(key);
         }
+        self.trim_repeating_future();
         Some(key)
+    }
+
+    /// After stepping back, Next retraces the played tracks ahead and "Up
+    /// next" lists them. With repeat they can run round the source again
+    /// and again; from the first track that comes back (the current one, or
+    /// one already ahead) the rest is dropped, so each is retraced once.
+    fn trim_repeating_future(&mut self) {
+        let Some(current) = self.history.get(self.cursor).copied() else {
+            return;
+        };
+        let mut seen = HashSet::from([current]);
+        let ahead = self.cursor + 1;
+        let Some(repeat) = self
+            .history
+            .get(ahead..)
+            .and_then(|future| future.iter().position(|key| !seen.insert(*key)))
+        else {
+            return;
+        };
+        self.history.truncate(ahead + repeat);
+        self.visits.truncate(ahead + repeat);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn commit_new(&mut self, key: TrackKey) {
@@ -1048,6 +1071,54 @@ mod tests {
         order.cycle_repeat();
         assert_eq!(order.repeat(), RepeatMode::One);
         assert!(!order.source_reorderable(Some(source[0])));
+    }
+
+    #[test]
+    fn up_next_never_repeats_a_track_however_long_repeat_has_cycled() {
+        // Random walks of Next, Previous and late-loading pages over
+        // repeating lists of every length, with and without shuffle.
+        let mut seed = 12345_u64;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let keys = |n: i64| (1..=n).map(|id| (1, id)).collect::<Vec<_>>();
+        for case in 0..400 {
+            let shuffle = case % 2 == 0;
+            let total = 3 + (random() % 30) as i64;
+            let mut loaded = (2 + random() % total as u64) as i64;
+            let mut order = PlaybackOrder::with_modes(shuffle, RepeatMode::All);
+            order.random = random();
+            order.reset_source(&keys(loaded), Some((1, 1)));
+            let mut current = (1, 1);
+            for _ in 0..60 {
+                match random() % 10 {
+                    0..5 => current = order.advance_next(current, true, false).unwrap_or(current),
+                    5..8 => current = order.advance_previous(current, true).unwrap_or(current),
+                    _ if loaded < total => {
+                        loaded = (loaded + 1 + (random() % 5) as i64).min(total);
+                        order.sync(&keys(loaded), Some(current));
+                    }
+                    _ => {}
+                }
+                let upcoming: Vec<_> = order
+                    .upcoming(Some(current), true)
+                    .into_iter()
+                    .map(|entry| entry.key)
+                    .collect();
+                let mut seen = HashSet::from([current]);
+                assert!(
+                    upcoming.iter().all(|key| seen.insert(*key)) || loaded == 1,
+                    "case {case}: {current:?} then {upcoming:?}"
+                );
+                // Next plays the first row it lists.
+                if let Some(first) = upcoming.first() {
+                    assert_eq!(order.next(current, true), Some(*first), "case {case}");
+                }
+            }
+        }
     }
 
     #[test]
