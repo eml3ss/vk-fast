@@ -97,7 +97,9 @@ pub fn gradient_stops(painter: &egui::Painter, rect: egui::Rect, radius: f32, st
         horizontal_gradient(painter, rect, radius, *first, *last);
         return;
     }
-    let feather = 0.5 / painter.ctx().pixels_per_point();
+    // One physical pixel of edge, split across the outline as egui's own
+    // shapes do, so the rounded corners are as smooth as any other card.
+    let half = 0.5 / painter.ctx().pixels_per_point();
     let radius = radius.min(rect.width().min(rect.height()) * 0.5).max(0.0);
     let color_at = |x: f32| {
         let position =
@@ -110,48 +112,57 @@ pub fn gradient_stops(painter: &egui::Painter, rect: egui::Rect, radius: f32, st
         });
         Color32::from_rgba_premultiplied(channels[0], channels[1], channels[2], channels[3])
     };
-    // Vertical inset of the outline at x, from the corner arcs.
-    let inset = |x: f32| {
-        let from_edge = (x - rect.left()).min(rect.right() - x);
-        if from_edge >= radius {
-            0.0
-        } else {
-            let dx = radius - from_edge.max(0.0);
-            radius - (radius * radius - dx * dx).max(0.0).sqrt()
-        }
-    };
-    let mut columns = Vec::new();
-    let corner_steps = (radius.ceil() as usize).max(1);
-    for step in 0..=corner_steps {
-        columns.push(rect.left() + radius * step as f32 / corner_steps as f32);
+    // Columns across the card: the top outline point of each, with its
+    // outward normal. Corners are sampled by angle, so their steep ends are
+    // as dense as their flat tops; the middle keeps the gradient's stops.
+    let mut columns: Vec<(egui::Pos2, egui::Vec2)> = Vec::new();
+    let arc_steps = ((radius * 1.5).ceil() as usize).clamp(1, 64);
+    let left_center = egui::pos2(rect.left() + radius, rect.top() + radius);
+    for step in 0..=arc_steps {
+        let angle = std::f32::consts::PI * (1.0 + 0.5 * step as f32 / arc_steps as f32);
+        let normal = egui::vec2(angle.cos(), angle.sin());
+        columns.push((left_center + normal * radius, normal));
     }
     let middle = (rect.width() - 2.0 * radius).max(0.0);
     let middle_steps = ((middle / 8.0).ceil() as usize).max(1);
     for step in 1..middle_steps {
-        columns.push(rect.left() + radius + middle * step as f32 / middle_steps as f32);
+        let x = rect.left() + radius + middle * step as f32 / middle_steps as f32;
+        columns.push((egui::pos2(x, rect.top()), egui::vec2(0.0, -1.0)));
     }
-    for step in 0..=corner_steps {
-        columns.push(rect.right() - radius + radius * step as f32 / corner_steps as f32);
+    let right_center = egui::pos2(rect.right() - radius, rect.top() + radius);
+    for step in 0..=arc_steps {
+        let angle = std::f32::consts::PI * (1.5 + 0.5 * step as f32 / arc_steps as f32);
+        let normal = egui::vec2(angle.cos(), angle.sin());
+        columns.push((right_center + normal * radius, normal));
     }
-    columns.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    columns.dedup_by(|a, b| (a.0 - b.0).length() < 0.01);
+    let mirror = |point: egui::Pos2| egui::pos2(point.x, rect.top() + rect.bottom() - point.y);
     let mut mesh = egui::Mesh::default();
-    for x in &columns {
-        let color = color_at(*x);
-        let dy = inset(*x);
-        let top = rect.top() + dy;
-        let bottom = rect.bottom() - dy;
+    for (top, normal) in &columns {
+        let color = color_at(top.x);
+        let bottom = mirror(*top);
+        let down = egui::vec2(normal.x, -normal.y);
         // Per column: outer top, top, bottom, outer bottom.
-        mesh.colored_vertex(egui::pos2(*x, top - feather), Color32::TRANSPARENT);
-        mesh.colored_vertex(egui::pos2(*x, top + feather), color);
-        mesh.colored_vertex(egui::pos2(*x, bottom - feather), color);
-        mesh.colored_vertex(egui::pos2(*x, bottom + feather), Color32::TRANSPARENT);
+        mesh.colored_vertex(*top + *normal * half, Color32::TRANSPARENT);
+        mesh.colored_vertex(*top - *normal * half, color);
+        mesh.colored_vertex(bottom - down * half, color);
+        mesh.colored_vertex(bottom + down * half, Color32::TRANSPARENT);
     }
-    for column in 0..columns.len().saturating_sub(1) as u32 {
+    let count = columns.len() as u32;
+    for column in 0..count.saturating_sub(1) {
         let a = column * 4;
         let b = a + 4;
         for row in 0..3 {
             mesh.add_triangle(a + row, b + row, a + row + 1);
             mesh.add_triangle(a + row + 1, b + row, b + row + 1);
+        }
+    }
+    // The straight left and right sides fade out over the same pixel.
+    if count > 0 {
+        for column in [0, count - 1] {
+            let a = column * 4;
+            mesh.add_triangle(a, a + 1, a + 2);
+            mesh.add_triangle(a, a + 2, a + 3);
         }
     }
     painter.add(egui::Shape::mesh(mesh));
@@ -387,6 +398,70 @@ pub fn install(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_card_edges_fade_all_around_like_other_rounded_shapes() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.25);
+        let rect = egui::Rect::from_min_size(egui::pos2(10.3, 10.6), egui::vec2(300.0, 120.0));
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            gradient_stops(
+                ui.painter(),
+                rect,
+                16.0,
+                &[Color32::RED, Color32::GREEN, Color32::BLUE],
+            );
+        });
+        output.textures_delta.clear();
+        let mesh = output
+            .shapes
+            .into_iter()
+            .find_map(|shape| match shape.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .unwrap();
+        let half = 0.5 / 1.25;
+        let rounded = |point: egui::Pos2| {
+            // Distance outside the rounded rectangle (negative inside).
+            let inner = rect.shrink(16.0);
+            let dx = (inner.left() - point.x)
+                .max(point.x - inner.right())
+                .max(0.0);
+            let dy = (inner.top() - point.y)
+                .max(point.y - inner.bottom())
+                .max(0.0);
+            let corner = egui::vec2(dx, dy).length() - 16.0;
+            if dx > 0.0 && dy > 0.0 {
+                corner
+            } else {
+                (rect.left() - point.x)
+                    .max(point.x - rect.right())
+                    .max(rect.top() - point.y)
+                    .max(point.y - rect.bottom())
+            }
+        };
+        for vertex in &mesh.vertices {
+            let distance = rounded(vertex.pos);
+            if vertex.color.a() == 0 {
+                assert!((distance - half).abs() < 0.05, "outer {:?}", vertex.pos);
+            } else {
+                assert!((distance + half).abs() < 0.05, "inner {:?}", vertex.pos);
+            }
+        }
+        // The straight sides fade too, not only the top and bottom.
+        let side = |x: f32| {
+            mesh.indices.chunks(3).any(|triangle| {
+                triangle.iter().any(|i| {
+                    let vertex = mesh.vertices[*i as usize];
+                    vertex.color.a() == 0
+                        && (vertex.pos.x - x).abs() < 0.05
+                        && (vertex.pos.y - rect.center().y).abs() < rect.height() * 0.4
+                })
+            })
+        };
+        assert!(side(rect.left() - half) && side(rect.right() + half));
+    }
 
     fn heading_layout(inset: bool) -> (egui::Rect, egui::Rect, egui::Rect) {
         let context = egui::Context::default();
