@@ -1126,7 +1126,12 @@ impl Library {
             .map(|track| {
                 (
                     track.key(),
-                    (track.unavailable, track.library_source_key, track.added),
+                    (
+                        track.unavailable,
+                        track.library_source_key,
+                        track.added,
+                        track.album.clone(),
+                    ),
                 )
             })
             .collect();
@@ -1138,11 +1143,13 @@ impl Library {
             .map(|(index, track)| (track.key(), index))
             .collect();
         for mut track in page.items {
-            if let Some((unavailable, source, added)) = known_metadata.get(&track.key()) {
+            if let Some((unavailable, source, added, album)) = known_metadata.get(&track.key()) {
                 track.unavailable = track.unavailable.or(*unavailable);
                 track.library_source_key = track.library_source_key.or(*source);
                 // Website rows carry no dates: keep the ones already loaded.
                 track.added = track.added.or(*added);
+                // Nor album names: keep the ones already learned.
+                album_titles::keep_known_album(&mut track, album.as_ref());
             }
             if let Some(index) = known.get(&track.key()).copied() {
                 old[index] = track;

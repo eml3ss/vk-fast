@@ -61,6 +61,28 @@ fn unnamed(title: &str) -> bool {
     title.trim().eq_ignore_ascii_case("unnamed")
 }
 
+/// A row VK sent again without its album's name (website rows name it
+/// only by ID, and call EPs and singles "Unnamed") keeps the name an
+/// earlier copy of the same row already had.
+pub(super) fn keep_known_album(track: &mut Track, known: Option<&AlbumRef>) {
+    let (Some(album), Some(known)) = (&mut track.album, known) else {
+        return;
+    };
+    if (album.owner_id, album.id) != (known.owner_id, known.id) {
+        return;
+    }
+    let title = known.title.trim();
+    if (album.title.trim().is_empty() || unnamed(&album.title))
+        && !title.is_empty()
+        && !unnamed(title)
+    {
+        album.title.clone_from(&known.title);
+    }
+    if album.cover_url.is_none() {
+        album.cover_url.clone_from(&known.cover_url);
+    }
+}
+
 impl State {
     pub(super) fn reset(&mut self) {
         *self = Self::default();
@@ -184,11 +206,11 @@ impl MusicApp {
         }
     }
 
-    /// An open own playlist names all its rows, not only the visible ones,
-    /// so the account's cache holds the whole list. Releases VK calls
-    /// "Unnamed" are read as well.
+    /// My music and an open own playlist name all their rows, not only the
+    /// visible ones, so the account's cache holds the whole list. Releases
+    /// VK calls "Unnamed" are read as well.
     fn fill_own_playlist_albums(&mut self) {
-        if self.own_playlist().is_none()
+        if (self.page != MusicPage::Library && self.own_playlist().is_none())
             || !self.album_titles.wanted.is_empty()
             || !self.album_titles.releases.is_empty()
         {
@@ -667,6 +689,54 @@ mod tests {
         assert!(!restored.unsaved, "the placeholder is never saved");
         restored.learn((-9, 1002), "BANANATEKK (Versions)");
         assert!(restored.unsaved);
+    }
+
+    #[test]
+    fn my_music_names_every_row_and_a_refresh_keeps_learned_names() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.page = MusicPage::Library;
+        app.library.tracks = (1..=150)
+            .map(|id| with_album(id, 1000 + id, if id % 2 == 0 { "Unnamed" } else { "" }))
+            .collect();
+        app.fill_own_playlist_albums();
+        assert_eq!(
+            app.album_titles.wanted.len(),
+            75,
+            "rows beyond the screen too"
+        );
+        assert_eq!(app.album_titles.releases.len(), RELEASES_PER_REQUEST);
+
+        // VK sends the saved rows again without names: learned ones stay.
+        app.library.tracks = vec![
+            with_album(1, 5, "Record"),
+            with_album(2, 6, "BANANATEKK (Versions)"),
+            with_album(3, 7, ""),
+        ];
+        app.library.tracks[0].album.as_mut().unwrap().cover_url =
+            Some("https://example.com/cover.jpg".into());
+        let mut fresh = page(3, &[1, 2, 3]);
+        fresh.items = vec![
+            with_album(1, 5, ""),
+            with_album(2, 6, "Unnamed"),
+            with_album(3, 8, ""),
+        ];
+        app.library.refresh(fresh);
+        let titles: Vec<_> = app
+            .library
+            .tracks
+            .iter()
+            .map(|track| track.album.as_ref().unwrap().title.as_str())
+            .collect();
+        assert_eq!(titles, ["Record", "BANANATEKK (Versions)", ""]);
+        assert!(
+            app.library.tracks[0]
+                .album
+                .as_ref()
+                .unwrap()
+                .cover_url
+                .is_some()
+        );
     }
 
     #[test]
