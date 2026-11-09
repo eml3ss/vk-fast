@@ -909,6 +909,13 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
                         egui::vec2(64.0, 64.0),
                     );
                     collage(ui, covers, art, tracks, *icon);
+                    if response.hovered() && matches!(intent, Action::PlayTrack(_)) {
+                        // "Continue" plays its track: dim the cover under a
+                        // play sign, as a queue row and a recent card do.
+                        ui.painter()
+                            .rect_filled(art, 6.0, Color32::from_black_alpha(165));
+                        icons::paint(ui.painter(), art.shrink(16.0), Icon::Play, Color32::WHITE);
+                    }
                     icons::paint(
                         ui.painter(),
                         egui::Rect::from_min_size(
@@ -939,13 +946,14 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
 
 fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width: f32) -> Response {
     let (rect, response) = card(ui, egui::vec2(width, 72.0), &track.title);
-    image(
-        ui,
-        covers,
-        egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), egui::vec2(48.0, 48.0)),
-        track.cover_url.as_deref(),
-        0,
-    );
+    let art = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), egui::vec2(48.0, 48.0));
+    image(ui, covers, art, track.cover_url.as_deref(), 0);
+    if response.hovered() {
+        // As a queue row on hover: the cover dims under a play sign.
+        ui.painter()
+            .rect_filled(art, 6.0, Color32::from_black_alpha(165));
+        icons::paint(ui.painter(), art.shrink(12.0), Icon::Play, Color32::WHITE);
+    }
     card_text(
         ui,
         egui::Rect::from_min_max(
@@ -1644,6 +1652,92 @@ mod tests {
     }
 
     #[test]
+    fn the_continue_card_dims_its_cover_on_hover_but_the_recent_card_does_not() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let track = crate::model::demo_tracks().remove(0);
+        let recent = vec![track.clone()];
+        let mut tick = 0;
+        let mut frame = |events: Vec<egui::Event>| {
+            tick += 1;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1040.0, 1400.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        &mut covers,
+                        HomeView {
+                            language: Language::English,
+                            library: &[],
+                            library_total: None,
+                            recent: &recent,
+                            playing: Some(&track),
+                            connected: true,
+                            loading: false,
+                            mix_loading: false,
+                            mix_playing: false,
+                            collections: &[],
+                            active_collection: None,
+                            pending_collection: None,
+                            catalog: &HomeCatalog::default(),
+                            active_mix: None,
+                            active_mix_playing: false,
+                            pending_mix: None,
+                            error: None,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let at = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.visual_bounding_rect().center())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let dimmed = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| {
+                    matches!(&shape.shape, egui::Shape::Rect(rect)
+                        if rect.fill == Color32::from_black_alpha(165)
+                            && (rect.rect.width() - 64.0).abs() < 0.1)
+                })
+                .count()
+        };
+        frame(Vec::new());
+        let output = frame(Vec::new());
+        assert_eq!(dimmed(&output), 0);
+        let (resume, recent_card) = (at(&output, "Continue"), at(&output, "Recent"));
+        frame(vec![egui::Event::PointerMoved(resume)]);
+        assert_eq!(dimmed(&frame(vec![egui::Event::PointerMoved(resume)])), 1);
+        frame(vec![egui::Event::PointerMoved(recent_card)]);
+        assert_eq!(
+            dimmed(&frame(vec![egui::Event::PointerMoved(recent_card)])),
+            0,
+            "the Recent card opens a page; it plays nothing"
+        );
+    }
+
+    #[test]
     fn recent_cards_fill_two_responsive_rows_and_keep_each_tracks_play_action() {
         let context = egui::Context::default();
         theme::install(&context);
@@ -1771,6 +1865,25 @@ mod tests {
             frame(1040.0, &recent, pointer(eighth, false)).1,
             Some(Action::PlayTrack((42, 8)))
         );
+
+        // Hovering a card dims its cover under a play sign, as in the queue.
+        let dimmed = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| {
+                    matches!(&shape.shape, egui::Shape::Rect(rect)
+                        if rect.fill == Color32::from_black_alpha(165)
+                            && (rect.rect.width() - 48.0).abs() < 0.1)
+                })
+                .count()
+        };
+        frame(1040.0, &recent, vec![egui::Event::PointerGone]);
+        let still = frame(1040.0, &recent, Vec::new()).0;
+        assert_eq!(dimmed(&still), 0);
+        frame(1040.0, &recent, vec![egui::Event::PointerMoved(eighth)]);
+        let hovered = frame(1040.0, &recent, vec![egui::Event::PointerMoved(eighth)]).0;
+        assert_eq!(dimmed(&hovered), 1, "only the hovered card dims");
 
         let output = frame(1040.0, &recent[..3], Vec::new()).0;
         let count = output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if (rect.rect.height() - 72.0).abs() < 0.1)).count();
