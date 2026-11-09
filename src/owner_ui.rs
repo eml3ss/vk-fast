@@ -7,7 +7,7 @@ use crate::{
     icons::{self, Icon},
     model::AlbumRef,
     search_ui, theme,
-    web_audio::{OwnerPage, PlaylistCreator, UserPlaylist, WebAudioError},
+    web_audio::{OwnerClosed, OwnerPage, PlaylistCreator, UserPlaylist, WebAudioError},
 };
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense};
 
@@ -67,6 +67,12 @@ pub fn show(
                     ui.selectable_value(tab, value, label);
                 }
             });
+            if let Some(closed) = page.and_then(|page| page.closed) {
+                // Nothing to list in any tab: just why, under the tabs.
+                ui.add_space(16.0);
+                message(ui, closed_message(closed, language));
+                return None;
+            }
             if *tab == Tab::Tracks {
                 return None;
             }
@@ -88,16 +94,6 @@ pub fn show(
                 }
                 return action;
             };
-            if page.unavailable {
-                ui.label(
-                    RichText::new(language.text(
-                        "Плейлисты этого профиля скрыты или недоступны.",
-                        "This profile's playlists are private or unavailable.",
-                    ))
-                    .color(theme::MUTED),
-                );
-                return action;
-            }
             let limit = (*tab == Tab::All).then_some(ALL_PLAYLIST_ROWS);
             let (selected, cut) = grid(ui, covers, language, &page.playlists, playback, limit);
             action = selected;
@@ -114,12 +110,15 @@ pub fn show(
             {
                 *tab = Tab::Playlists;
             }
-            if *tab == Tab::All {
+            // "All" shows a few rows; when it has none, it says why.
+            if *tab == Tab::All && !page.playlists.is_empty() {
                 return action;
             }
             if let Some(error) = &page.playlists_error {
-                ui.add_space(12.0);
-                let message = if *error == WebAudioError::Rejected {
+                if !page.playlists.is_empty() {
+                    ui.add_space(12.0);
+                }
+                let text = if *error == WebAudioError::Rejected {
                     language
                         .text(
                             "VK не предоставил доступ к плейлистам.",
@@ -129,23 +128,28 @@ pub fn show(
                 } else {
                     error.localized(language)
                 };
-                ui.label(RichText::new(message).color(theme::MUTED));
-                if ui
-                    .add_enabled(
+                message(ui, text);
+                ui.add_space(8.0);
+                if theme::inset_heading(ui, |ui| {
+                    ui.add_enabled(
                         !loading,
                         egui::Button::new(language.text("Повторить", "Retry")),
                     )
-                    .clicked()
+                })
+                .clicked()
                 {
                     action = Some(Action::Retry);
                 }
             } else if page.playlists.is_empty() && !loading {
-                ui.label(
-                    RichText::new(
-                        language.text("Нет доступных плейлистов.", "No available playlists."),
-                    )
-                    .color(theme::MUTED),
+                message(
+                    ui,
+                    language
+                        .text("Нет доступных плейлистов.", "No available playlists.")
+                        .into(),
                 );
+            }
+            if *tab == Tab::All {
+                return action;
             }
             if page.next_offset.is_some() || loading {
                 let (marker, _) =
@@ -164,6 +168,33 @@ pub fn show(
         }
     }
     action
+}
+
+/// A list message, aligned with the section headings above it.
+fn message(ui: &mut egui::Ui, text: String) {
+    theme::inset_heading(ui, |ui| ui.label(RichText::new(text).color(theme::MUTED)));
+}
+
+fn closed_message(closed: OwnerClosed, language: Language) -> String {
+    match closed {
+        OwnerClosed::Gone => language.text(
+            "Страница удалена или заблокирована.",
+            "This page was deleted or blocked.",
+        ),
+        OwnerClosed::Profile => language.text(
+            "Профиль закрыт — его музыка недоступна.",
+            "This profile is private, so its music is unavailable.",
+        ),
+        OwnerClosed::Music => language.text(
+            "Пользователь закрыл доступ к своей музыке.",
+            "This user has hidden their music.",
+        ),
+        OwnerClosed::Community => language.text(
+            "Сообщество закрыто — его музыка доступна только участникам.",
+            "This community is closed; its music is for members only.",
+        ),
+    }
+    .into()
 }
 
 fn header(
@@ -398,7 +429,7 @@ mod tests {
             },
             image_url: None,
             description: None,
-            unavailable: false,
+            closed: None,
             tracks: Vec::new(),
             tracks_error: None,
             playlists: (0..count)
@@ -548,6 +579,125 @@ mod tests {
         assert!(action.is_none(), "All does not load more playlists");
     }
 
+    /// Every text drawn by the page, with its place.
+    fn texts(page: &OwnerPage, tab: Tab) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let mut tab = tab;
+                show(
+                    ui,
+                    &mut covers,
+                    Language::English,
+                    &page.creator,
+                    Some(page),
+                    false,
+                    Playback::default(),
+                    &mut tab,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        fn collect(shape: &egui::Shape, texts: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    texts.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, texts)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        output
+            .shapes
+            .iter()
+            .for_each(|shape| collect(&shape.shape, &mut texts));
+        texts
+    }
+
+    #[test]
+    fn empty_or_refused_playlists_say_so_on_every_tab_in_line_with_the_heading() {
+        let mut empty = page(0);
+        empty.total = Some(0);
+        let mut refused = page(0);
+        refused.playlists_error = Some(WebAudioError::Rejected);
+        for (page, text) in [
+            (&empty, "No available playlists."),
+            (&refused, "VK did not grant access to these playlists."),
+        ] {
+            for tab in [Tab::All, Tab::Playlists] {
+                let texts = texts(page, tab);
+                let find = |caption: &str| {
+                    texts
+                        .iter()
+                        .find(|(text, _)| text == caption)
+                        .map(|(_, rect)| *rect)
+                        .unwrap_or_else(|| panic!("{tab:?}: missing {caption}"))
+                };
+                let heading = find("Playlists");
+                let heading = texts
+                    .iter()
+                    .filter(|(text, rect)| text == "Playlists" && rect.top() > heading.bottom())
+                    .map(|(_, rect)| *rect)
+                    .next()
+                    .unwrap_or(heading);
+                let message = find(text);
+                assert!(
+                    (message.left() - heading.left()).abs() < 1.5,
+                    "{tab:?} {message:?} {heading:?}"
+                );
+                // As under "Tracks": 10 px plus the line spacing, no extra 12 px.
+                assert!(
+                    message.top() - heading.bottom() < 26.0,
+                    "{tab:?}: no extra gap {message:?} {heading:?}"
+                );
+                if page.playlists_error.is_some() {
+                    assert!((find("Retry").left() - message.left()).abs() < 16.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_pages_say_why_under_the_tabs_on_every_tab() {
+        let mut closed = page(0);
+        for (reason, text) in [
+            (OwnerClosed::Music, "This user has hidden their music."),
+            (
+                OwnerClosed::Profile,
+                "This profile is private, so its music is unavailable.",
+            ),
+            (
+                OwnerClosed::Community,
+                "This community is closed; its music is for members only.",
+            ),
+            (OwnerClosed::Gone, "This page was deleted or blocked."),
+        ] {
+            closed.closed = Some(reason);
+            for tab in [Tab::All, Tab::Tracks, Tab::Playlists] {
+                let texts = texts(&closed, tab);
+                assert!(
+                    texts.iter().any(|(shown, _)| shown == text),
+                    "{tab:?} {reason:?}"
+                );
+                assert!(
+                    !texts
+                        .iter()
+                        .any(|(shown, _)| shown.starts_with("VK did not grant"))
+                );
+            }
+        }
+    }
+
     #[test]
     fn pagination_stops_on_failure_and_private_profiles_never_offer_more() {
         let ctx = egui::Context::default();
@@ -561,7 +711,7 @@ mod tests {
             (None, true, false),
         ] {
             page.playlists_error = error;
-            page.unavailable = private;
+            page.closed = private.then_some(OwnerClosed::Music);
             let mut more = false;
             let mut output = ctx.run_ui(
                 egui::RawInput {

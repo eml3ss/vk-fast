@@ -13,7 +13,7 @@ fn page(id: i64, offset: usize, items: &[i64]) -> OwnerPage {
         creator: creator(id),
         image_url: Some("https://images.example.test/owner.jpg".into()),
         description: Some("Public music".into()),
-        unavailable: false,
+        closed: None,
         tracks: Vec::new(),
         tracks_error: None,
         playlists: items

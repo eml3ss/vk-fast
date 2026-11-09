@@ -42,7 +42,7 @@ mod playlist_manage;
 pub use artist_follow::FollowedArtist;
 pub use home_catalog::MixTile;
 pub use home_catalog::{ArtistMix, CatalogMix, FriendPlaylist, HomeCatalog};
-pub use owner_page::OwnerPage;
+pub use owner_page::{OwnerClosed, OwnerPage};
 pub use playlist_follow::PlaylistFollowChange;
 pub use playlist_manage::{
     PLAYLIST_DESCRIPTION_MAX_CHARS, PlaylistCoverChange, PlaylistEditDetails, PlaylistEditUpdate,

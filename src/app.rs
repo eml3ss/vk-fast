@@ -7073,7 +7073,7 @@ impl MusicApp {
                 if tab == crate::owner_ui::Tab::Playlists {
                     return;
                 }
-                let Some(page) = page.filter(|page| !page.unavailable) else {
+                let Some(page) = page.filter(|page| page.closed.is_none()) else {
                     return;
                 };
                 ui.add_space(if tab == crate::owner_ui::Tab::All {
@@ -16431,7 +16431,7 @@ mod tests {
                 creator: publisher.clone(),
                 image_url: None,
                 description: None,
-                unavailable: false,
+                closed: None,
                 playlists: Vec::new(),
                 total: Some(0),
                 offset: 0,

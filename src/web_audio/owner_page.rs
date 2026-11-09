@@ -3,12 +3,27 @@ use super::*;
 
 const MAX_PLAYLISTS: usize = 10_000;
 
+/// Why VK shows none of a page's music to this viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerClosed {
+    /// The page was deleted or blocked.
+    Gone,
+    /// The user's profile is private.
+    Profile,
+    /// The user hid their music in privacy settings.
+    Music,
+    /// A closed or private community the viewer has not joined.
+    Community,
+}
+
 #[derive(Clone)]
 pub struct OwnerPage {
     pub creator: PlaylistCreator,
     pub image_url: Option<String>,
     pub description: Option<String>,
-    pub unavailable: bool,
+    /// Set when the profile itself says its music is out of reach; then no
+    /// music is asked for.
+    pub closed: Option<OwnerClosed>,
     pub playlists: Vec<UserPlaylist>,
     pub total: Option<usize>,
     /// Zero is a complete header plus the first batch; later batches append.
@@ -104,7 +119,7 @@ impl WebAudioClient {
             creator: creator.clone(),
             image_url: None,
             description: None,
-            unavailable: false,
+            closed: None,
             playlists: Vec::new(),
             total: None,
             offset,
@@ -120,7 +135,10 @@ impl WebAudioClient {
                     "users.get",
                     vec![
                         ("user_ids", id.to_string()),
-                        ("fields", "photo_200,photo_100,photo_50,status".into()),
+                        (
+                            "fields",
+                            "photo_200,photo_100,photo_50,status,can_see_audio".into(),
+                        ),
                     ],
                 )
             } else {
@@ -139,14 +157,8 @@ impl WebAudioClient {
             page.image_url = profile_avatar_from_object(record);
             page.description =
                 playlist_description(record.get(if id > 0 { "status" } else { "description" }));
-            page.unavailable = record
-                .get("deactivated")
-                .and_then(Value::as_str)
-                .is_some_and(|state| !state.is_empty())
-                || (id > 0
-                    && record.get("is_closed").and_then(Value::as_bool) == Some(true)
-                    && record.get("can_access_closed").and_then(Value::as_bool) == Some(false));
-            if page.unavailable {
+            page.closed = owner_closed(record, id);
+            if page.closed.is_some() {
                 return Ok(page);
             }
         }
@@ -220,6 +232,36 @@ impl WebAudioClient {
         }
         Ok(page)
     }
+}
+
+/// What the profile itself says about reaching its music. Only explicit
+/// marks count: a missing field leaves the music to be asked for.
+fn owner_closed(record: &Value, owner: i64) -> Option<OwnerClosed> {
+    let flag = |key: &str| {
+        record.get(key).and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_i64().map(|flag| flag != 0))
+        })
+    };
+    if record
+        .get("deactivated")
+        .and_then(Value::as_str)
+        .is_some_and(|state| !state.is_empty())
+    {
+        return Some(OwnerClosed::Gone);
+    }
+    if owner > 0 {
+        if flag("is_closed") == Some(true) && flag("can_access_closed") == Some(false) {
+            return Some(OwnerClosed::Profile);
+        }
+        if flag("can_see_audio") == Some(false) {
+            return Some(OwnerClosed::Music);
+        }
+    } else if flag("is_closed") == Some(true) && flag("is_member") == Some(false) {
+        return Some(OwnerClosed::Community);
+    }
+    None
 }
 
 fn owner_record(value: &Value, owner: i64) -> Option<&Value> {
@@ -376,7 +418,58 @@ mod tests {
             assert_eq!(method, "users.get");
             Ok(json!([{"id":71,"first_name":"Private","is_closed":true,"can_access_closed":false}]))
         }).unwrap();
-        assert!(private.unavailable && private.playlists.is_empty());
+        assert_eq!(private.closed, Some(OwnerClosed::Profile));
+        assert!(private.playlists.is_empty());
+        for (owner, record, closed) in [
+            (
+                71,
+                json!({"id":71,"first_name":"Hidden","can_see_audio":0}),
+                Some(OwnerClosed::Music),
+            ),
+            (
+                71,
+                json!({"id":71,"first_name":"Open","can_see_audio":1}),
+                None,
+            ),
+            (
+                71,
+                json!({"id":71,"first_name":"Gone","deactivated":"deleted"}),
+                Some(OwnerClosed::Gone),
+            ),
+            (
+                -71,
+                json!({"id":71,"name":"Club","is_closed":1,"is_member":0}),
+                Some(OwnerClosed::Community),
+            ),
+            (
+                -71,
+                json!({"id":71,"name":"Member","is_closed":1,"is_member":1}),
+                None,
+            ),
+            (-71, json!({"id":71,"name":"Public","is_closed":0}), None),
+        ] {
+            let page = client
+                .owner_page_request(42, &creator(owner), 0, &canceled, |_, method, params| {
+                    if closed.is_some() {
+                        assert!(
+                            matches!(method, "users.get" | "groups.getById"),
+                            "no music asked for"
+                        );
+                    }
+                    if method == "users.get" {
+                        assert!(params.iter().any(
+                            |(key, value)| *key == "fields" && value.contains("can_see_audio")
+                        ));
+                    }
+                    Ok(match method {
+                        "users.get" => json!([record.clone()]),
+                        "groups.getById" => json!({"groups":[record.clone()]}),
+                        _ => json!({"count":0,"items":[]}),
+                    })
+                })
+                .unwrap();
+            assert_eq!(page.closed, closed, "{record}");
+        }
         assert!(matches!(
             client.owner_page_request(42, &creator(71), 0, &canceled, |_, _, _| {
                 canceled.store(true, Ordering::Release);
