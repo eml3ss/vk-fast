@@ -4,7 +4,15 @@ use super::*;
 use crate::screen_cache::{self, Card, Friend, SidebarArtist, SidebarItem, Tile};
 use crate::web_audio::{CatalogMix, CollectionKind, FollowedArtist, FriendPlaylist, MixTile};
 
-pub(super) type Snapshot = (Option<screen_cache::Home>, Option<screen_cache::Library>);
+pub(super) type Snapshot = (
+    Option<screen_cache::Home>,
+    Option<screen_cache::Library>,
+    Option<screen_cache::PlaylistDates>,
+);
+
+fn playlist_key(reference: &AlbumRef) -> String {
+    format!("{}_{}", reference.owner_id, reference.id)
+}
 
 fn tile(tile: &MixTile) -> Tile {
     let (options, entity_id) = match &tile.mix {
@@ -49,7 +57,8 @@ impl MusicApp {
             .spawn(move || {
                 let home = screen_cache::load_home(owner).ok().flatten();
                 let library = screen_cache::load_library(owner).ok().flatten();
-                let _ = sender.send((home, library));
+                let dates = screen_cache::load_playlist_dates(owner).ok().flatten();
+                let _ = sender.send((home, library, dates));
                 ctx.request_repaint();
             })
         {
@@ -64,10 +73,10 @@ impl MusicApp {
             return;
         };
         let owner = *owner;
-        let (home, library) = match receiver.try_recv() {
+        let (home, library, dates) = match receiver.try_recv() {
             Ok(snapshot) => snapshot,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => (None, None),
+            Err(TryRecvError::Disconnected) => (None, None, None),
         };
         self.screen_cache = None;
         if self
@@ -76,6 +85,15 @@ impl MusicApp {
             .is_none_or(|session| session.profile.id != owner)
         {
             return;
+        }
+        if let Some(dates) = dates {
+            for (playlist, rows) in dates {
+                let known = self.playlist_dates.entry(playlist).or_default();
+                for (owner, id, added) in rows {
+                    known.entry((owner, id)).or_insert(added);
+                }
+            }
+            self.apply_playlist_dates();
         }
         if let Some(home) = home {
             if self.home_sources.is_empty() {
@@ -186,6 +204,75 @@ impl MusicApp {
                     .collect();
             }
         }
+    }
+
+    /// The account's own playlist open now, if any.
+    pub(super) fn own_playlist(&self) -> Option<AlbumRef> {
+        let owner = self.session.as_ref()?.profile.id;
+        match &self.page {
+            MusicPage::Playlist(reference) if reference.owner_id == owner => {
+                Some(reference.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Fill missing dates of own playlists from the saved ones, and save new
+    /// dates VK or the background fill brought.
+    pub(super) fn apply_playlist_dates(&mut self) {
+        let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
+            return;
+        };
+        let mut changed = false;
+        let keys: Vec<String> = self.details.keys().cloned().collect();
+        for detail_key in keys {
+            let Some(page) = self.details.get_mut(&detail_key) else {
+                continue;
+            };
+            let DetailPage::Playlist(data) = Arc::make_mut(page) else {
+                continue;
+            };
+            if data.album.owner_id != owner {
+                continue;
+            }
+            let known = self
+                .playlist_dates
+                .entry(playlist_key(&data.album))
+                .or_default();
+            for track in &mut data.tracks {
+                match track.added {
+                    Some(added) => {
+                        if known.insert(track.key(), added) != Some(added) {
+                            changed = true;
+                        }
+                    }
+                    None => track.added = known.get(&track.key()).copied(),
+                }
+            }
+        }
+        if changed && !cfg!(test) && !self.demo {
+            let snapshot: screen_cache::PlaylistDates = self
+                .playlist_dates
+                .iter()
+                .map(|(playlist, rows)| {
+                    (
+                        playlist.clone(),
+                        rows.iter()
+                            .map(|((o, i), added)| (*o, *i, *added))
+                            .collect(),
+                    )
+                })
+                .collect();
+            if let Ok(worker) = thread::Builder::new()
+                .name("vk-screen-cache-save".into())
+                .spawn(move || {
+                    let _ = screen_cache::save_playlist_dates(owner, &snapshot);
+                })
+            {
+                self.workers.push(worker);
+            }
+        }
+        self.track_view_cache.invalidate();
     }
 
     /// Save what Home shows now, after a fresh VK answer.

@@ -1101,7 +1101,12 @@ impl Library {
         let known_metadata: HashMap<_, _> = self
             .tracks
             .iter()
-            .map(|track| (track.key(), (track.unavailable, track.library_source_key)))
+            .map(|track| {
+                (
+                    track.key(),
+                    (track.unavailable, track.library_source_key, track.added),
+                )
+            })
             .collect();
         let mut old = std::mem::take(&mut self.tracks);
         let tail = old.split_off(self.fresh_prefix.min(old.len()));
@@ -1111,9 +1116,11 @@ impl Library {
             .map(|(index, track)| (track.key(), index))
             .collect();
         for mut track in page.items {
-            if let Some((unavailable, source)) = known_metadata.get(&track.key()) {
+            if let Some((unavailable, source, added)) = known_metadata.get(&track.key()) {
                 track.unavailable = track.unavailable.or(*unavailable);
                 track.library_source_key = track.library_source_key.or(*source);
+                // Website rows carry no dates: keep the ones already loaded.
+                track.added = track.added.or(*added);
             }
             if let Some(index) = known.get(&track.key()).copied() {
                 old[index] = track;
@@ -1273,6 +1280,8 @@ pub struct MusicApp {
     mix_after_queue_save_failed: bool,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
     screen_cache_owner: Option<i64>,
+    /// Known "date added" of own playlist tracks, by playlist.
+    playlist_dates: HashMap<String, HashMap<(i64, i64), i64>>,
     /// Column sort per track list, by its queue origin.
     track_sorts: HashMap<String, track_sort::Sort>,
     /// The last sorted row order and what it was built from.
@@ -1629,6 +1638,7 @@ impl MusicApp {
             mix_after_queue_save_failed: false,
             screen_cache: None,
             screen_cache_owner: None,
+            playlist_dates: HashMap::new(),
             track_sorts: HashMap::new(),
             sort_cache: None,
             library_tail: Vec::new(),
@@ -1833,6 +1843,7 @@ impl MusicApp {
         self.pending_link = None;
         self.screen_cache = None;
         self.screen_cache_owner = None;
+        self.playlist_dates.clear();
         self.library_tail.clear();
         self.library_tail_start = None;
         self.library_tail_request = None;
@@ -5865,19 +5876,21 @@ impl MusicApp {
     /// fill them 100 tracks at a time from the API, which reports when the
     /// account's own copy was added; this enables "Date added".
     fn hydrate_library_dates(&mut self, ctx: &egui::Context) {
-        if self.demo
-            || self.metadata_request.is_some()
-            || self.page != MusicPage::Library
-            || self.settings_open
-        {
+        if self.demo || self.metadata_request.is_some() || self.settings_open {
             return;
         }
         let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
             return;
         };
-        let keys: Vec<_> = self
-            .library
-            .tracks
+        // My music, or an own playlist: its own copies' dates come the same way.
+        let tracks: &[Track] = if self.page == MusicPage::Library {
+            &self.library.tracks
+        } else if self.own_playlist().is_some() {
+            self.view_tracks()
+        } else {
+            return;
+        };
+        let keys: Vec<_> = tracks
             .iter()
             .filter(|track| {
                 track.added.is_none()
@@ -6029,6 +6042,7 @@ impl MusicApp {
         if library_changed {
             self.save_library(ctx);
         }
+        self.apply_playlist_dates();
         ctx.request_repaint();
     }
 
@@ -6202,6 +6216,7 @@ impl MusicApp {
                 }
                 self.details.insert(key.clone(), Arc::new(page));
                 self.detail_error = None;
+                self.apply_playlist_dates();
             }
             Err(error @ WebAudioError::WrongAccount) => {
                 self.reset();
@@ -10800,6 +10815,7 @@ mod tests {
             mix_after_queue_save_failed: false,
             screen_cache: None,
             screen_cache_owner: None,
+            playlist_dates: HashMap::new(),
             track_sorts: HashMap::new(),
             sort_cache: None,
             library_tail: Vec::new(),

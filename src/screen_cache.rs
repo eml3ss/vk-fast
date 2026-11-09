@@ -82,6 +82,10 @@ pub struct Library {
     pub artists: Vec<SidebarArtist>,
 }
 
+/// "Date added" of tracks in the account's own playlists, by playlist:
+/// `"owner_id"_"playlist_id"` -> (track owner, track id, Unix seconds).
+pub type PlaylistDates = std::collections::HashMap<String, Vec<(i64, i64, i64)>>;
+
 #[derive(Serialize, Deserialize)]
 struct Stored<T> {
     format_version: u32,
@@ -126,6 +130,14 @@ pub fn load_home(account_id: i64) -> io::Result<Option<Home>> {
 /// Write off the UI thread.
 pub fn save_home(account_id: i64, home: &Home) -> io::Result<()> {
     save(account_id, "home", home)
+}
+
+pub fn load_playlist_dates(account_id: i64) -> io::Result<Option<PlaylistDates>> {
+    load(account_id, "dates")
+}
+
+pub fn save_playlist_dates(account_id: i64, dates: &PlaylistDates) -> io::Result<()> {
+    save(account_id, "dates", dates)
 }
 
 pub fn load_library(account_id: i64) -> io::Result<Option<Library>> {

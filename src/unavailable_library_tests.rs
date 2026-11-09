@@ -305,3 +305,15 @@ fn rows_the_heart_shows_as_not_saved_stay_out_of_my_music() {
     assert_eq!(library.total, Some(2));
     assert!(library.exhausted);
 }
+
+#[test]
+fn loaded_dates_survive_a_refreshed_page_without_them() {
+    let mut library = Library::default();
+    let mut first = page(2, &[1, 2]);
+    first.items[0].added = Some(1_660_000_000);
+    library.refresh(first);
+    // The website's next answer for the same tracks has no dates.
+    library.refresh(page(2, &[1, 2]));
+    assert_eq!(library.tracks[0].added, Some(1_660_000_000));
+    assert_eq!(library.tracks[1].added, None);
+}
