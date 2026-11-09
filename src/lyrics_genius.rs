@@ -159,7 +159,7 @@ fn matching_song(data: &Value, query: &Query) -> Result<u64, Error> {
 
 fn parse_song(song: &Value, query: &Query) -> Result<Lyrics, Error> {
     if !song_matches(song, query) {
-        return Err(Error::WrongLyrics);
+        return Err(Error::NotFound);
     }
     let text = song
         .pointer("/lyrics/plain")

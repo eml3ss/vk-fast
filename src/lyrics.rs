@@ -100,7 +100,6 @@ pub enum Error {
     Captcha,
     RateLimited(u64),
     NotFound,
-    WrongLyrics,
     Network,
     Format,
     Storage,
@@ -137,10 +136,6 @@ impl Error {
             Self::NotFound => t(
                 "Текст этого трека не найден.",
                 "Lyrics for this track were not found.",
-            ),
-            Self::WrongLyrics => t(
-                "Источник вернул неподходящий текст. Попробуйте позже.",
-                "The source returned incorrect lyrics. Try again later.",
             ),
             Self::Network => t("Не удалось загрузить текст.", "Could not load lyrics."),
             Self::Format => t(
@@ -563,7 +558,8 @@ fn validate_lines(lines: &[Line]) -> Result<(), Error> {
     {
         return Err(Error::Format);
     }
-    // A retired API can return a successful response with this placeholder.
+    // A retired API can return a successful response with this placeholder;
+    // like a different song or a translation, it means no lyrics here.
     let prefix = lines
         .iter()
         .flat_map(|line| line.text.split_whitespace())
@@ -572,7 +568,7 @@ fn validate_lines(lines: &[Line]) -> Result<(), Error> {
         .join(" ")
         .to_lowercase();
     if prefix == "wob gopini den tefe woxica fero" {
-        return Err(Error::WrongLyrics);
+        return Err(Error::NotFound);
     }
     Ok(())
 }
@@ -673,7 +669,7 @@ fn validate_match(track: &Value, query: &Query) -> Result<(), Error> {
     ) {
         Ok(())
     } else {
-        Err(Error::WrongLyrics)
+        Err(Error::NotFound)
     }
 }
 
@@ -776,7 +772,7 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
                         language(subtitle.get("subtitle_language")),
                     ) && !original.eq_ignore_ascii_case(actual)
                     {
-                        subtitle_error = Some(Error::WrongLyrics);
+                        subtitle_error = Some(Error::NotFound);
                         continue;
                     }
                     match parse_subtitle(subtitle) {
@@ -940,22 +936,19 @@ mod tests {
     }
 
     #[test]
-    fn successful_but_wrong_matches_and_placeholder_text_are_rejected() {
+    fn wrong_matches_and_placeholder_text_count_as_not_found() {
         let data = json!({"macro_calls":{
             "matcher.track.get":call(json!({"track":{"track_name":"A different song","artist_name":"Another artist"}})),
             "track.lyrics.get":call(json!({"lyrics":{"lyrics_body":"Wrong synthetic text"}}))
         }});
-        assert_eq!(
-            parse_macro(&data, &query()).unwrap_err(),
-            Error::WrongLyrics
-        );
+        assert_eq!(parse_macro(&data, &query()).unwrap_err(), Error::NotFound);
         for text in [
             "Wob gopini den\nTefe woxica fero",
             " WOB   gopini den\n\nTefe woxica fero ",
         ] {
             assert_eq!(
                 parse_plain(&json!({"lyrics_body":text})).unwrap_err(),
-                Error::WrongLyrics
+                Error::NotFound
             );
         }
         assert_eq!(
@@ -963,7 +956,7 @@ mod tests {
                 &json!({"subtitle_body":"[00:01]Wob gopini den\n[00:03]Tefe woxica fero"})
             )
             .unwrap_err(),
-            Error::WrongLyrics
+            Error::NotFound
         );
         assert!(same_title(
             "Посмотри",
