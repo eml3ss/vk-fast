@@ -614,11 +614,39 @@ const MIX_COLORS: [Color32; 4] = [
     Color32::from_rgb(144, 51, 175),
 ];
 
+/// VK Mix's colors with the left shade laid over them, sampled finely
+/// enough (on every original stop too) to keep both gradients' shape.
+fn shaded_mix_colors() -> Vec<Color32> {
+    const SAMPLES: usize = 16 * (MIX_COLORS.len() - 1) + 1;
+    let shade = crate::detail_ui::fade_color(Some(MIX_COLORS[0])).to_array();
+    let lerp = |a: [u8; 4], b: [u8; 4], t: f32| -> [f32; 4] {
+        std::array::from_fn(|i| egui::lerp(f32::from(a[i])..=f32::from(b[i]), t))
+    };
+    (0..SAMPLES)
+        .map(|sample| {
+            let x = sample as f32 / (SAMPLES - 1) as f32;
+            let position = x * (MIX_COLORS.len() - 1) as f32;
+            let index = (position.floor() as usize).min(MIX_COLORS.len() - 2);
+            let base = lerp(
+                MIX_COLORS[index].to_array(),
+                MIX_COLORS[index + 1].to_array(),
+                position - index as f32,
+            );
+            // Premultiplied "over", as the shade drawn on top would blend.
+            let over = lerp(shade, [0; 4], x);
+            let keep = 1.0 - over[3] / 255.0;
+            let [r, g, b, a] = std::array::from_fn(|i| (over[i] + base[i] * keep).round() as u8);
+            Color32::from_rgba_premultiplied(r, g, b, a)
+        })
+        .collect()
+}
+
 fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 208.0), Sense::hover());
-    theme::gradient_stops(ui.painter(), rect, 16.0, &MIX_COLORS);
-    // The artist header's shade from the left, in the card's own blue.
-    crate::detail_ui::fade(ui.painter(), rect, Some(MIX_COLORS[0]));
+    // The artist header's shade from the left, in the card's own blue,
+    // mixed into the card's colors: one shape keeps the rounded corners
+    // clean, where a second one on top leaves a light rim around them.
+    theme::gradient_stops(ui.painter(), rect, 16.0, &shaded_mix_colors());
     let inner = rect.shrink(24.0);
     let text_right = inner.right();
     let mut text = ui.new_child(
@@ -1114,6 +1142,29 @@ fn empty_collections(ui: &mut egui::Ui, view: &HomeView<'_>) {
 mod tests {
     use super::*;
     use crate::carousel::{next_stop, previous_stop};
+
+    #[test]
+    fn the_mix_card_is_one_opaque_shape_shaded_from_the_left() {
+        let colors = shaded_mix_colors();
+        assert!(
+            colors.iter().all(|color| color.a() == 255),
+            "no see-through rim"
+        );
+        assert_eq!(colors.last(), MIX_COLORS.last(), "no shade on the right");
+        let brightness =
+            |color: Color32| u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b());
+        assert!(
+            brightness(colors[0]) * 2 < brightness(MIX_COLORS[0]),
+            "dark on the left"
+        );
+        // Every original stop is sampled, so the card keeps its colors.
+        let step = (colors.len() - 1) / (MIX_COLORS.len() - 1);
+        assert!(
+            brightness(colors[step]) < brightness(MIX_COLORS[1]),
+            "the shade thins out"
+        );
+        assert!(brightness(colors[2 * step]) > brightness(colors[step]) / 2);
+    }
 
     #[derive(Clone, Copy)]
     struct PlayState {
