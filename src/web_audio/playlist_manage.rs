@@ -329,7 +329,7 @@ impl WebAudioClient {
     }
 }
 
-fn native_bool(value: Option<&Value>) -> Option<bool> {
+pub(super) fn native_bool(value: Option<&Value>) -> Option<bool> {
     match value? {
         Value::Bool(value) => Some(*value),
         Value::Number(value) if value.as_u64() == Some(0) => Some(false),

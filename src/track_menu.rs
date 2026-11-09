@@ -28,6 +28,8 @@ pub struct View<'a> {
     /// Marked "Не нравится" in this session; the item then undoes it.
     pub disliked: bool,
     pub dislike_pending: bool,
+    /// The open playlist this row can be removed from, checked by the caller.
+    pub removable_from: Option<&'a AlbumRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub enum Action {
     AddToQueue,
     ToggleLike,
     AddToPlaylist(AlbumRef),
+    RemoveFromPlaylist(AlbumRef),
     TrackMix,
     Artist(ArtistRef),
     Album,
@@ -192,6 +195,19 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
             action = result.inner.or(action.take());
         }
     });
+    if let Some(playlist) = view.removable_from
+        && row(
+            ui,
+            Icon::PlaylistRemove,
+            language.text("Удалить из плейлиста", "Remove from playlist"),
+            view.connected,
+            false,
+            false,
+        )
+        .clicked()
+    {
+        action = Some(Action::RemoveFromPlaylist(playlist.clone()));
+    }
     if row(
         ui,
         Icon::Dislike,
@@ -509,6 +525,7 @@ mod tests {
         liked: bool,
         pending: bool,
         disliked: bool,
+        removable: Option<AlbumRef>,
     }
 
     impl Harness {
@@ -525,6 +542,7 @@ mod tests {
                 liked: true,
                 pending: false,
                 disliked: false,
+                removable: None,
             }
         }
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
@@ -564,6 +582,7 @@ mod tests {
                                 connected: true,
                                 disliked: self.disliked,
                                 dislike_pending: false,
+                                removable_from: self.removable.as_ref(),
                             },
                         );
                     });
@@ -656,6 +675,26 @@ mod tests {
                 )
                 .is_some()
             );
+        }
+    }
+
+    #[test]
+    fn remove_from_playlist_appears_only_in_an_editable_open_playlist() {
+        for language in [Language::Russian, Language::English] {
+            let caption = language.text("Удалить из плейлиста", "Remove from playlist");
+            let mut h = Harness::new(language);
+            assert!(text_rect(&h.warm(), caption).is_none());
+            h.removable = Some(playlist());
+            let output = h.warm();
+            let add = text_rect(
+                &output,
+                language.text("Добавить в плейлист", "Add to playlist"),
+            )
+            .unwrap();
+            let remove = text_rect(&output, caption).unwrap();
+            assert!(remove.top() > add.bottom() && remove.top() - add.bottom() < ROW_HEIGHT);
+            h.click(remove.center());
+            assert_eq!(h.action, Some(Action::RemoveFromPlaylist(playlist())));
         }
     }
 

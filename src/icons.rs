@@ -42,6 +42,7 @@ pub enum Icon {
     Expand,
     Collapse,
     PlaylistAdd,
+    PlaylistRemove,
     Radio,
     Album,
     /// Two beamed notes, for music genres.
@@ -683,7 +684,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(17.0, 12.0), (17.0, 21.0)]);
             line(&[(12.5, 16.5), (21.5, 16.5)]);
         }
-        Icon::PlaylistAdd => {
+        Icon::PlaylistAdd | Icon::PlaylistRemove => {
             let pixels = painter.ctx().pixels_per_point();
             let width = (stroke.width * pixels).round().max(1.0);
             let top = (point(4.0, 4.0).y * pixels).round();
@@ -706,7 +707,9 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 (14.5, 14.5),
                 (12.0, 5.0),
             ]);
-            line(&[(18.0, 16.0), (18.0, 22.0)]);
+            if matches!(icon, Icon::PlaylistAdd) {
+                line(&[(18.0, 16.0), (18.0, 22.0)]);
+            }
             line(&[(15.0, 19.0), (21.0, 19.0)]);
         }
         Icon::Radio => {
@@ -1151,6 +1154,7 @@ mod tests {
             Icon::Expand,
             Icon::Collapse,
             Icon::PlaylistAdd,
+            Icon::PlaylistRemove,
             Icon::Radio,
             Icon::Album,
             Icon::CopyLink,

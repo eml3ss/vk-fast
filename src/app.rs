@@ -34,6 +34,8 @@ mod notice_fade;
 mod owner_page_tests;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
+#[path = "playlist_removal.rs"]
+mod playlist_removal;
 #[path = "queue_app.rs"]
 mod queue_app;
 #[path = "screen_cache_app.rs"]
@@ -1207,6 +1209,7 @@ pub struct MusicApp {
     library_undo: Option<LibraryUndo>,
     /// A dismissed error notice fading out until this moment.
     error_closing: Option<Instant>,
+    playlist_removal: playlist_removal::State,
     playlist_request: Option<PlaylistRequest>,
     playlists_requested: bool,
     playlist_error: Option<WebAudioError>,
@@ -1568,6 +1571,7 @@ impl MusicApp {
             track_menu_notice: None,
             library_undo: None,
             error_closing: None,
+            playlist_removal: playlist_removal::State::default(),
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -1905,6 +1909,7 @@ impl MusicApp {
         self.track_menu_notice = None;
         self.library_undo = None;
         self.error_closing = None;
+        self.playlist_removal.reset();
         self.playlist_request = None;
         self.playlists_requested = false;
         self.playlist_error = None;
@@ -7763,6 +7768,7 @@ impl MusicApp {
 
     fn track_context_menu(&mut self, ui: &mut egui::Ui, track: &Track) -> Option<TrackAction> {
         let connected = !self.demo && self.search_ready();
+        let removable = self.removable_playlist(track);
         let action = track_menu::show(
             ui,
             track_menu::View {
@@ -7782,6 +7788,7 @@ impl MusicApp {
                 connected,
                 disliked: self.disliked.contains(&track.key()),
                 dislike_pending: self.dislike_request.is_some(),
+                removable_from: removable.as_ref(),
             },
         )?;
         Some(TrackAction::Menu(track.clone(), action))
@@ -7802,6 +7809,9 @@ impl MusicApp {
             track_menu::Action::ToggleDislike => self.toggle_dislike(ctx, track),
             track_menu::Action::AddToPlaylist(playlist) => {
                 self.add_track_to_playlist(ctx, track.clone(), playlist)
+            }
+            track_menu::Action::RemoveFromPlaylist(playlist) => {
+                self.remove_from_playlist(ctx, track, playlist)
             }
             track_menu::Action::TrackMix => self.play_track_mix(
                 ctx,
@@ -10262,13 +10272,21 @@ impl MusicApp {
                     self.library_undo = None;
                 } else {
                     // The undo belongs to this notice only, not to a newer one.
-                    let undo = self
-                        .library_undo
+                    let playlist_undo = self
+                        .playlist_removal
+                        .pending
                         .as_ref()
-                        .filter(|undo| undo.until == until)
-                        .map(|_| {
-                            self.like_request.is_none() && self.playlist_add_request.is_none()
-                        });
+                        .is_some_and(|removal| removal.until == until);
+                    let undo = if playlist_undo {
+                        Some(true)
+                    } else {
+                        self.library_undo
+                            .as_ref()
+                            .filter(|undo| undo.until == until)
+                            .map(|_| {
+                                self.like_request.is_none() && self.playlist_add_request.is_none()
+                            })
+                    };
                     let opacity = notice_fade::opacity(ui.ctx(), until);
                     let mut undone = false;
                     egui::Area::new(egui::Id::new("track-menu-notice"))
@@ -10292,7 +10310,11 @@ impl MusicApp {
                             });
                         });
                     if undone {
-                        self.undo_library_removal(ui.ctx());
+                        if playlist_undo {
+                            self.undo_playlist_removal();
+                        } else {
+                            self.undo_library_removal(ui.ctx());
+                        }
                         if let Some((_, until)) = &mut self.track_menu_notice {
                             notice_fade::dismiss(ui.ctx(), until);
                         }
@@ -10385,6 +10407,7 @@ impl MusicApp {
         self.poll_like(ctx);
         self.poll_dislike(ctx);
         self.poll_playlist_add(ctx);
+        self.poll_playlist_removal(ctx);
         self.poll_playlist_create(ctx);
         self.poll_audio_upload(ctx);
         self.poll_playlist_actions(ctx);
@@ -10531,6 +10554,9 @@ impl Drop for MusicApp {
         }
         self.playback_pending = None;
         self.player.stop();
+        // A removal whose Undo was still offered is sent; the worker below
+        // is awaited like other account changes.
+        self.send_playlist_removal();
         if self.volume_save_at.is_some() {
             let _ = save_volume_value(self.player.snapshot().volume);
         }
@@ -10926,6 +10952,7 @@ mod tests {
             track_menu_notice: None,
             library_undo: None,
             error_closing: None,
+            playlist_removal: playlist_removal::State::default(),
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,

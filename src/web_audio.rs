@@ -2140,52 +2140,14 @@ impl WebAudioClient {
             return Err(WebAudioError::Format);
         }
         let generation = self.home_owner(expected_owner, canceled)?;
-        let mut identity = vec![
-            ("owner_id", playlist.owner_id.to_string()),
-            ("playlist_id", playlist.id.to_string()),
-        ];
-        if let Some(access_key) = &playlist.access_key {
-            identity.push(("access_key", access_key.clone()));
-        }
-        let metadata = request(generation, "audio.getPlaylistById", identity)?;
-        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
-        let fresh = metadata.get("playlist").unwrap_or(&metadata);
-        let returned = AlbumRef::from_value(fresh).ok_or(WebAudioError::Format)?;
-        if returned.owner_id != playlist.owner_id || returned.id != playlist.id {
-            return Err(WebAudioError::Format);
-        }
-        if !playlist_can_add_tracks(fresh) {
-            return Err(WebAudioError::Rejected);
-        }
-        let access_raw_id = {
-            let state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
-            if canceled.load(Ordering::Acquire) {
-                return Err(WebAudioError::Canceled);
-            }
-            if state.verified_owner != Some(expected_owner) || state.generation != generation {
-                return Err(WebAudioError::Unverified);
-            }
-            let raw_id = format!("{}_{}", source.0, source.1);
-            if let Some(key) = state
-                .streams
-                .get(&source)
-                .and_then(|info| info.access_key.as_ref())
-                .filter(|key| !key.is_empty())
-            {
-                // audio_ids is a comma-separated native API field. An opaque
-                // access key must never introduce another audio identity.
-                if key.len() > 16_384
-                    || key.chars().any(|character| {
-                        character == ',' || character.is_whitespace() || character.is_control()
-                    })
-                {
-                    return Err(WebAudioError::Format);
-                }
-                format!("{raw_id}_{}", key.as_str())
-            } else {
-                raw_id
-            }
-        };
+        self.confirm_editable_playlist(
+            expected_owner,
+            generation,
+            playlist,
+            canceled,
+            &mut request,
+        )?;
+        let access_raw_id = self.playlist_audio_id(expected_owner, generation, source, canceled)?;
         // Match MusicPlaylistAudiosOwningService.add exactly: source access ID
         // goes in audio_ids, not a separate access_key or an audio.add call.
         let response = request(
@@ -2217,6 +2179,145 @@ impl WebAudioClient {
             )?;
         }
         Ok(owned)
+    }
+
+    /// Reads the playlist afresh: tracks change only where VK allows it now.
+    fn confirm_editable_playlist(
+        &self,
+        expected_owner: i64,
+        generation: u64,
+        playlist: &AlbumRef,
+        canceled: &AtomicBool,
+        request: &mut impl FnMut(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<(), WebAudioError> {
+        let mut identity = vec![
+            ("owner_id", playlist.owner_id.to_string()),
+            ("playlist_id", playlist.id.to_string()),
+        ];
+        if let Some(access_key) = &playlist.access_key {
+            identity.push(("access_key", access_key.clone()));
+        }
+        let metadata = request(generation, "audio.getPlaylistById", identity)?;
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
+        let fresh = metadata.get("playlist").unwrap_or(&metadata);
+        let returned = AlbumRef::from_value(fresh).ok_or(WebAudioError::Format)?;
+        if returned.owner_id != playlist.owner_id || returned.id != playlist.id {
+            return Err(WebAudioError::Format);
+        }
+        if !playlist_can_add_tracks(fresh) {
+            return Err(WebAudioError::Rejected);
+        }
+        Ok(())
+    }
+
+    /// The native audio_ids value: raw ID plus the stream's access key.
+    fn playlist_audio_id(
+        &self,
+        expected_owner: i64,
+        generation: u64,
+        source: (i64, i64),
+        canceled: &AtomicBool,
+    ) -> Result<String, WebAudioError> {
+        let state = self.state.lock().map_err(|_| WebAudioError::Unverified)?;
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        if state.verified_owner != Some(expected_owner) || state.generation != generation {
+            return Err(WebAudioError::Unverified);
+        }
+        let raw_id = format!("{}_{}", source.0, source.1);
+        if let Some(key) = state
+            .streams
+            .get(&source)
+            .and_then(|info| info.access_key.as_ref())
+            .filter(|key| !key.is_empty())
+        {
+            // audio_ids is a comma-separated native API field. An opaque
+            // access key must never introduce another audio identity.
+            if key.len() > 16_384
+                || key.chars().any(|character| {
+                    character == ',' || character.is_whitespace() || character.is_control()
+                })
+            {
+                return Err(WebAudioError::Format);
+            }
+            Ok(format!("{raw_id}_{}", key.as_str()))
+        } else {
+            Ok(raw_id)
+        }
+    }
+
+    /// Remove one audio from an editable playlist, as VK's own playlist
+    /// owning service does with the row's access ID.
+    pub fn remove_from_playlist(
+        &self,
+        expected_owner: i64,
+        playlist: &AlbumRef,
+        audio: (i64, i64),
+        canceled: &AtomicBool,
+    ) -> Result<(), WebAudioError> {
+        self.remove_from_playlist_request(
+            expected_owner,
+            playlist,
+            audio,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn remove_from_playlist_request(
+        &self,
+        expected_owner: i64,
+        playlist: &AlbumRef,
+        audio: (i64, i64),
+        canceled: &AtomicBool,
+        mut request: impl FnMut(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<(), WebAudioError> {
+        if playlist.owner_id == 0
+            || playlist.owner_id.checked_abs().is_none()
+            || playlist.id <= 0
+            || audio.0 == 0
+            || audio.0.checked_abs().is_none()
+            || audio.1 <= 0
+        {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        self.confirm_editable_playlist(
+            expected_owner,
+            generation,
+            playlist,
+            canceled,
+            &mut request,
+        )?;
+        let audio_ids = self.playlist_audio_id(expected_owner, generation, audio, canceled)?;
+        let response = request(
+            generation,
+            "audio.removeFromPlaylist",
+            vec![
+                ("owner_id", playlist.owner_id.to_string()),
+                ("playlist_id", playlist.id.to_string()),
+                ("audio_ids", audio_ids),
+            ],
+        )?;
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
+        // VK's own client ignores this reply; only an explicit refusal fails.
+        if playlist_manage::native_bool(Some(&response)) == Some(false)
+            || playlist_manage::native_bool(response.get("success")) == Some(false)
+        {
+            return Err(WebAudioError::Rejected);
+        }
+        Ok(())
     }
 
     /// Remove an owned audio. The native API can return several deleted copies,
@@ -10265,6 +10366,66 @@ mod playlist_action_tests {
                 new.original_url.is_none() && new.reload_id.is_none() && new.access_key.is_none(),
                 "A new owned audio must not inherit the source's credentials or reload identity"
             );
+        }
+    }
+
+    #[test]
+    fn playlist_removal_confirms_permission_and_sends_the_row_access_identity() {
+        let client = client();
+        let target = playlist(42);
+        let mut calls = Vec::new();
+        client
+            .remove_from_playlist_request(
+                42,
+                &target,
+                (-200, 7),
+                &AtomicBool::new(false),
+                |_, method, params| {
+                    calls.push(method);
+                    if method == "audio.getPlaylistById" {
+                        Ok(json!({"playlist":editable(42)}))
+                    } else {
+                        assert_eq!(method, "audio.removeFromPlaylist");
+                        assert_eq!(
+                            params,
+                            vec![
+                                ("owner_id", "42".into()),
+                                ("playlist_id", "10".into()),
+                                ("audio_ids", "-200_7_source-access".into())
+                            ]
+                        );
+                        Ok(json!(1))
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(calls, ["audio.getPlaylistById", "audio.removeFromPlaylist"]);
+        // An explicit refusal fails; a read-only playlist is never written.
+        for (metadata, reply, writes) in [
+            (editable(42), json!(0), 1),
+            (
+                json!({"owner_id":42,"id":10,"title":"Saved","permissions":{"edit":false}}),
+                json!(1),
+                0,
+            ),
+        ] {
+            let mut written = 0;
+            let result = client.remove_from_playlist_request(
+                42,
+                &target,
+                (-200, 7),
+                &AtomicBool::new(false),
+                |_, method, _| {
+                    if method == "audio.getPlaylistById" {
+                        Ok(json!({"playlist":metadata.clone()}))
+                    } else {
+                        written += 1;
+                        Ok(reply.clone())
+                    }
+                },
+            );
+            assert_eq!(result, Err(WebAudioError::Rejected));
+            assert_eq!(written, writes);
         }
     }
 
