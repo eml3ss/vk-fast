@@ -112,6 +112,61 @@ impl PlaybackOrder {
         true
     }
 
+    /// How many "Up next" rows retrace history after stepping back; they
+    /// come before the added tracks and keep their order.
+    pub fn history_ahead(&self, current: Option<TrackKey>) -> usize {
+        if self.repeats(current).is_some() {
+            return 0;
+        }
+        match current {
+            Some(key) if self.history.get(self.cursor) == Some(&key) => {
+                self.history.len().saturating_sub(self.cursor + 1)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Whether the source rows of "Up next" follow an order that can be
+    /// changed: the source order itself, or the shuffle's remaining picks
+    /// (not a repeat-all wrap that is drawn afresh).
+    pub fn source_reorderable(&self, current: Option<TrackKey>) -> bool {
+        if self.repeats(current).is_some() {
+            return false;
+        }
+        if !self.shuffle {
+            return true;
+        }
+        let anchor = current.and_then(|key| self.anchor(key));
+        self.remaining.iter().any(|key| Some(*key) != anchor)
+    }
+
+    /// Moves a shuffled pick next to another one; the source order of an
+    /// unshuffled list is changed by its owner instead.
+    pub fn move_remaining(&mut self, key: TrackKey, other: TrackKey, after: bool) -> bool {
+        if !self.shuffle || key == other {
+            return false;
+        }
+        let Some(from) = self
+            .remaining
+            .iter()
+            .position(|candidate| *candidate == key)
+        else {
+            return false;
+        };
+        if !self.remaining.contains(&other) {
+            return false;
+        }
+        self.remaining.remove(from);
+        let at = self
+            .remaining
+            .iter()
+            .position(|candidate| *candidate == other)
+            .unwrap();
+        self.remaining.insert(if after { at + 1 } else { at }, key);
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
     pub fn clear_queued(&mut self) {
         if !self.queued.is_empty() {
             self.queued.clear();
@@ -942,6 +997,43 @@ mod tests {
             upcoming[3].key, source[1],
             "the source continues after them"
         );
+    }
+
+    #[test]
+    fn shuffled_picks_reorder_and_history_rows_are_counted() {
+        let source = keys(5);
+        let mut order = shuffled(&source, Some(source[0]));
+        let upcoming: Vec<_> = order
+            .upcoming(Some(source[0]), false)
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect();
+        assert!(order.source_reorderable(Some(source[0])));
+        assert_eq!(order.history_ahead(Some(source[0])), 0);
+        let (first, last) = (upcoming[0], *upcoming.last().unwrap());
+        assert!(order.move_remaining(last, first, false));
+        let moved: Vec<_> = order
+            .upcoming(Some(source[0]), false)
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(moved[0], last);
+        assert_eq!(&moved[1..], &upcoming[..upcoming.len() - 1]);
+        assert_eq!(
+            order.next(source[0], false),
+            Some(last),
+            "next follows the new order"
+        );
+        assert!(!order.move_remaining(last, last, true));
+        // Stepping back leaves the played rows ahead, before the rest.
+        let next = order.advance_next(source[0], false, false).unwrap();
+        order.advance_previous(next, false);
+        assert_eq!(order.history_ahead(Some(source[0])), 1);
+        // Repeat one shows only the current track: nothing moves.
+        order.cycle_repeat();
+        order.cycle_repeat();
+        assert_eq!(order.repeat(), RepeatMode::One);
+        assert!(!order.source_reorderable(Some(source[0])));
     }
 
     #[test]

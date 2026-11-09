@@ -26,6 +26,11 @@ enum Action {
         from: usize,
         to: usize,
     },
+    /// A source track dragged next to another source track.
+    MoveSource {
+        key: TrackKey,
+        neighbour: row_drag::Neighbour<TrackKey>,
+    },
     Clear,
     Track(Box<TrackAction>),
 }
@@ -245,23 +250,35 @@ impl MusicApp {
                         50.0,
                         panel.upcoming.len(),
                         |ui, range| {
-                            // Added tracks come first in "Up next"; only they
-                            // can be dragged, and only among themselves.
-                            let start = panel
-                                .upcoming
-                                .iter()
-                                .position(|entry| entry.queued_id.is_some())
-                                .unwrap_or(0);
-                            let added = panel.upcoming[start..]
+                            // "Up next": rows retracing history, then the added
+                            // tracks, then the source. Added tracks and the
+                            // source each reorder within their own block.
+                            let len = panel.upcoming.len();
+                            let queued_start = self.play_order.history_ahead(current).min(len);
+                            let added = panel.upcoming[queued_start..]
                                 .iter()
                                 .take_while(|entry| entry.queued_id.is_some())
                                 .count();
+                            let source_start = queued_start + added;
+                            let source_movable = self.play_order.source_reorderable(current)
+                                && len > source_start + 1;
+                            let group = |index: usize| {
+                                if (queued_start..source_start).contains(&index) && added > 1 {
+                                    Some(queued_start..=source_start - 1)
+                                } else if index >= source_start && source_movable {
+                                    Some(source_start..=len - 1)
+                                } else {
+                                    None
+                                }
+                            };
                             let stride = 50.0 + ui.spacing().item_spacing.y;
                             let row_key = |index: usize| {
                                 let entry: Upcoming = panel.upcoming[index];
-                                entry.queued_id.unwrap_or_else(|| {
-                                    row_drag::track_key(entry.key) ^ index as u64
-                                })
+                                match entry.queued_id {
+                                    Some(id) => id,
+                                    None if index >= source_start => row_drag::track_key(entry.key),
+                                    None => row_drag::track_key(entry.key) ^ index as u64,
+                                }
                             };
                             let mut lane = row_drag::Lane::begin(
                                 ui,
@@ -269,17 +286,10 @@ impl MusicApp {
                                 ui.max_rect().top() - range.start as f32 * stride,
                                 stride,
                                 50.0,
-                                start..=(start + added).saturating_sub(1),
-                                |key| {
-                                    panel.upcoming[start..start + added]
-                                        .iter()
-                                        .position(|entry| entry.queued_id == Some(key))
-                                        .map(|index| start + index)
-                                },
+                                |key| (0..len).find(|index| row_key(*index) == key),
                             );
                             let lifted = lane.dragging() || lane.suppressing();
-                            let rows = range.start.saturating_sub(1)
-                                ..(range.end + 1).min(panel.upcoming.len());
+                            let rows = range.start.saturating_sub(1)..(range.end + 1).min(len);
                             for index in rows {
                                 let entry = panel.upcoming[index];
                                 let key = row_key(index);
@@ -296,8 +306,7 @@ impl MusicApp {
                                 else {
                                     continue;
                                 };
-                                self.row_drag_enabled =
-                                    added > 1 && entry.queued_id.is_some() && !lane.dragging();
+                                self.row_drag_enabled = group(index).is_some() && !lane.dragging();
                                 let row_action = ui
                                     .scope_builder(
                                         egui::UiBuilder::new().max_rect(rect).id_salt((
@@ -310,8 +319,10 @@ impl MusicApp {
                                     )
                                     .inner;
                                 self.row_drag_enabled = false;
-                                if let Some(started) = self.row_drag_started.take() {
-                                    lane.start(ui, index, key, started);
+                                if let Some(started) = self.row_drag_started.take()
+                                    && let Some(slots) = group(index)
+                                {
+                                    lane.start(ui, index, key, started, slots);
                                 }
                                 if !lifted
                                     && !lane.dragging()
@@ -324,10 +335,22 @@ impl MusicApp {
                                 }
                             }
                             if let Some(moved) = lane.moved {
-                                action = Some(Action::Move {
-                                    from: moved.from - start,
-                                    to: moved.to - start,
-                                });
+                                if moved.from < source_start {
+                                    action = Some(Action::Move {
+                                        from: moved.from - queued_start,
+                                        to: moved.to - queued_start,
+                                    });
+                                } else if let Some(neighbour) = (row_drag::Move {
+                                    from: moved.from - source_start,
+                                    to: moved.to - source_start,
+                                })
+                                .neighbour(|index| panel.upcoming[source_start + index].key)
+                                {
+                                    action = Some(Action::MoveSource {
+                                        key: panel.upcoming[moved.from].key,
+                                        neighbour,
+                                    });
+                                }
                             }
                             if let Some((from, rect)) = lane.finish(ui) {
                                 let entry = panel.upcoming[from];
@@ -371,6 +394,11 @@ impl MusicApp {
             {
                 self.play_order.move_queued(from, to);
             }
+            Some(Action::MoveSource { key, neighbour })
+                if self.queue_ui.stamp == Some(stamp) && self.play_order.revision() == stamp.0 =>
+            {
+                self.move_upcoming_source(key, neighbour);
+            }
             Some(Action::Clear) => {
                 self.play_order.clear_queued();
                 self.prune_queued_tracks();
@@ -379,6 +407,31 @@ impl MusicApp {
             _ => {}
         }
         close
+    }
+
+    /// Reorders what plays next from the source: the shuffle's picks, or
+    /// this session's copy of the source list. The library and the open
+    /// playlist themselves keep their order.
+    fn move_upcoming_source(&mut self, key: TrackKey, neighbour: row_drag::Neighbour<TrackKey>) {
+        if self.play_order.shuffle() {
+            let (other, after) = match neighbour {
+                row_drag::Neighbour::After(other) => (other, true),
+                row_drag::Neighbour::Before(other) => (other, false),
+            };
+            self.play_order.move_remaining(key, other, after);
+            return;
+        }
+        if self.play_queue.is_none() {
+            self.play_queue = Some(self.library.tracks.clone());
+            self.queue_origin.get_or_insert_with(|| "library".into());
+        }
+        if let Some(queue) = &mut self.play_queue
+            && row_drag::apply(queue, Track::key, key, neighbour)
+        {
+            // The drawer's row lookup follows the view revision.
+            self.track_view_cache.invalidate();
+            self.synchronize_order();
+        }
     }
 
     fn queue_row(
@@ -450,9 +503,9 @@ impl MusicApp {
             }
         }
         let right = if !current {
-            // Half the old gap to the overlay scrollbar; the cross icon itself
-            // starts 7 px inside its area, so the text still clears it.
-            remove.left() + 3.0
+            // 3 px from the overlay scrollbar; the cross icon starts 7 px
+            // inside its area, so the text ends where the icon begins.
+            remove.left() + 7.0
         } else {
             rect.right() - 5.0
         };

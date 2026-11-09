@@ -432,3 +432,73 @@ fn added_tracks_drag_into_a_new_order_with_the_source_rows_fixed() {
     );
     assert_eq!(app.play_queue.as_ref().unwrap().len(), 3);
 }
+
+#[test]
+fn source_rows_drag_into_a_new_play_order_without_touching_the_list_itself() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    app.page = MusicPage::Library;
+    app.queue_ui.open = true;
+    let library: Vec<_> = app.library.tracks.iter().map(Track::key).collect();
+    let size = egui::vec2(1280.0, 800.0);
+    let mut frame = 0;
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..4 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    // The drawer lists the two source tracks after the current one; the
+    // last is the lower of the two rows with its title.
+    let title = app.library.tracks[2].title.clone();
+    let row = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == title => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .filter(|rect| rect.left() > size.x * 0.5)
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap();
+    let pointer = |pos, pressed| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    };
+    let start = egui::pos2(row.right() + 30.0, row.center().y);
+    account_ui_frame(&ctx, &mut app, size, &mut frame, pointer(start, true));
+    let mut at = start;
+    for _ in 0..5 {
+        at.y -= 14.0;
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::PointerMoved(at)],
+        );
+    }
+    account_ui_frame(&ctx, &mut app, size, &mut frame, pointer(at, false));
+    let order: Vec<_> = app
+        .play_queue
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(Track::key)
+        .collect();
+    assert_eq!(order, [library[0], library[2], library[1]]);
+    assert_eq!(
+        app.play_order.next(library[0], false),
+        Some(library[2]),
+        "the dragged track plays next"
+    );
+    let unchanged: Vec<_> = app.library.tracks.iter().map(Track::key).collect();
+    assert_eq!(unchanged, library, "My music keeps its own order");
+    assert_eq!(app.playing.as_ref().unwrap().key(), library[0]);
+}

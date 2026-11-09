@@ -44,12 +44,7 @@ impl MusicApp {
         if self.demo {
             return None;
         }
-        let MusicPage::Playlist(reference) = &self.page else {
-            return None;
-        };
-        if self.own_playlist().is_none() && !self.can_edit_playlist(reference) {
-            return None;
-        }
+        let reference = &self.editable_own_playlist()?;
         let page = self.details.get(&self.page.detail_key()?)?;
         let DetailPage::Playlist(data) = page.as_ref() else {
             return None;
@@ -230,6 +225,7 @@ mod tests {
             cover_url: None,
         };
         app.page = MusicPage::Playlist(album.clone());
+        app.editable_playlists.push(album.clone());
         app.details.insert(
             app.page.detail_key().unwrap(),
             Arc::new(DetailPage::Playlist(AlbumPage {
@@ -276,6 +272,22 @@ mod tests {
         assert_eq!(rows(&app), (vec![1, 2, 3], Some(3)));
         assert!(app.playlist_removal.pending.is_none());
         assert!(app.workers.is_empty(), "Undo never reaches VK");
+    }
+
+    #[test]
+    fn followed_playlists_listed_under_the_account_offer_no_removal_or_drag() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let album = open_playlist(&mut app, &[1, 2]);
+        let track = page(2, &[1, 2]).items.remove(0);
+        assert_eq!(app.removable_playlist(&track), Some(album));
+        // VK lists a followed playlist under the account's own ID, but
+        // without edit rights: it is someone else's playlist.
+        app.editable_playlists.clear();
+        assert!(app.own_playlist().is_some());
+        assert!(app.editable_own_playlist().is_none());
+        assert!(app.removable_playlist(&track).is_none());
+        assert!(!app.playlist_reorderable());
     }
 
     #[test]

@@ -4780,22 +4780,14 @@ impl MusicApp {
         visit: &mut dyn FnMut(&Track),
     ) -> Option<TrackAction> {
         let lane_id = egui::Id::new(("track-row-drag", id));
-        let mut lane = row_drag::Lane::begin(
-            ui,
-            lane_id,
-            origin_y,
-            58.0,
-            54.0,
-            0..=count.saturating_sub(1),
-            |key| {
-                let tracks = self.view_tracks();
-                (0..count).position(|row| {
-                    tracks
-                        .get(source(row))
-                        .is_some_and(|track| row_drag::track_key(track.key()) == key)
-                })
-            },
-        );
+        let mut lane = row_drag::Lane::begin(ui, lane_id, origin_y, 58.0, 54.0, |key| {
+            let tracks = self.view_tracks();
+            (0..count).position(|row| {
+                tracks
+                    .get(source(row))
+                    .is_some_and(|track| row_drag::track_key(track.key()) == key)
+            })
+        });
         let lifted = lane.dragging() || lane.suppressing();
         let mut action = None;
         // One extra row at each edge covers rows sliding into view.
@@ -4823,7 +4815,7 @@ impl MusicApp {
                 .inner;
             self.row_drag_enabled = false;
             if let Some(started) = self.row_drag_started.take() {
-                lane.start(ui, row, key, started);
+                lane.start(ui, row, key, started, 0..=count.saturating_sub(1));
             }
             if !lifted && !lane.dragging() && intent.is_some() {
                 action = intent;

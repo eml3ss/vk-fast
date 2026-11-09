@@ -11,6 +11,8 @@ struct Drag {
     key: u64,
     from: usize,
     to: usize,
+    /// The rows this drag may reach: its own group.
+    slots: std::ops::RangeInclusive<usize>,
     grab_y: f32,
     pointer: egui::Pos2,
 }
@@ -104,7 +106,6 @@ pub(super) struct Lane {
     left: f32,
     width: f32,
     clip: egui::Rect,
-    slots: std::ops::RangeInclusive<usize>,
     memory: Memory,
     pointer: Option<egui::Pos2>,
     held: bool,
@@ -114,15 +115,14 @@ pub(super) struct Lane {
 }
 
 impl Lane {
-    /// `origin_y` is the top of row 0, `slots` the rows a drag may reach and
-    /// `position` finds a dragged row again after the list changed.
+    /// `origin_y` is the top of row 0 and `position` finds a dragged row
+    /// again after the list changed.
     pub(super) fn begin(
         ui: &mut egui::Ui,
         id: egui::Id,
         origin_y: f32,
         stride: f32,
         height: f32,
-        slots: std::ops::RangeInclusive<usize>,
         position: impl Fn(u64) -> Option<usize>,
     ) -> Self {
         let ctx = ui.ctx().clone();
@@ -154,7 +154,6 @@ impl Lane {
             left,
             width,
             clip,
-            slots,
             memory: Memory::default(),
             pointer,
             held,
@@ -164,7 +163,7 @@ impl Lane {
         };
         if let Some(drag) = &mut memory.active {
             match position(drag.key) {
-                Some(from) if lane.slots.contains(&from) => {
+                Some(from) if drag.slots.contains(&from) => {
                     drag.from = from;
                     if let Some(pointer) = pointer {
                         drag.pointer = pointer;
@@ -210,7 +209,7 @@ impl Lane {
     fn target(&self, drag: &mut Drag) {
         let top = self.ghost_top(drag);
         let slot = ((top - self.origin_y) / self.stride).round().max(0.0) as usize;
-        drag.to = slot.clamp(*self.slots.start(), *self.slots.end());
+        drag.to = slot.clamp(*drag.slots.start(), *drag.slots.end());
     }
 
     pub(super) fn dragging(&self) -> bool {
@@ -249,12 +248,20 @@ impl Lane {
         )
     }
 
-    /// A row's own response reports that a drag began on it.
-    pub(super) fn start(&mut self, ui: &egui::Ui, index: usize, key: u64, rect: egui::Rect) {
+    /// A row's own response reports that a drag began on it; `slots` are
+    /// the rows of its group.
+    pub(super) fn start(
+        &mut self,
+        ui: &egui::Ui,
+        index: usize,
+        key: u64,
+        rect: egui::Rect,
+        slots: std::ops::RangeInclusive<usize>,
+    ) {
         if self.memory.active.is_some()
             || self.memory.suppress_release
             || self.escape
-            || !self.slots.contains(&index)
+            || !slots.contains(&index)
         {
             return;
         }
@@ -267,6 +274,7 @@ impl Lane {
             key,
             from: index,
             to: index,
+            slots,
             grab_y,
             pointer: self.pointer.unwrap_or(rect.center()),
         };

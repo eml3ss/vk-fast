@@ -41,7 +41,7 @@ impl MusicApp {
     /// A track listed twice would share its row's motion, so such
     /// playlists keep their order.
     pub(super) fn playlist_reorderable(&self) -> bool {
-        if self.own_playlist().is_none() || !self.reorder_ready() {
+        if self.editable_own_playlist().is_none() || !self.reorder_ready() {
             return false;
         }
         let mut seen = HashSet::new();
@@ -55,7 +55,7 @@ impl MusicApp {
         let playlist = if self.library_reorderable() {
             None
         } else if self.playlist_reorderable() {
-            self.own_playlist()
+            self.editable_own_playlist()
         } else {
             return;
         };

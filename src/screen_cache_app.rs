@@ -206,6 +206,14 @@ impl MusicApp {
         }
     }
 
+    /// The open playlist when the account created it and VK lets it edit
+    /// the tracks: never a followed copy or someone else's playlist, even
+    /// when VK lists a followed one under the account's own ID.
+    pub(super) fn editable_own_playlist(&self) -> Option<AlbumRef> {
+        let reference = self.own_playlist()?;
+        self.can_edit_playlist(&reference).then_some(reference)
+    }
+
     /// The account's own playlist open now, if any.
     pub(super) fn own_playlist(&self) -> Option<AlbumRef> {
         let owner = self.session.as_ref()?.profile.id;
