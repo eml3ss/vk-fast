@@ -929,6 +929,46 @@ impl WebAudioClient {
         self.page_with_library_total(owner_id, offset, page)
     }
 
+    /// Up to 100 library tracks just before `before` (the library's end when
+    /// `None`), with where they start. Reversed lists read the library from
+    /// its end this way, independent of the website continuation.
+    pub fn library_tail(
+        &self,
+        owner_id: i64,
+        before: Option<usize>,
+        canceled: &AtomicBool,
+    ) -> Result<(usize, Vec<Track>), WebAudioError> {
+        let end = match before {
+            Some(end) => end,
+            None => self.library_count(owner_id, canceled)?,
+        };
+        let start = end.saturating_sub(100);
+        if start == end {
+            return Ok((start, Vec::new()));
+        }
+        let generation = self.home_owner(owner_id, canceled)?;
+        let value = self.detail_request(
+            owner_id,
+            generation,
+            "audio.get",
+            vec![
+                ("owner_id", owner_id.to_string()),
+                ("offset", start.to_string()),
+                ("count", (end - start).to_string()),
+            ],
+            canceled,
+        )?;
+        let rows = value
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or(WebAudioError::Format)?;
+        let (mut tracks, _) = home_tracks(rows)?;
+        for track in &mut tracks {
+            track.url = None;
+        }
+        Ok((start, tracks))
+    }
+
     /// Read the account's catalog total without downloading its track list or
     /// consuming the UI's opaque website continuation.
     pub fn library_count(

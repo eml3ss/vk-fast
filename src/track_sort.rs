@@ -30,12 +30,24 @@ const CONTROLS_WIDTH: f32 = 142.0;
 
 impl Sort {
     pub fn active(self) -> bool {
-        self.column != Column::Original
+        self.column != Column::Original || self.descending
+    }
+
+    /// "#" clicked: the list from its end.
+    pub fn reversed(self) -> bool {
+        self.column == Column::Original && self.descending
     }
 
     /// Ascending, then descending, then VK's own order. Dates start with the
     /// newest, like other players.
     pub fn clicked(self, column: Column) -> Self {
+        if column == Column::Original {
+            // VK's order is already ascending: "#" toggles the reverse.
+            return Self {
+                column,
+                descending: !self.reversed(),
+            };
+        }
         if self.column != column {
             return Self {
                 column,
@@ -57,6 +69,10 @@ impl Sort {
 pub(super) fn order(tracks: &[Track], rows: impl Iterator<Item = usize>, sort: Sort) -> Vec<usize> {
     let mut rows: Vec<usize> = rows.filter(|index| *index < tracks.len()).collect();
     if !sort.active() {
+        return rows;
+    }
+    if sort.reversed() {
+        rows.reverse();
         return rows;
     }
     let titles: HashMap<usize, String> = if sort.column == Column::Title {
@@ -155,7 +171,7 @@ pub(super) fn header(
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(tooltip);
-        let selected = sort.column == column && column != Column::Original;
+        let selected = sort.column == column && sort.active();
         let color = if selected {
             theme::ACCENT
         } else if response.hovered() {
@@ -230,7 +246,11 @@ pub(super) fn header(
         mid(inner.left(), index_width),
         Some("#"),
         egui::Align2::RIGHT_CENTER,
-        t("Порядок VK", "VK order"),
+        if sort.reversed() {
+            t("С начала списка", "From the start")
+        } else {
+            t("С конца списка", "From the end")
+        },
     );
     cell(
         ui,
@@ -303,6 +323,11 @@ mod tests {
         assert_eq!(by(sort), [1, 0, 2]);
         // A filtered list keeps only its rows.
         assert_eq!(order(&tracks, [2, 0].into_iter(), sort), [0, 2]);
+        sort = sort.clicked(Column::Original);
+        assert!(sort.reversed());
+        assert_eq!(by(sort), [2, 1, 0], "# lists from the end");
+        sort = sort.clicked(Column::Original);
+        assert!(!sort.active());
     }
 
     #[test]

@@ -453,6 +453,8 @@ impl DetailPage {
     }
 }
 
+type LibraryTailReceiver = Receiver<Result<(usize, Vec<Track>), WebAudioError>>;
+
 struct DetailRequest {
     owner: i64,
     key: String,
@@ -1275,6 +1277,13 @@ pub struct MusicApp {
     track_sorts: HashMap<String, track_sort::Sort>,
     /// The last sorted row order and what it was built from.
     sort_cache: Option<track_sort::Cached>,
+    /// My music read from its end for a reversed list: tracks in VK's order
+    /// starting at `library_tail_start`.
+    library_tail: Vec<Track>,
+    library_tail_start: Option<usize>,
+    library_tail_request: Option<(i64, LibraryTailReceiver)>,
+    /// Added to a row's index for its "#": the list's first real position.
+    row_number_offset: usize,
     broadcast: bool,
     broadcast_save_failed: bool,
     window_reopen: bool,
@@ -1622,6 +1631,10 @@ impl MusicApp {
             screen_cache_owner: None,
             track_sorts: HashMap::new(),
             sort_cache: None,
+            library_tail: Vec::new(),
+            library_tail_start: None,
+            library_tail_request: None,
+            row_number_offset: 0,
             broadcast: preferences::load_broadcast(),
             broadcast_save_failed: false,
             window_reopen: false,
@@ -1820,6 +1833,9 @@ impl MusicApp {
         self.pending_link = None;
         self.screen_cache = None;
         self.screen_cache_owner = None;
+        self.library_tail.clear();
+        self.library_tail_start = None;
+        self.library_tail_request = None;
         self.audio_upload = audio_upload_app::State::default();
         self.cancel_qr();
         self.stop_playback();
@@ -3728,6 +3744,7 @@ impl MusicApp {
                 .detail_key()
                 .and_then(|key| self.details.get(&key))
                 .map_or(&[], |page| page.tracks()),
+            MusicPage::Library if self.library_tail_mode() => &self.library_tail,
             MusicPage::Home | MusicPage::Library => &self.library.tracks,
         }
     }
@@ -3759,7 +3776,11 @@ impl MusicApp {
         // A sorted list plays in the order it is shown.
         let sort = self.current_sort();
         let queue = if sort.active() {
-            let tracks = queue.as_deref().unwrap_or(&self.library.tracks);
+            let tracks = queue.as_deref().unwrap_or(if self.library_tail_mode() {
+                &self.library_tail
+            } else {
+                &self.library.tracks
+            });
             Some(
                 track_sort::order(tracks, 0..tracks.len(), sort)
                     .into_iter()
@@ -3780,6 +3801,7 @@ impl MusicApp {
     }
 
     fn set_sort(&mut self, column: track_sort::Column) {
+        let was_tail = self.library_tail_mode();
         let next = self.current_sort().clicked(column);
         let origin = self.view_queue_origin();
         if next.active() {
@@ -3788,6 +3810,78 @@ impl MusicApp {
             self.track_sorts.remove(&origin);
         }
         self.sort_cache = None;
+        if was_tail != self.library_tail_mode() {
+            self.track_view_cache.invalidate();
+        }
+    }
+
+    /// A reversed My music that is not fully loaded reads from VK's end.
+    fn library_tail_mode(&self) -> bool {
+        self.page == MusicPage::Library
+            && !self.library.exhausted
+            && !self.demo
+            && self
+                .track_sorts
+                .get("library")
+                .is_some_and(|sort| sort.reversed())
+    }
+
+    /// Load the next 100 tracks from the end of My music.
+    fn load_library_tail(&mut self, ctx: &egui::Context) {
+        if self.library_tail_request.is_some() || self.library_tail_start == Some(0) {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        let before = self.library_tail_start;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-library-tail".into())
+            .spawn(move || {
+                let _ = sender.send(client.library_tail(owner, before, &AtomicBool::new(false)));
+                ctx.request_repaint();
+            })
+        {
+            self.workers.push(worker);
+            self.library_tail_request = Some((owner, receiver));
+        }
+    }
+
+    fn poll_library_tail(&mut self) {
+        let Some((owner, receiver)) = &self.library_tail_request else {
+            return;
+        };
+        let owner = *owner;
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        self.library_tail_request = None;
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.profile.id != owner)
+        {
+            return;
+        }
+        match result {
+            Ok((start, mut tracks)) => {
+                let known: HashSet<_> = self.library_tail.iter().map(Track::key).collect();
+                tracks.retain(|track| !known.contains(&track.key()));
+                tracks.append(&mut self.library_tail);
+                self.library_tail = tracks;
+                self.library_tail_start = Some(start);
+                self.track_view_cache.invalidate();
+                self.sort_cache = None;
+            }
+            Err(WebAudioError::Canceled) => {}
+            Err(error) => self.audio_error = Some(UiError::Music(error)),
+        }
     }
 
     /// "Date added" only for the account's own lists, and only when VK sent
@@ -7302,6 +7396,15 @@ impl MusicApp {
             }
         }
         let visible = self.sorted_rows(visible);
+        let tail_mode = self.library_tail_mode();
+        if tail_mode && self.library_tail_start.is_none() {
+            self.load_library_tail(ui.ctx());
+        }
+        self.row_number_offset = if tail_mode {
+            self.library_tail_start.unwrap_or(0)
+        } else {
+            0
+        };
         if visible.is_empty() {
             theme::inset_heading(ui, |ui| {
                 ui.label(t(
@@ -7368,7 +7471,13 @@ impl MusicApp {
         if !near_bottom || filtering {
             ctx.data_mut(|data| data.remove::<(i64, usize, usize)>(pagination_id));
         }
-        if is_library
+        self.row_number_offset = 0;
+        if tail_mode {
+            // Reversed: scrolling down reads further back from VK's end.
+            if near_bottom && !filtering {
+                self.load_library_tail(&ctx);
+            }
+        } else if is_library
             && near_bottom
             && !filtering
             && self.pending.is_none()
@@ -7682,7 +7791,10 @@ impl MusicApp {
             });
         ui.painter()
             .rect_filled(rect, 5.0, if row_hovered { SURFACE } else { BACKGROUND });
-        let index_width = track_index_width(ui, self.view_tracks().len().max(index + 1));
+        let index_width = track_index_width(
+            ui,
+            self.view_tracks().len().max(index + 1) + self.row_number_offset,
+        );
         let unavailable = track.unavailable == Some(true);
         let mut action = None;
         let mut controls_contain_pointer = false;
@@ -7731,7 +7843,7 @@ impl MusicApp {
                     ui.painter().text(
                         index_rect.right_center() - egui::vec2(3.0, 0.0),
                         egui::Align2::RIGHT_CENTER,
-                        (index + 1).to_string(),
+                        (index + 1 + self.row_number_offset).to_string(),
                         egui::TextStyle::Small.resolve(ui.style()),
                         if !unavailable && highlighted {
                             ACCENT
@@ -10012,6 +10124,7 @@ impl MusicApp {
             self.start_screen_cache(ctx);
         }
         self.poll_screen_cache();
+        self.poll_library_tail();
         self.poll_home(ctx);
         self.poll_home_catalog();
         self.poll_playlists(ctx);
@@ -10140,6 +10253,7 @@ fn read_only_worker(name: Option<&str>) -> bool {
                 | "vk-window-focus"
                 | "vk-broadcast"
                 | "vk-screen-cache"
+                | "vk-library-tail"
         )
     )
 }
@@ -10650,6 +10764,10 @@ mod tests {
             screen_cache_owner: None,
             track_sorts: HashMap::new(),
             sort_cache: None,
+            library_tail: Vec::new(),
+            library_tail_start: None,
+            library_tail_request: None,
+            row_number_offset: 0,
             broadcast: false,
             broadcast_save_failed: false,
             window_reopen: false,
