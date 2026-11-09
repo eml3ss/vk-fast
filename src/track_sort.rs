@@ -142,9 +142,8 @@ pub(super) fn order(tracks: &[Track], rows: impl Iterator<Item = usize>, sort: S
                 (
                     *index,
                     tracks[*index]
-                        .album
-                        .as_ref()
-                        .map(|album| album.title.trim().to_lowercase())
+                        .display_album_title()
+                        .map(str::to_lowercase)
                         .unwrap_or_default(),
                 )
             })

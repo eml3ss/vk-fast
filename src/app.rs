@@ -12,6 +12,8 @@ use std::{
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Sense};
 use zeroize::Zeroize;
 
+#[path = "album_titles.rs"]
+mod album_titles;
 #[path = "audio_upload_app.rs"]
 mod audio_upload_app;
 
@@ -1221,6 +1223,7 @@ pub struct MusicApp {
     /// The rect of the row whose drag began this frame.
     row_drag_started: Option<egui::Rect>,
     reorder_request: Option<track_reorder::Request>,
+    album_titles: album_titles::State,
     playlist_request: Option<PlaylistRequest>,
     playlists_requested: bool,
     playlist_error: Option<WebAudioError>,
@@ -1586,6 +1589,7 @@ impl MusicApp {
             row_drag_enabled: false,
             row_drag_started: None,
             reorder_request: None,
+            album_titles: album_titles::State::default(),
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -1925,6 +1929,7 @@ impl MusicApp {
         self.error_closing = None;
         self.playlist_removal.reset();
         self.reorder_request = None;
+        self.album_titles.reset();
         self.playlist_request = None;
         self.playlists_requested = false;
         self.playlist_error = None;
@@ -8278,19 +8283,15 @@ impl MusicApp {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             ui.set_min_width(album_width);
-                            if let Some(album) = track
-                                .album
-                                .as_ref()
-                                .filter(|album| !album.title.trim().is_empty())
+                            if let Some(label) = self.album_titles.label(track)
+                                && let Some(album) = self.album_titles.named(track)
                             {
                                 let link = ui
                                     .add(
-                                        egui::Label::new(
-                                            RichText::new(album.title.trim()).color(MUTED),
-                                        )
-                                        .truncate()
-                                        .selectable(false)
-                                        .sense(Sense::click()),
+                                        egui::Label::new(RichText::new(label).color(MUTED))
+                                            .truncate()
+                                            .selectable(false)
+                                            .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if link.hovered() {
@@ -8302,7 +8303,7 @@ impl MusicApp {
                                 }
                                 controls_contain_pointer |= link.contains_pointer();
                                 if link.clicked() {
-                                    action = Some(TrackAction::Album(album.clone()));
+                                    action = Some(TrackAction::Album(album));
                                 }
                             }
                         },
@@ -10267,6 +10268,12 @@ impl MusicApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        self.render_frame(ui);
+        // Rows drawn this frame that still miss their album's name.
+        self.request_album_titles(ui.ctx());
+    }
+
+    fn render_frame(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
         if ui.ctx().current_pass_index() == 0 {
             let enabled = self.middle_autoscroll && !self.lyrics.fullscreen;
@@ -10617,6 +10624,7 @@ impl MusicApp {
         self.poll_playlist_add(ctx);
         self.poll_playlist_removal(ctx);
         self.poll_reorder(ctx);
+        self.poll_album_titles(ctx);
         self.poll_playlist_create(ctx);
         self.poll_audio_upload(ctx);
         self.poll_playlist_actions(ctx);
@@ -10732,6 +10740,7 @@ fn read_only_worker(name: Option<&str>) -> bool {
                 | "vk-broadcast"
                 | "vk-screen-cache"
                 | "vk-library-tail"
+                | "vk-album-titles"
         )
     )
 }
@@ -11165,6 +11174,7 @@ mod tests {
             row_drag_enabled: false,
             row_drag_started: None,
             reorder_request: None,
+            album_titles: album_titles::State::default(),
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,

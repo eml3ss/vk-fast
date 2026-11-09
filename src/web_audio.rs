@@ -1867,22 +1867,46 @@ impl WebAudioClient {
         keys: &[(i64, i64)],
         canceled: &AtomicBool,
     ) -> Result<Vec<Track>, WebAudioError> {
+        self.tracks_metadata_request(
+            expected_owner,
+            keys,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn tracks_metadata_request(
+        &self,
+        expected_owner: i64,
+        keys: &[(i64, i64)],
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<Vec<Track>, WebAudioError> {
         if keys.is_empty() || keys.len() > 100 || keys.iter().any(|key| key.0 == 0 || key.1 <= 0) {
             return Err(WebAudioError::Format);
         }
         let generation = self.home_owner(expected_owner, canceled)?;
-        let value = self.detail_request(
-            expected_owner,
+        // With each row's access key: without it VK withholds many tracks
+        // the account can still see, such as ones from others' playlists.
+        let mut audios = Vec::with_capacity(keys.len());
+        for key in keys {
+            audios.push(
+                match self.playlist_audio_id(expected_owner, generation, *key, canceled) {
+                    Err(WebAudioError::Format) => format!("{}_{}", key.0, key.1),
+                    other => other?,
+                },
+            );
+        }
+        let value = request(
             generation,
             "audio.getById",
-            vec![(
-                "audios",
-                keys.iter()
-                    .map(|key| format!("{}_{}", key.0, key.1))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )],
-            canceled,
+            vec![("audios", audios.join(","))],
         )?;
         let list = value.as_array().ok_or(WebAudioError::Format)?;
         let requested: HashSet<_> = keys.iter().copied().collect();
@@ -9749,6 +9773,44 @@ mod page_verification_tests {
         }
         assert!(client.state.lock().unwrap().streams.is_empty());
         assert!(client.state.lock().unwrap().cursor.is_none());
+    }
+
+    #[test]
+    fn metadata_requests_carry_known_access_keys_and_return_album_titles() {
+        let client = client();
+        let generation = client.state.lock().unwrap().generation;
+        client
+            .commit_home_streams(
+                42,
+                generation,
+                HashMap::from([(
+                    (-200, 7),
+                    StreamInfo {
+                        access_key: Some(String::from("row-access").into()),
+                        ..StreamInfo::default()
+                    },
+                )]),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let tracks = client
+            .tracks_metadata_request(
+                42,
+                &[(-200, 7), (42, 3)],
+                &AtomicBool::new(false),
+                |_, method, params| {
+                    assert_eq!(method, "audio.getById");
+                    assert_eq!(params, vec![("audios", "-200_7_row-access,42_3".into())]);
+                    Ok(
+                        json!([{"owner_id":-200,"id":7,"artist":"A","title":"T","duration":180,
+                    "album":{"id":5,"owner_id":-9,"title":"Record","access_key":"k"}}]),
+                    )
+                },
+            )
+            .unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].album.as_ref().unwrap().title, "Record");
+        assert!(tracks[0].url.is_none());
     }
 
     #[test]
