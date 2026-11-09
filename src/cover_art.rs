@@ -345,6 +345,67 @@ impl CoverCache {
         response
     }
 
+    /// Paint an image so it covers `rect`, cropped around a point a little
+    /// above its center (where faces usually are). A smaller resident copy is
+    /// shown while the sharp one loads. Returns false until any copy is ready.
+    pub fn paint_fill(&mut self, ui: &egui::Ui, url: &str, rect: egui::Rect, radius: u8) -> bool {
+        if url.is_empty() || !rect.is_positive() || !ui.is_rect_visible(rect) {
+            return false;
+        }
+        self.receive(ui.ctx());
+        self.clock = self.clock.wrapping_add(1);
+        let pixels = rect.width().max(rect.height()) * ui.ctx().pixels_per_point();
+        let edge = if pixels > 1024.0 {
+            HIGH_RES_TEXTURE_SIZE
+        } else {
+            1024
+        };
+        let key = Key {
+            url: url.to_owned(),
+            edge,
+        };
+        self.request(ui.ctx(), key.clone());
+        let clock = self.clock;
+        let Some(texture) = self
+            .entries
+            .iter_mut()
+            .filter(|(candidate, entry)| {
+                candidate.url == url && matches!(entry.state, State::Ready(..))
+            })
+            .max_by_key(|(candidate, _)| candidate.edge)
+            .and_then(|(_, entry)| {
+                entry.touched = clock;
+                match &entry.state {
+                    State::Ready(texture, _, _) => Some(texture.clone()),
+                    _ => None,
+                }
+            })
+        else {
+            return false;
+        };
+        let image = texture.size_vec2();
+        if image.x <= 0.0 || image.y <= 0.0 {
+            return false;
+        }
+        // The share of the image that keeps the rect's proportions.
+        let scale = (rect.width() / image.x).max(rect.height() / image.y);
+        let span = egui::vec2(
+            (rect.width() / (image.x * scale)).min(1.0),
+            (rect.height() / (image.y * scale)).min(1.0),
+        );
+        let center = egui::vec2(0.5, 0.4);
+        let min = egui::pos2(
+            (center.x - span.x / 2.0).clamp(0.0, 1.0 - span.x),
+            (center.y - span.y / 2.0).clamp(0.0, 1.0 - span.y),
+        );
+        egui::Image::from_texture(&texture)
+            .uv(egui::Rect::from_min_size(min, span))
+            .corner_radius(radius)
+            .show_loading_spinner(false)
+            .paint_at(ui, rect);
+        true
+    }
+
     /// Uses the same thumbnail job as artwork rendering. Its representative
     /// color is already computed by the worker, including on a disk-cache hit.
     pub fn header_color(

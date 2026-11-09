@@ -179,25 +179,15 @@ pub fn artist_header(
         None
     };
     background(ui.painter(), rect, color);
-    if width >= 380.0 {
-        let portrait = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - portrait_size - 12.0, rect.top() + 12.0),
-            egui::Vec2::splat(portrait_size),
-        );
-        artwork(ui, covers, portrait, view.image_url, "artist-portrait");
-        if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
-            cover_viewer(ui, covers, portrait, url, view.language);
-        }
-        // The portrait recedes into the page's dark blue surface rather than
-        // placing text over a bright face or introducing an unreadable crop.
+    // The photo covers the whole backing; a shade from the left keeps the
+    // name and buttons readable over it. It does not open a preview.
+    if let Some(url) = view.image_url
+        && covers.paint_fill(ui, url, rect, 16)
+    {
         fade(ui.painter(), rect, color);
     }
     let inner = rect.shrink(22.0);
-    let text_right = if width >= 540.0 {
-        rect.right() - portrait_size * 0.65
-    } else {
-        inner.right()
-    };
+    let text_right = inner.right();
     let mut text = child(
         ui,
         "artist-heading",
@@ -1486,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn release_playlist_and_artist_images_open_full_size_and_close() {
+    fn release_and_playlist_covers_open_full_size_but_artist_photos_do_not() {
         for (kind, point) in [
             ("album", egui::pos2(110.0, 110.0)),
             ("playlist", egui::pos2(110.0, 110.0)),
@@ -1578,6 +1568,11 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }]);
             let opened = frame(Vec::new());
+            if kind == "artist" {
+                // The photo is the header's backing, not a preview button.
+                assert!(!dimmed(&opened));
+                continue;
+            }
             assert!(dimmed(&opened), "{kind}");
             frame(vec![egui::Event::Key {
                 key: egui::Key::Escape,
