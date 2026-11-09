@@ -7,6 +7,7 @@ pub(super) enum Column {
     #[default]
     Original,
     Title,
+    Album,
     Added,
     Duration,
 }
@@ -26,7 +27,62 @@ pub(super) const DATE_WIDTH: f32 = 112.0;
 /// The middle of a row's duration, from the row's inner right edge.
 const DURATION_CENTER: f32 = 36.0;
 /// Width the row keeps on the right for mix, dislike, heart and duration.
-const CONTROLS_WIDTH: f32 = 142.0;
+pub(super) const CONTROLS_WIDTH: f32 = 142.0;
+/// Narrowest title before the list drops a column.
+const TITLE_MIN: f32 = 200.0;
+const ALBUM_MIN: f32 = 140.0;
+const GAP: f32 = 6.0;
+
+/// The optional columns a list offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Extra {
+    pub album: bool,
+    pub date: bool,
+}
+
+/// Column widths of one row; header and rows share them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Columns {
+    pub title: f32,
+    pub album: Option<f32>,
+    pub date: bool,
+}
+
+impl Extra {
+    /// Fits the columns into `rest`, the width for title, album and date.
+    /// A narrow list drops the date first, then the album.
+    pub(super) fn fit(self, rest: f32) -> Columns {
+        let need = |album: bool, date: bool| {
+            TITLE_MIN
+                + if album { GAP + ALBUM_MIN } else { 0.0 }
+                + if date { GAP + DATE_WIDTH } else { 0.0 }
+        };
+        let mut date = self.date;
+        let mut album = self.album;
+        if date && rest < need(album, true) {
+            date = false;
+        }
+        if album && rest < need(true, date) {
+            album = false;
+        }
+        let flexible = (rest - if date { GAP + DATE_WIDTH } else { 0.0 }).max(0.0);
+        if album {
+            // Like other players: the album takes a share of the title.
+            let album = ((flexible - GAP) * 0.4).max(ALBUM_MIN);
+            Columns {
+                title: (flexible - GAP - album).max(0.0),
+                album: Some(album),
+                date,
+            }
+        } else {
+            Columns {
+                title: flexible,
+                album: None,
+                date,
+            }
+        }
+    }
+}
 
 impl Sort {
     pub fn active(self) -> bool {
@@ -75,17 +131,38 @@ pub(super) fn order(tracks: &[Track], rows: impl Iterator<Item = usize>, sort: S
         rows.reverse();
         return rows;
     }
-    let titles: HashMap<usize, String> = if sort.column == Column::Title {
-        rows.iter()
+    let titles: HashMap<usize, String> = match sort.column {
+        Column::Title => rows
+            .iter()
             .map(|index| (*index, tracks[*index].display_title().to_lowercase()))
-            .collect()
-    } else {
-        HashMap::new()
+            .collect(),
+        Column::Album => rows
+            .iter()
+            .map(|index| {
+                (
+                    *index,
+                    tracks[*index]
+                        .album
+                        .as_ref()
+                        .map(|album| album.title.trim().to_lowercase())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect(),
+        _ => HashMap::new(),
     };
     rows.sort_by(|a, b| {
         let ordering = match sort.column {
             Column::Original => std::cmp::Ordering::Equal,
             Column::Title => titles[a].cmp(&titles[b]),
+            // Tracks without an album stay last in both directions.
+            Column::Album => match (titles[a].is_empty(), titles[b].is_empty()) {
+                (false, true) | (true, false) if sort.descending => {
+                    titles[b].is_empty().cmp(&titles[a].is_empty())
+                }
+                (false, true) | (true, false) => titles[a].is_empty().cmp(&titles[b].is_empty()),
+                _ => titles[a].cmp(&titles[b]),
+            },
             Column::Added => tracks[*a].added.cmp(&tracks[*b].added),
             Column::Duration => tracks[*a].duration.cmp(&tracks[*b].duration),
         };
@@ -133,7 +210,7 @@ pub(super) fn header(
     ui: &mut egui::Ui,
     language: Language,
     sort: Sort,
-    show_date: bool,
+    extra: Extra,
     index_width: f32,
     scrollbar: bool,
 ) -> Option<Column> {
@@ -146,15 +223,10 @@ pub(super) fn header(
     // The same insets as a track row: 4 px, then index, cover and title.
     let inner = rect.shrink2(egui::vec2(4.0, 0.0));
     let title_left = inner.left() + index_width + 6.0;
-    let title_width = (inner.width()
-        - index_width
-        - 6.0
-        - 40.0
-        - 6.0
-        - CONTROLS_WIDTH
-        - if show_date { DATE_WIDTH + 6.0 } else { 0.0 })
-    .max(0.0);
-    let date_left = title_left + 40.0 + 6.0 + title_width + 6.0;
+    let columns = extra.fit(inner.width() - index_width - 6.0 - 40.0 - 6.0 - CONTROLS_WIDTH);
+    let title_width = columns.title;
+    let album_left = title_left + 40.0 + 6.0 + title_width + GAP;
+    let date_left = album_left + columns.album.map_or(0.0, |width| width + GAP);
     let font = egui::FontId::proportional(11.5);
     let mut clicked = None;
     let mut cell = |ui: &mut egui::Ui,
@@ -260,7 +332,17 @@ pub(super) fn header(
         egui::Align2::LEFT_CENTER,
         t("Сортировать по названию", "Sort by title"),
     );
-    if show_date {
+    if let Some(width) = columns.album {
+        cell(
+            ui,
+            Column::Album,
+            mid(album_left, width),
+            Some(t("АЛЬБОМ", "ALBUM")),
+            egui::Align2::LEFT_CENTER,
+            t("Сортировать по альбому", "Sort by album"),
+        );
+    }
+    if columns.date {
         cell(
             ui,
             Column::Added,
@@ -331,6 +413,51 @@ mod tests {
     }
 
     #[test]
+    fn narrow_lists_drop_the_date_first_then_the_album() {
+        let both = Extra {
+            album: true,
+            date: true,
+        };
+        let wide = both.fit(800.0);
+        assert!(wide.date && wide.album.is_some());
+        assert!((wide.title + GAP + wide.album.unwrap() + GAP + DATE_WIDTH - 800.0).abs() < 0.01);
+        let middle = both.fit(TITLE_MIN + GAP + ALBUM_MIN + 20.0);
+        assert!(!middle.date && middle.album.is_some_and(|album| album >= ALBUM_MIN));
+        assert!(middle.title >= TITLE_MIN);
+        let narrow = both.fit(TITLE_MIN + 20.0);
+        assert!(!narrow.date && narrow.album.is_none());
+        assert_eq!(narrow.title, TITLE_MIN + 20.0);
+        // A list without albums keeps its date longer.
+        let dated = Extra {
+            album: false,
+            date: true,
+        }
+        .fit(TITLE_MIN + GAP + DATE_WIDTH);
+        assert!(dated.date);
+    }
+
+    #[test]
+    fn albums_sort_by_title_with_albumless_tracks_last() {
+        let mut tracks = vec![
+            track(1, "a", 1, None),
+            track(2, "b", 1, None),
+            track(3, "c", 1, None),
+        ];
+        for (track, album) in tracks.iter_mut().zip([Some("Beta"), None, Some("alpha")]) {
+            track.album = album.map(|title| crate::model::AlbumRef {
+                owner_id: -1,
+                id: 1,
+                title: title.into(),
+                access_key: None,
+                cover_url: None,
+            });
+        }
+        let sort = Sort::default().clicked(Column::Album);
+        assert_eq!(order(&tracks, 0..3, sort), [2, 0, 1]);
+        assert_eq!(order(&tracks, 0..3, sort.clicked(Column::Album)), [0, 2, 1]);
+    }
+
+    #[test]
     fn dates_read_naturally_in_both_languages() {
         use chrono::TimeZone;
         let noon = chrono::Local
@@ -340,5 +467,59 @@ mod tests {
             .timestamp();
         assert_eq!(date_label(noon, Language::Russian), "8 авг. 2022");
         assert_eq!(date_label(noon, Language::English), "Aug 8, 2022");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::app::tests::{account_ui_frame, account_ui_text_rect, page, search_test_app};
+
+    #[test]
+    fn album_column_lines_up_with_rows_and_narrow_windows_drop_date_then_album() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        // Enough rows for the scrollbar the header leaves room for.
+        let ids: Vec<i64> = (1..=40).collect();
+        let mut tracks = page(ids.len(), &ids).items;
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.owner_id = 42;
+            track.added = Some(1_660_000_000 + index as i64);
+            track.album = Some(crate::model::AlbumRef {
+                owner_id: -9,
+                id: 5 + index as i64,
+                title: format!("Record {index}"),
+                access_key: None,
+                cover_url: None,
+            });
+        }
+        app.library.tracks = tracks;
+        app.library.exhausted = true;
+        app.page = MusicPage::Library;
+        let mut frame = 0;
+        let mut shown = Vec::new();
+        for width in [1400.0, 940.0, 700.0] {
+            let size = egui::vec2(width, 760.0);
+            let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+            for _ in 0..3 {
+                output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+            }
+            let album = account_ui_text_rect(&output, "ALBUM");
+            let date = account_ui_text_rect(&output, "DATE ADDED");
+            if let Some(header) = album {
+                let row = account_ui_text_rect(&output, "Record 0").unwrap();
+                assert!(
+                    (row.left() - header.left()).abs() < 1.5,
+                    "{row:?} {header:?}"
+                );
+                if let Some(date) = date {
+                    assert!(date.left() > row.right());
+                }
+            } else {
+                assert!(account_ui_text_rect(&output, "Record 0").is_none());
+            }
+            shown.push((album.is_some(), date.is_some()));
+        }
+        assert_eq!(shown, [(true, true), (true, false), (false, false)]);
     }
 }

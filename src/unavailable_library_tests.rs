@@ -134,7 +134,7 @@ fn row_frame(
             ..Default::default()
         },
         |ui| {
-            action = app.track_row(ui, track, 0, false, false);
+            action = app.track_row(ui, track, 0, false, track_sort::Extra::default());
         },
     );
     output.textures_delta.clear();

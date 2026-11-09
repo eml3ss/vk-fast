@@ -4750,7 +4750,15 @@ impl MusicApp {
             self.player.snapshot().state,
             PlaybackState::Playing | PlaybackState::Loading
         );
-        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows", false, false)
+        self.clipped_track_rows(
+            ui,
+            tracks,
+            1,
+            active,
+            "search-track-rows",
+            track_sort::Extra::default(),
+            false,
+        )
     }
 
     // Reserve the complete list height, but lay out only rows in the viewport.
@@ -4768,7 +4776,7 @@ impl MusicApp {
         count: usize,
         source: &dyn Fn(usize) -> usize,
         active: bool,
-        show_date: bool,
+        show_date: track_sort::Extra,
         visit: &mut dyn FnMut(&Track),
     ) -> Option<TrackAction> {
         let lane_id = egui::Id::new(("track-row-drag", id));
@@ -4845,7 +4853,7 @@ impl MusicApp {
         columns: usize,
         active: bool,
         id: &'static str,
-        show_date: bool,
+        show_date: track_sort::Extra,
         reorder: bool,
     ) -> Option<TrackAction> {
         if tracks.is_empty() {
@@ -4917,8 +4925,13 @@ impl MusicApp {
                                 for (column, column_ui) in uis.iter_mut().enumerate() {
                                     let index = row * columns + column;
                                     if let Some(track) = tracks.get(index)
-                                        && let Some(intent) =
-                                            self.track_row(column_ui, track, index, active, false)
+                                        && let Some(intent) = self.track_row(
+                                            column_ui,
+                                            track,
+                                            index,
+                                            active,
+                                            track_sort::Extra::default(),
+                                        )
                                     {
                                         action = Some(intent);
                                     }
@@ -6816,7 +6829,11 @@ impl MusicApp {
                 };
                 // Albums and playlists sort from their column header; an
                 // artist's top tracks keep VK's order.
-                let show_date = artist.is_none() && self.show_date_column();
+                let show_date = track_sort::Extra {
+                    // An album page would repeat its own title on every row.
+                    album: artist.is_none() && matches!(self.page, MusicPage::Playlist(_)),
+                    date: artist.is_none() && self.show_date_column(),
+                };
                 let sorted = if artist.is_none() && !tracks.is_empty() {
                     let sort = self.current_sort();
                     let index_width = track_index_width(ui, tracks.len());
@@ -7018,9 +7035,17 @@ impl MusicApp {
                 let tracks = &page.tracks;
                 let sort = self.current_sort();
                 let index_width = track_index_width(ui, tracks.len());
-                if let Some(column) =
-                    track_sort::header(ui, language, sort, false, index_width, false)
-                {
+                if let Some(column) = track_sort::header(
+                    ui,
+                    language,
+                    sort,
+                    track_sort::Extra {
+                        album: true,
+                        date: false,
+                    },
+                    index_width,
+                    false,
+                ) {
                     self.set_sort(column);
                     ui.ctx().request_repaint();
                 }
@@ -7042,7 +7067,10 @@ impl MusicApp {
                     1,
                     active,
                     "owner-track-rows",
-                    false,
+                    track_sort::Extra {
+                        album: true,
+                        date: false,
+                    },
                     false,
                 );
                 ui.add_space(22.0);
@@ -7718,7 +7746,10 @@ impl MusicApp {
         let visible = self
             .track_view_cache
             .visible(self.view_tracks(), &self.filter);
-        let show_date = self.show_date_column();
+        let show_date = track_sort::Extra {
+            album: true,
+            date: self.show_date_column(),
+        };
         if !visible.is_empty() {
             let index_width = track_index_width(ui, self.view_tracks().len());
             let sort = self.current_sort();
@@ -8122,7 +8153,7 @@ impl MusicApp {
         track: &Track,
         index: usize,
         active: bool,
-        show_date: bool,
+        show_date: track_sort::Extra,
     ) -> Option<TrackAction> {
         let highlighted = self.selected == Some(track.key())
             || self
@@ -8219,12 +8250,8 @@ impl MusicApp {
                     );
                 }
                 self.covers.show(ui, track.cover_url.as_deref(), 40.0);
-                let date_width = if show_date {
-                    track_sort::DATE_WIDTH + 6.0
-                } else {
-                    0.0
-                };
-                let width = (ui.available_width() - 142.0 - date_width).max(0.0);
+                let columns = show_date.fit(ui.available_width() - track_sort::CONTROLS_WIDTH);
+                let width = columns.title;
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, 40.0),
                     Layout::top_down(Align::Min),
@@ -8253,7 +8280,43 @@ impl MusicApp {
                         }
                     },
                 );
-                if show_date {
+                if let Some(album_width) = columns.album {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(album_width, 40.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.set_min_width(album_width);
+                            if let Some(album) = track
+                                .album
+                                .as_ref()
+                                .filter(|album| !album.title.trim().is_empty())
+                            {
+                                let link = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(album.title.trim()).color(MUTED),
+                                        )
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if link.hovered() {
+                                    ui.painter().hline(
+                                        link.rect.x_range(),
+                                        link.rect.bottom() - 1.0,
+                                        egui::Stroke::new(1.0, MUTED),
+                                    );
+                                }
+                                controls_contain_pointer |= link.contains_pointer();
+                                if link.clicked() {
+                                    action = Some(TrackAction::Album(album.clone()));
+                                }
+                            }
+                        },
+                    );
+                }
+                if columns.date {
                     let label = track
                         .added
                         .map(|added| track_sort::date_label(added, self.language))
@@ -14098,7 +14161,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    action = app.track_row(ui, &track, 0, false, false);
+                    action = app.track_row(ui, &track, 0, false, track_sort::Extra::default());
                 },
             );
             let duration = account_ui_text_rect(&output, &track.duration_label());
@@ -14150,7 +14213,8 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    enabled_action = app.track_row(ui, &track, 0, false, false);
+                    enabled_action =
+                        app.track_row(ui, &track, 0, false, track_sort::Extra::default());
                 },
             );
             output.textures_delta.clear();
@@ -14286,7 +14350,10 @@ mod tests {
                 },
                 |ui| {
                     ui.add_enabled_ui(false, |ui| {
-                        assert!(app.track_row(ui, &track, 0, false, false).is_none());
+                        assert!(
+                            app.track_row(ui, &track, 0, false, track_sort::Extra::default())
+                                .is_none()
+                        );
                     });
                 },
             );
@@ -16008,8 +16075,18 @@ mod tests {
             output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         }
         assert!(account_ui_text_rect(&output, "PLAYLIST").is_some());
-        assert!(account_ui_text_rect(&output, "ALBUM").is_none());
         let description = account_ui_text_rect(&output, "Hand picked tracks").unwrap();
+        // "ALBUM" only names the track column, never the playlist itself.
+        assert!(
+            account_ui_shapes(&output)
+                .into_iter()
+                .all(|shape| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == "ALBUM" => {
+                        text.visual_bounding_rect().top() > description.bottom()
+                    }
+                    _ => true,
+                })
+        );
         let heading = account_ui_text_rect(&output, "Tracks").unwrap();
         let first = account_ui_text_rect(&output, &app.view_tracks()[0].title).unwrap();
         let last = account_ui_text_rect(&output, &app.view_tracks()[1].title).unwrap();
@@ -17369,7 +17446,7 @@ mod tests {
                                         columns,
                                         false,
                                         "test-rows",
-                                        false,
+                                        track_sort::Extra::default(),
                                         false,
                                     );
                                 },
@@ -17475,7 +17552,7 @@ mod tests {
                                 columns,
                                 false,
                                 "stable-track-rows",
-                                false,
+                                track_sort::Extra::default(),
                                 false,
                             );
                         },
