@@ -36,6 +36,7 @@ const MAX_DIMENSION: u32 = 4096;
 const TEXTURE_SIZE: u32 = 256;
 const HIGH_RES_TEXTURE_SIZE: u32 = 2048;
 const CACHE_SIZES: [u32; 6] = [96, 160, 256, 512, 1024, HIGH_RES_TEXTURE_SIZE];
+use crate::cover_cache::KEEP_ASPECT;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct Key {
@@ -345,7 +346,8 @@ impl CoverCache {
         response
     }
 
-    /// Paint an image so it covers `rect`, cropped around its center. A smaller resident copy is
+    /// Paint an image in its own proportions so it covers `rect`, cropped
+    /// around its center. A smaller resident copy is
     /// shown while the sharp one loads. Returns false until any copy is ready.
     pub fn paint_fill(&mut self, ui: &egui::Ui, url: &str, rect: egui::Rect, radius: u8) -> bool {
         if url.is_empty() || !rect.is_positive() || !ui.is_rect_visible(rect) {
@@ -361,7 +363,7 @@ impl CoverCache {
         };
         let key = Key {
             url: url.to_owned(),
-            edge,
+            edge: edge | KEEP_ASPECT,
         };
         self.request(ui.ctx(), key.clone());
         let clock = self.clock;
@@ -369,7 +371,9 @@ impl CoverCache {
             .entries
             .iter_mut()
             .filter(|(candidate, entry)| {
-                candidate.url == url && matches!(entry.state, State::Ready(..))
+                candidate.url == url
+                    && candidate.edge & KEEP_ASPECT != 0
+                    && matches!(entry.state, State::Ready(..))
             })
             .max_by_key(|(candidate, _)| candidate.edge)
             .and_then(|(_, entry)| {
@@ -763,15 +767,27 @@ fn decode_sized(bytes: &[u8], edge: u32) -> Result<ColorImage, ()> {
     if image.width() == 0 || image.height() == 0 {
         return Err(());
     }
-    let size = image
-        .width()
-        .min(image.height())
-        .min(edge.clamp(1, HIGH_RES_TEXTURE_SIZE));
+    let keep_aspect = edge & KEEP_ASPECT != 0;
+    let edge = (edge & !KEEP_ASPECT).clamp(1, HIGH_RES_TEXTURE_SIZE);
     let filter = if edge > TEXTURE_SIZE {
         FilterType::Lanczos3
     } else {
         FilterType::Triangle
     };
+    if keep_aspect {
+        // Fit inside edge × edge, never enlarged.
+        let image = if image.width().max(image.height()) > edge {
+            image.resize(edge, edge, filter)
+        } else {
+            image
+        }
+        .into_rgba8();
+        return Ok(ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        ));
+    }
+    let size = image.width().min(image.height()).min(edge);
     let image = image.resize_to_fill(size, size, filter).into_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [size as usize, size as usize],
@@ -796,9 +812,17 @@ fn load_cover(
     fetcher: impl FnOnce() -> Result<ColorImage, ()>,
 ) -> Result<ColorImage, ()> {
     // A larger existing thumbnail satisfies a smaller view without HTTP.
+    // Square thumbnails never stand in for a proportional image.
+    let keep_aspect = edge & KEEP_ASPECT != 0;
+    if keep_aspect && let Ok(bytes) = disk.load(url, edge) {
+        if let Ok(image) = decode_sized(&bytes, edge) {
+            return Ok(image);
+        }
+        disk.remove(url, edge);
+    }
     for candidate in CACHE_SIZES
         .into_iter()
-        .filter(|candidate| *candidate >= edge)
+        .filter(|candidate| !keep_aspect && *candidate >= edge)
     {
         if let Ok(bytes) = disk.load(url, candidate) {
             if let Ok(image) = decode_sized(&bytes, edge) {
@@ -820,7 +844,7 @@ fn load_cover(
             for candidate in CACHE_SIZES
                 .into_iter()
                 .rev()
-                .filter(|candidate| *candidate < edge)
+                .filter(|candidate| !keep_aspect && *candidate < edge)
             {
                 if let Ok(bytes) = disk.load(url, candidate)
                     && let Ok(image) = decode_sized(&bytes, edge)
@@ -1124,6 +1148,19 @@ mod tests {
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
         assert!(decode(bytes.get_ref()).is_err());
+    }
+
+    #[test]
+    fn wide_banners_keep_their_proportions_and_fit_the_edge() {
+        let banner = image::RgbaImage::from_pixel(3000, 800, image::Rgba([90, 90, 90, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(banner)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let wide = decode_sized(bytes.get_ref(), 1024 | KEEP_ASPECT).unwrap();
+        assert_eq!(wide.size, [1024, 273]);
+        let square = decode_sized(bytes.get_ref(), 1024).unwrap();
+        assert_eq!(square.size, [800, 800], "covers stay square crops");
     }
 
     struct CacheFixture(std::path::PathBuf);

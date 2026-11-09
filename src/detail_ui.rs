@@ -181,39 +181,13 @@ pub fn artist_header(
     // A pixel inside the photo's edges, so the backing's antialiased rim
     // never shows as a light fringe around the rounded corners.
     background(ui.painter(), rect.shrink(1.0), color);
-    // The photo sits in the middle of the backing, zoomed only enough to
-    // show the central 60 % of its height, and its sides melt into the
-    // backing. A shade from the left keeps the name and buttons readable.
-    // It does not open a preview.
-    if let Some(url) = view.image_url {
-        let photo_width = (rect.height() / 0.6).min(rect.width());
-        let photo =
-            egui::Rect::from_center_size(rect.center(), egui::vec2(photo_width, rect.height()));
-        let full_width = photo_width >= rect.width() - 1.0;
-        if covers.paint_fill(ui, url, photo, if full_width { 16 } else { 0 }) {
-            if !full_width {
-                let (left, right) = backdrop(color);
-                let melt = (photo_width * 0.3).min(110.0);
-                theme::horizontal_gradient(
-                    ui.painter(),
-                    egui::Rect::from_min_size(photo.min, egui::vec2(melt, photo.height())),
-                    0.0,
-                    left,
-                    Color32::TRANSPARENT,
-                );
-                theme::horizontal_gradient(
-                    ui.painter(),
-                    egui::Rect::from_min_max(
-                        egui::pos2(photo.right() - melt, photo.top()),
-                        photo.max,
-                    ),
-                    0.0,
-                    Color32::TRANSPARENT,
-                    right,
-                );
-            }
-            fade(ui.painter(), rect, color);
-        }
+    // VK's wide artist banner covers the whole header, as on VK's own page;
+    // a shade from the left keeps the name and buttons readable. It does not
+    // open a preview.
+    if let Some(url) = view.image_url
+        && covers.paint_fill(ui, url, rect, 16)
+    {
+        fade(ui.painter(), rect, color);
     }
     let inner = rect.shrink(22.0);
     let text_right = inner.right();

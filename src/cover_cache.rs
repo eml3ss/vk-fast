@@ -268,8 +268,17 @@ impl DiskCache {
     }
 }
 
+/// Set on an edge for an image kept in its own proportions (a wide banner)
+/// rather than cropped square; stored as `<digest>-<edge>w.jpg`.
+pub(crate) const KEEP_ASPECT: u32 = 1 << 24;
+
 fn name(url: &str, edge: u32) -> String {
-    format!("{:x}-{edge}.jpg", Sha256::digest(url.as_bytes()))
+    let digest = Sha256::digest(url.as_bytes());
+    if edge & KEEP_ASPECT != 0 {
+        format!("{digest:x}-{}w.jpg", edge & !KEEP_ASPECT)
+    } else {
+        format!("{digest:x}-{edge}.jpg")
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -280,7 +289,14 @@ fn valid_name(name: &str) -> bool {
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         && matches!(
             suffix,
-            "96.jpg" | "160.jpg" | "256.jpg" | "512.jpg" | "1024.jpg" | "2048.jpg"
+            "96.jpg"
+                | "160.jpg"
+                | "256.jpg"
+                | "512.jpg"
+                | "1024.jpg"
+                | "2048.jpg"
+                | "1024w.jpg"
+                | "2048w.jpg"
         )
 }
 
