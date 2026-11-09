@@ -345,8 +345,7 @@ impl CoverCache {
         response
     }
 
-    /// Paint an image so it covers `rect`, cropped around a point a little
-    /// above its center (where faces usually are). A smaller resident copy is
+    /// Paint an image so it covers `rect`, cropped around its center. A smaller resident copy is
     /// shown while the sharp one loads. Returns false until any copy is ready.
     pub fn paint_fill(&mut self, ui: &egui::Ui, url: &str, rect: egui::Rect, radius: u8) -> bool {
         if url.is_empty() || !rect.is_positive() || !ui.is_rect_visible(rect) {
@@ -393,7 +392,7 @@ impl CoverCache {
             (rect.width() / (image.x * scale)).min(1.0),
             (rect.height() / (image.y * scale)).min(1.0),
         );
-        let center = egui::vec2(0.5, 0.4);
+        let center = egui::vec2(0.5, 0.5);
         let min = egui::pos2(
             (center.x - span.x / 2.0).clamp(0.0, 1.0 - span.x),
             (center.y - span.y / 2.0).clamp(0.0, 1.0 - span.y),
