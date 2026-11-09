@@ -573,7 +573,7 @@ fn no_two_rows_share_a_place_after_stepping_back_over_a_queued_playlist_track() 
     app.selected = app.playing.as_ref().map(Track::key);
     app.synchronize_order();
     // A track of the playlist is also added to the queue, played, and left
-    // with Previous: "Up next" now lists it twice.
+    // with Previous: it is listed once, and no rows share a place.
     let queued = app.library.tracks[3].clone();
     app.add_to_queue(&ctx, queued);
     app.page = MusicPage::Library;
@@ -611,9 +611,10 @@ fn no_two_rows_share_a_place_after_stepping_back_over_a_queued_playlist_track() 
     let mut keys: Vec<_> = upcoming.iter().map(|entry| entry.key).collect();
     keys.sort();
     keys.dedup();
-    assert!(
-        keys.len() < upcoming.len(),
-        "the scenario lists a track twice"
+    assert_eq!(
+        keys.len(),
+        upcoming.len(),
+        "a played row is not listed again in the source"
     );
     tops.sort_by(f32::total_cmp);
     assert!(

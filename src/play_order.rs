@@ -311,6 +311,13 @@ impl PlaybackOrder {
                 };
             }
         }
+        // With repeat the source cycles back: the current track and the
+        // played rows already listed above are not listed a second time.
+        let listed: HashSet<TrackKey> = result
+            .iter()
+            .map(|entry| entry.key)
+            .chain(current)
+            .collect();
         result.extend(self.queued.iter().map(|entry| Upcoming {
             key: entry.key,
             queued_id: Some(entry.id),
@@ -328,6 +335,7 @@ impl PlaybackOrder {
                         .iter()
                         .copied()
                         .filter(|key| self.keys.len() == 1 || Some(*key) != anchor)
+                        .filter(|key| self.keys.len() == 1 || !listed.contains(key))
                         .map(|key| Upcoming {
                             key,
                             queued_id: None,
@@ -349,10 +357,16 @@ impl PlaybackOrder {
             } else {
                 start
             };
-            result.extend(self.keys[start..].iter().copied().map(|key| Upcoming {
-                key,
-                queued_id: None,
-            }));
+            result.extend(
+                self.keys[start..]
+                    .iter()
+                    .copied()
+                    .filter(|key| self.keys.len() == 1 || !listed.contains(key))
+                    .map(|key| Upcoming {
+                        key,
+                        queued_id: None,
+                    }),
+            );
         }
         result
     }
@@ -1034,6 +1048,38 @@ mod tests {
         order.cycle_repeat();
         assert_eq!(order.repeat(), RepeatMode::One);
         assert!(!order.source_reorderable(Some(source[0])));
+    }
+
+    #[test]
+    fn repeat_all_lists_each_track_once_after_stepping_back() {
+        let source = keys(4);
+        let mut order = PlaybackOrder::with_modes(false, RepeatMode::All);
+        order.reset_source(&source, Some(source[0]));
+        let mut current = source[0];
+        for _ in 0..3 {
+            current = order.advance_next(current, true, false).unwrap();
+        }
+        assert_eq!(current, source[3]);
+        let listed = |order: &PlaybackOrder, current| {
+            order
+                .upcoming(Some(current), true)
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>()
+        };
+        // At the end the cycle starts again, without the current track.
+        assert_eq!(listed(&order, current), [source[0], source[1], source[2]]);
+        current = order.advance_previous(current, true).unwrap();
+        assert_eq!(current, source[2]);
+        let after_back = listed(&order, current);
+        assert_eq!(after_back, [source[3], source[0], source[1]]);
+        // Each row plays what it shows.
+        let mut check = order.clone();
+        assert_eq!(check.jump_to(1, Some(current), true), Some(source[0]));
+        // Next walks the same way the list shows.
+        let next = order.advance_next(current, true, false).unwrap();
+        assert_eq!(next, after_back[0]);
+        assert_eq!(order.advance_next(next, true, false), Some(after_back[1]));
     }
 
     #[test]
