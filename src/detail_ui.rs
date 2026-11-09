@@ -178,14 +178,15 @@ pub fn artist_header(
     } else {
         None
     };
-    // A pixel inside the photo's edges, so the backing's antialiased rim
-    // never shows as a light fringe around the rounded corners.
+    // The backing and the banner stay a pixel inside the header, and the
+    // shade covers its full rounded shape, so the banner's antialiased rim is
+    // always under the shade and never shows as a light outline.
     background(ui.painter(), rect.shrink(1.0), color);
     // VK's wide artist banner covers the whole header, as on VK's own page;
     // a shade from the left keeps the name and buttons readable. It does not
     // open a preview.
     if let Some(url) = view.image_url
-        && covers.paint_fill(ui, url, rect, 16)
+        && covers.paint_fill(ui, url, rect.shrink(1.0), 15)
     {
         fade(ui.painter(), rect, color);
     }
