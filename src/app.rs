@@ -10796,6 +10796,7 @@ fn read_only_worker(name: Option<&str>) -> bool {
                 | "vk-screen-cache"
                 | "vk-library-tail"
                 | "vk-album-titles"
+                | "vk-album-names"
         )
     )
 }

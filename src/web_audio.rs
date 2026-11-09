@@ -2719,6 +2719,57 @@ impl WebAudioClient {
 
     /// Like `album_page`, plus whether VK calls the collection an album or
     /// single: a `/music/playlist/` link can point at either.
+    /// Only a release's own title, as its page shows it. Track rows can
+    /// name an EP or single "Unnamed" or after one of its versions.
+    pub fn collection_title(
+        &self,
+        expected_owner: i64,
+        reference: &AlbumRef,
+        canceled: &AtomicBool,
+    ) -> Result<Option<String>, WebAudioError> {
+        self.collection_title_request(
+            expected_owner,
+            reference,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn collection_title_request(
+        &self,
+        expected_owner: i64,
+        reference: &AlbumRef,
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<Option<String>, WebAudioError> {
+        if reference.owner_id == 0 || reference.id <= 0 {
+            return Err(WebAudioError::Format);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let mut params = vec![
+            ("owner_id", reference.owner_id.to_string()),
+            ("playlist_id", reference.id.to_string()),
+        ];
+        if let Some(key) = reference.access_key.as_ref().filter(|key| !key.is_empty()) {
+            params.push(("access_key", key.clone()));
+        }
+        let value = request(generation, "audio.getPlaylistById", params)?;
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
+        let source = value.get("playlist").unwrap_or(&value);
+        let returned = AlbumRef::from_value(source).ok_or(WebAudioError::Format)?;
+        if returned.owner_id != reference.owner_id || returned.id != reference.id {
+            return Err(WebAudioError::Format);
+        }
+        let title = html_escape::decode_html_entities(returned.title.trim()).into_owned();
+        Ok((!title.is_empty() && !title.eq_ignore_ascii_case("unnamed")).then_some(title))
+    }
+
     pub fn collection_page(
         &self,
         expected_owner: i64,
@@ -10682,6 +10733,46 @@ mod playlist_action_tests {
             |_, _, _| Ok(json!(0)),
         );
         assert_eq!(refused, Err(WebAudioError::Rejected));
+    }
+
+    #[test]
+    fn release_titles_come_from_the_release_itself() {
+        let client = client();
+        let mut ep = playlist(-2000);
+        ep.access_key = Some("ep-access".into());
+        for (reply, expected) in [
+            (
+                json!({"playlist":{"owner_id":-2000,"id":10,"title":"BANANATEKK - Versions"}}),
+                Ok(Some("BANANATEKK - Versions".to_string())),
+            ),
+            (
+                json!({"owner_id":-2000,"id":10,"title":"Unnamed"}),
+                Ok(None),
+            ),
+            (
+                json!({"owner_id":-2000,"id":11,"title":"Other"}),
+                Err(WebAudioError::Format),
+            ),
+        ] {
+            let title = client.collection_title_request(
+                42,
+                &ep,
+                &AtomicBool::new(false),
+                |_, method, params| {
+                    assert_eq!(method, "audio.getPlaylistById");
+                    assert_eq!(
+                        params,
+                        vec![
+                            ("owner_id", "-2000".to_string()),
+                            ("playlist_id", "10".into()),
+                            ("access_key", "ep-access".into()),
+                        ]
+                    );
+                    Ok(reply.clone())
+                },
+            );
+            assert_eq!(title, expected);
+        }
     }
 
     #[test]
