@@ -4840,7 +4840,9 @@ impl MusicApp {
         visit: &mut dyn FnMut(&Track),
     ) -> Option<TrackAction> {
         let lane_id = egui::Id::new(("track-row-drag", id));
-        let mut lane = row_drag::Lane::begin(ui, lane_id, origin_y, 58.0, 54.0, |key| {
+        // The open page is the list: a track on two pages starts in place.
+        let scope = row_drag::scope_key(&self.view_queue_origin());
+        let mut lane = row_drag::Lane::begin(ui, lane_id, origin_y, 58.0, 54.0, scope, |key| {
             let tracks = self.view_tracks();
             (0..count).position(|row| {
                 tracks

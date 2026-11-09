@@ -27,6 +27,9 @@ struct Memory {
     /// wherever it was last seen.
     drawn: HashSet<u64>,
     frame: u64,
+    /// The list those rows belonged to: a track in two playlists does not
+    /// fly from one list's place to the other's.
+    scope: u64,
 }
 
 /// A finished drag: the row at `from` goes to `to`, both in display order.
@@ -125,7 +128,8 @@ pub(super) struct Lane {
 }
 
 impl Lane {
-    /// `origin_y` is the top of row 0 and `position` finds a dragged row
+    /// `origin_y` is the top of row 0, `scope` names the list shown (rows of
+    /// another list start in place) and `position` finds a dragged row
     /// again after the list changed.
     pub(super) fn begin(
         ui: &mut egui::Ui,
@@ -133,6 +137,7 @@ impl Lane {
         origin_y: f32,
         stride: f32,
         height: f32,
+        scope: u64,
         position: impl Fn(u64) -> Option<usize>,
     ) -> Self {
         let ctx = ui.ctx().clone();
@@ -175,9 +180,14 @@ impl Lane {
             carry: 0.0,
         };
         let frame = ctx.cumulative_frame_nr();
-        if frame.saturating_sub(memory.frame) <= 1 {
+        if frame.saturating_sub(memory.frame) <= 1 && memory.scope == scope {
             lane.previous = std::mem::take(&mut memory.drawn);
+        } else {
+            // Another list: no row carries its old place, and no drag
+            // started in the old list goes on.
+            memory.active = None;
         }
+        memory.scope = scope;
         if let Some(drag) = &mut memory.active {
             match position(drag.key) {
                 Some(from) if drag.slots.contains(&from) => {
@@ -369,6 +379,14 @@ impl Lane {
         ctx.data_mut(|data| data.insert_temp(self.id, self.memory));
         ghost
     }
+}
+
+/// A list's identity for `Lane::begin`.
+pub(super) fn scope_key(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A stable row identity for animation, from a track key.

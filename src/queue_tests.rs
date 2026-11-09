@@ -559,3 +559,128 @@ fn a_track_coming_back_after_being_hidden_appears_in_place_instead_of_flying() {
         "Song 5 flew from its old place: {places:?}"
     );
 }
+
+#[test]
+fn no_two_rows_share_a_place_after_stepping_back_over_a_queued_playlist_track() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    app.library.tracks = page(6, &[1, 2, 3, 4, 5, 6]).items;
+    for (index, track) in app.library.tracks.iter_mut().enumerate() {
+        track.title = format!("Song {index}");
+    }
+    app.play_queue = Some(app.library.tracks.clone());
+    app.playing = Some(app.library.tracks[0].clone());
+    app.selected = app.playing.as_ref().map(Track::key);
+    app.synchronize_order();
+    // A track of the playlist is also added to the queue, played, and left
+    // with Previous: "Up next" now lists it twice.
+    let queued = app.library.tracks[3].clone();
+    app.add_to_queue(&ctx, queued);
+    app.page = MusicPage::Library;
+    app.queue_ui.open = true;
+    let size = egui::vec2(1280.0, 900.0);
+    let mut frame = 0;
+    for _ in 0..3 {
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    for command in [
+        Command::Next,
+        Command::Next,
+        Command::Previous,
+        Command::Previous,
+    ] {
+        app.handle_system_media_command(&ctx, command);
+        for _ in 0..4 {
+            account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+    }
+    let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    let mut tops: Vec<_> = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with("Song") => {
+                let rect = text.visual_bounding_rect();
+                (rect.left() > size.x * 0.5).then_some(rect.top())
+            }
+            _ => None,
+        })
+        .collect();
+    let upcoming = app
+        .play_order
+        .upcoming(app.playing.as_ref().map(Track::key), false);
+    let mut keys: Vec<_> = upcoming.iter().map(|entry| entry.key).collect();
+    keys.sort();
+    keys.dedup();
+    assert!(
+        keys.len() < upcoming.len(),
+        "the scenario lists a track twice"
+    );
+    tops.sort_by(f32::total_cmp);
+    assert!(
+        tops.windows(2).all(|pair| pair[1] - pair[0] > 30.0),
+        "rows overlap: {tops:?}"
+    );
+}
+
+#[test]
+fn a_track_in_both_playlists_does_not_jump_when_playback_moves_to_the_other() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    let mut first = page(4, &[1, 2, 3, 4]).items;
+    for track in &mut first {
+        track.title = format!("Song {}", track.id);
+    }
+    let shared = first[1].clone();
+    let mut second = page(4, &[7, 8, 9, 10]).items;
+    for track in &mut second {
+        track.title = format!("Song {}", track.id);
+    }
+    // In the second playlist the shared track sits further down.
+    second.insert(3, shared.clone());
+    let start = |app: &mut MusicApp, tracks: &[Track], origin: &str| {
+        app.play_queue = Some(tracks.to_vec());
+        app.queue_origin = Some(origin.into());
+        app.playing = Some(tracks[0].clone());
+        app.selected = Some(tracks[0].key());
+        app.play_order.reset_source(
+            &tracks.iter().map(Track::key).collect::<Vec<_>>(),
+            Some(tracks[0].key()),
+        );
+    };
+    start(&mut app, &first, "playlist:1_1");
+    app.page = MusicPage::Library;
+    app.queue_ui.open = true;
+    let size = egui::vec2(1280.0, 900.0);
+    let mut frame = 0;
+    for _ in 0..4 {
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    start(&mut app, &second, "playlist:1_2");
+    let place = |output: &egui::FullOutput| {
+        account_ui_shapes(output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == shared.title => {
+                    let rect = text.visual_bounding_rect();
+                    (rect.left() > size.x * 0.5).then_some(rect.top())
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let places: Vec<_> = (0..4)
+        .map(|_| {
+            place(&account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                Vec::new(),
+            ))
+        })
+        .collect();
+    assert!(
+        places.iter().all(|y| (y - places[3]).abs() < 0.5),
+        "the shared track jumped: {places:?}"
+    );
+}

@@ -272,20 +272,46 @@ impl MusicApp {
                                 }
                             };
                             let stride = 50.0 + ui.spacing().item_spacing.y;
-                            let row_key = |index: usize| {
-                                let entry: Upcoming = panel.upcoming[index];
-                                match entry.queued_id {
-                                    Some(id) => id,
-                                    None if index >= source_start => row_drag::track_key(entry.key),
-                                    None => row_drag::track_key(entry.key) ^ index as u64,
-                                }
+                            // A track can be listed twice, say once played
+                            // ahead and once in the source: each row gets its
+                            // own identity from its block and its repeat.
+                            let row_keys: Vec<u64> = {
+                                let mut seen: HashMap<(u8, TrackKey), u64> = HashMap::new();
+                                panel
+                                    .upcoming
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, entry)| {
+                                        if let Some(id) = entry.queued_id {
+                                            return row_drag::track_key((1, id as i64));
+                                        }
+                                        let block = u8::from(index >= source_start);
+                                        let repeat = seen.entry((block, entry.key)).or_insert(0);
+                                        *repeat += 1;
+                                        row_drag::track_key((
+                                            i64::from(block) + 2,
+                                            row_drag::track_key(entry.key) as i64
+                                                ^ (*repeat as i64),
+                                        ))
+                                    })
+                                    .collect()
                             };
+                            let row_key = |index: usize| row_keys[index];
                             let mut lane = row_drag::Lane::begin(
                                 ui,
                                 egui::Id::new("queue-row-drag"),
                                 ui.max_rect().top() - range.start as f32 * stride,
                                 stride,
                                 50.0,
+                                // A new source is a new list: its rows start in
+                                // place even where the old list had them too.
+                                row_drag::scope_key(&format!(
+                                    "{}:{:x}",
+                                    self.queue_origin.as_deref().unwrap_or("library"),
+                                    self.play_queue
+                                        .as_ref()
+                                        .map_or(0, |tracks| tracks.as_ptr() as usize),
+                                )),
                                 |key| (0..len).find(|index| row_key(*index) == key),
                             );
                             let lifted = lane.dragging() || lane.suppressing();
