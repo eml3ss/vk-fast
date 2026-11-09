@@ -617,6 +617,8 @@ const MIX_COLORS: [Color32; 4] = [
 fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 208.0), Sense::hover());
     theme::gradient_stops(ui.painter(), rect, 16.0, &MIX_COLORS);
+    // The artist header's shade from the left, in the card's own blue.
+    crate::detail_ui::fade(ui.painter(), rect, Some(MIX_COLORS[0]));
     let inner = rect.shrink(24.0);
     let text_right = inner.right();
     let mut text = ui.new_child(

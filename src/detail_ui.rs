@@ -1018,7 +1018,9 @@ pub(crate) fn background(painter: &egui::Painter, rect: egui::Rect, color: Optio
     theme::horizontal_gradient(painter, rect, 16.0, left, right);
 }
 
-fn fade(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
+/// The shade from the left over a header's picture, keeping its text and
+/// buttons readable; Home's VK Mix card shares it.
+pub(crate) fn fade(painter: &egui::Painter, rect: egui::Rect, color: Option<Color32>) {
     let tint = color.map_or(Color32::from_rgb(22, 36, 57), |color| {
         backdrop(Some(color)).0
     });
