@@ -157,13 +157,9 @@ impl PlaybackOrder {
         current: Option<TrackKey>,
         allow_wrap: bool,
     ) -> Option<TrackKey> {
-        let mut position = position;
         if let Some(key) = self.repeats(current) {
-            // The first row is the repeated current track: play it again.
-            if position == 0 {
-                return Some(key);
-            }
-            position -= 1;
+            // The only row is the repeated current track: play it again.
+            return (position == 0).then_some(key);
         }
         let target = *self.upcoming_after(current, allow_wrap).get(position)?;
         let future = if current.is_some_and(|key| self.history.get(self.cursor) == Some(&key)) {
@@ -218,18 +214,16 @@ impl PlaybackOrder {
         })
     }
 
+    /// With repeat one only the current track comes next: Next and its
+    /// natural end both play it again.
     pub fn upcoming(&self, current: Option<TrackKey>, allow_wrap: bool) -> Vec<Upcoming> {
-        let mut result = self.upcoming_after(current, allow_wrap);
         if let Some(key) = self.repeats(current) {
-            result.insert(
-                0,
-                Upcoming {
-                    key,
-                    queued_id: None,
-                },
-            );
+            return vec![Upcoming {
+                key,
+                queued_id: None,
+            }];
         }
-        result
+        self.upcoming_after(current, allow_wrap)
     }
 
     fn upcoming_after(&self, current: Option<TrackKey>, allow_wrap: bool) -> Vec<Upcoming> {
@@ -965,11 +959,7 @@ mod tests {
         let keys = keys(3);
         let mut order = PlaybackOrder::default();
         order.sync(&keys, Some(keys[0]));
-        let before: Vec<_> = order
-            .upcoming(Some(keys[0]), true)
-            .iter()
-            .map(|row| row.key)
-            .collect();
+        order.enqueue((99, 7));
         order.cycle_repeat();
         order.cycle_repeat();
         let upcoming: Vec<_> = order
@@ -977,11 +967,13 @@ mod tests {
             .iter()
             .map(|row| row.key)
             .collect();
-        assert_eq!(upcoming[0], keys[0]);
-        assert_eq!(&upcoming[1..], &before[..]);
+        assert_eq!(upcoming, [keys[0]], "only the repeated track comes next");
         assert_eq!(order.repeats(Some(keys[0])), Some(keys[0]));
         assert_eq!(order.jump_to(0, Some(keys[0]), true), Some(keys[0]));
-        assert_eq!(order.jump_to(2, Some(keys[0]), true), Some(keys[2]));
+        assert_eq!(order.jump_to(1, Some(keys[0]), true), None);
+        // Turning repeat off brings the rest of the queue back.
+        order.cycle_repeat();
+        assert_eq!(order.upcoming(Some(keys[0]), true).len(), 3);
     }
 
     #[test]
