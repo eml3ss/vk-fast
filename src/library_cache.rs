@@ -97,6 +97,9 @@ struct StoredTrack {
     unavailable: Option<bool>,
     #[serde(default)]
     availability_revision: Option<u8>,
+    /// When the track was added to My music (Unix seconds).
+    #[serde(default)]
+    added: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +153,8 @@ struct BorrowedTrack<'a> {
     unavailable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     availability_revision: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -370,6 +375,7 @@ pub(crate) fn encode_bounded(
                 .then_some(MEMBERSHIP_REVISION),
                 unavailable: track.unavailable,
                 availability_revision: track.unavailable.map(|_| AVAILABILITY_REVISION),
+                added: track.added,
             });
         }
     }
@@ -508,7 +514,7 @@ pub(crate) fn decode_bounded(
         }
         if seen.insert((track.owner_id, track.id)) {
             tracks.push(Track {
-                added: None,
+                added: track.added.filter(|added| *added > 0),
                 id: track.id,
                 owner_id: track.owner_id,
                 artist: track.artist,
@@ -697,6 +703,18 @@ mod tests {
             library_source_key: None,
             unavailable: None,
         }
+    }
+
+    #[test]
+    fn added_dates_survive_the_cache_and_old_rows_have_none() {
+        let fixture = Fixture::new();
+        let path = fixture.path(42);
+        let mut dated = track(1);
+        dated.added = Some(1_660_000_000);
+        save_at(&path, 42, &[dated, track(2)]).unwrap();
+        let restored = load_at(&path, 42).unwrap().unwrap();
+        assert_eq!(restored[0].added, Some(1_660_000_000));
+        assert_eq!(restored[1].added, None);
     }
 
     #[test]

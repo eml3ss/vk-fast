@@ -5861,6 +5861,37 @@ impl MusicApp {
         }
     }
 
+    /// My music comes from VK's website without dates. While it is open,
+    /// fill them 100 tracks at a time from the API, which reports when the
+    /// account's own copy was added; this enables "Date added".
+    fn hydrate_library_dates(&mut self, ctx: &egui::Context) {
+        if self.demo
+            || self.metadata_request.is_some()
+            || self.page != MusicPage::Library
+            || self.settings_open
+        {
+            return;
+        }
+        let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
+            return;
+        };
+        let keys: Vec<_> = self
+            .library
+            .tracks
+            .iter()
+            .filter(|track| {
+                track.added.is_none()
+                    && track.owner_id == owner
+                    && !self.metadata_attempted.contains(&track.key())
+            })
+            .map(Track::key)
+            .take(100)
+            .collect();
+        if !keys.is_empty() {
+            self.hydrate_metadata(ctx, keys);
+        }
+    }
+
     fn poll_metadata(&mut self, ctx: &egui::Context) {
         let Some(request) = &self.metadata_request else {
             return;
@@ -5945,6 +5976,12 @@ impl MusicApp {
             }
             if track.cover_url.is_none() && metadata.cover_url.is_some() {
                 track.cover_url = metadata.cover_url.clone();
+                changed = true;
+            }
+            // An own copy's VK date is when it was added to My music.
+            if track.added.is_none() && metadata.added.is_some() && track.owner_id == request.owner
+            {
+                track.added = metadata.added;
                 changed = true;
             }
             changed
@@ -10136,6 +10173,7 @@ impl MusicApp {
         self.drive_search(ctx);
         self.poll_detail(ctx);
         self.poll_metadata(ctx);
+        self.hydrate_library_dates(ctx);
         self.poll_like(ctx);
         self.poll_dislike(ctx);
         self.poll_playlist_add(ctx);
