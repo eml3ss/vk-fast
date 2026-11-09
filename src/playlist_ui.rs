@@ -730,7 +730,7 @@ fn playlist_menu(ui: &mut egui::Ui, language: Language, item: &PlaylistItem) -> 
             if item.can_edit {
                 language.text("Удалить", "Delete")
             } else {
-                language.text("Убрать из библиотеки", "Remove from Your Library")
+                language.text("Удалить из библиотеки", "Remove from Your Library")
             },
             true,
             Action::Delete(reference.clone()),
@@ -2047,7 +2047,7 @@ mod tests {
                 language.text("Воспроизвести", "Play"),
                 language.text("Перемешать", "Shuffle play"),
                 language.text("Открепить", "Unpin"),
-                language.text("Убрать из библиотеки", "Remove from Your Library"),
+                language.text("Удалить из библиотеки", "Remove from Your Library"),
                 language.text("Микс по плейлисту", "Go to playlist mix"),
                 language.text("Копировать ссылку", "Copy link"),
             ] {
@@ -2059,7 +2059,7 @@ mod tests {
                 h.click(
                     text_rect(
                         &output,
-                        language.text("Убрать из библиотеки", "Remove from Your Library")
+                        language.text("Удалить из библиотеки", "Remove from Your Library")
                     )
                     .unwrap()
                     .center()
