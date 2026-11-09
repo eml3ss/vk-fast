@@ -132,6 +132,42 @@ pub fn save_home(account_id: i64, home: &Home) -> io::Result<()> {
     save(account_id, "home", home)
 }
 
+/// Album and release names by album: (owner_id, album_id, title). Only
+/// display names: no access keys.
+pub type AlbumNames = Vec<(i64, i64, String)>;
+
+/// The most album names kept, within the file size limit.
+pub const MAX_ALBUM_NAMES: usize = 20_000;
+
+/// Read off the UI thread; malformed names are dropped one by one.
+pub fn load_album_names(account_id: i64) -> io::Result<Option<AlbumNames>> {
+    Ok(load::<AlbumNames>(account_id, "albums")?.map(|mut names| {
+        names.retain(|(owner, id, title)| valid_album_name(*owner, *id, title));
+        names.truncate(MAX_ALBUM_NAMES);
+        names
+    }))
+}
+
+/// Write off the UI thread.
+pub fn save_album_names(account_id: i64, names: &AlbumNames) -> io::Result<()> {
+    if names.len() > MAX_ALBUM_NAMES
+        || !names
+            .iter()
+            .all(|(owner, id, title)| valid_album_name(*owner, *id, title))
+    {
+        return Err(invalid());
+    }
+    save(account_id, "albums", names)
+}
+
+fn valid_album_name(owner: i64, id: i64, title: &str) -> bool {
+    owner != 0
+        && id > 0
+        && !title.trim().is_empty()
+        && title.len() <= 512
+        && !title.chars().any(char::is_control)
+}
+
 pub fn load_playlist_dates(account_id: i64) -> io::Result<Option<PlaylistDates>> {
     load(account_id, "dates")
 }
@@ -180,5 +216,23 @@ mod tests {
         assert_eq!(restored.data, home);
         assert_eq!(restored.account_id, 42);
         assert!(!String::from_utf8(bytes).unwrap().contains("access"));
+    }
+
+    #[test]
+    fn album_names_keep_only_plain_titles() {
+        assert!(valid_album_name(
+            -2000928961,
+            28928961,
+            "BANANATEKK (Versions)"
+        ));
+        for (owner, id, title) in [
+            (0, 1, "Album"),
+            (-1, 0, "Album"),
+            (-1, 1, "  "),
+            (-1, 1, "Line\nbreak"),
+        ] {
+            assert!(!valid_album_name(owner, id, title));
+        }
+        assert!(!valid_album_name(-1, 1, &"x".repeat(513)));
     }
 }

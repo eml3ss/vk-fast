@@ -308,7 +308,7 @@ impl MusicApp {
                     .collect::<Vec<_>>()
                     .join(", ")
             },
-            album: track.display_album_title().map(str::to_owned),
+            album: self.player_album(track),
             cover_url: track
                 .cover_url
                 .as_deref()

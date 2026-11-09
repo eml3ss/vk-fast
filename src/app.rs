@@ -10682,6 +10682,7 @@ impl MusicApp {
         self.poll_playlist_removal(ctx);
         self.poll_reorder(ctx);
         self.poll_album_titles(ctx);
+        self.request_release_titles(ctx);
         self.poll_playlist_create(ctx);
         self.poll_audio_upload(ctx);
         self.poll_playlist_actions(ctx);
@@ -10833,6 +10834,7 @@ impl Drop for MusicApp {
         // A removal whose Undo was still offered is sent; the worker below
         // is awaited like other account changes.
         self.send_playlist_removal();
+        self.save_album_names(true);
         if self.volume_save_at.is_some() {
             let _ = save_volume_value(self.player.snapshot().volume);
         }

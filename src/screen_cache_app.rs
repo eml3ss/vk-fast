@@ -8,6 +8,7 @@ pub(super) type Snapshot = (
     Option<screen_cache::Home>,
     Option<screen_cache::Library>,
     Option<screen_cache::PlaylistDates>,
+    Option<screen_cache::AlbumNames>,
 );
 
 fn playlist_key(reference: &AlbumRef) -> String {
@@ -58,7 +59,8 @@ impl MusicApp {
                 let home = screen_cache::load_home(owner).ok().flatten();
                 let library = screen_cache::load_library(owner).ok().flatten();
                 let dates = screen_cache::load_playlist_dates(owner).ok().flatten();
-                let _ = sender.send((home, library, dates));
+                let albums = screen_cache::load_album_names(owner).ok().flatten();
+                let _ = sender.send((home, library, dates, albums));
                 ctx.request_repaint();
             })
         {
@@ -73,10 +75,10 @@ impl MusicApp {
             return;
         };
         let owner = *owner;
-        let (home, library, dates) = match receiver.try_recv() {
+        let (home, library, dates, albums) = match receiver.try_recv() {
             Ok(snapshot) => snapshot,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => (None, None, None),
+            Err(TryRecvError::Disconnected) => (None, None, None, None),
         };
         self.screen_cache = None;
         if self
@@ -85,6 +87,9 @@ impl MusicApp {
             .is_none_or(|session| session.profile.id != owner)
         {
             return;
+        }
+        if let Some(albums) = albums {
+            self.album_titles.restore(albums);
         }
         if let Some(dates) = dates {
             for (playlist, rows) in dates {

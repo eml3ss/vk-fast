@@ -22,6 +22,8 @@ impl Drop for Request {
 /// Titles read from releases themselves; `None` when VK gave none.
 pub(super) struct ReleaseRequest {
     owner: i64,
+    /// Releases asked about, until the answer arrives.
+    albums: HashSet<AlbumKey>,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Vec<(AlbumKey, Option<String>)>>,
 }
@@ -47,7 +49,13 @@ pub(super) struct State {
     releases: Vec<AlbumRef>,
     releases_attempted: HashSet<AlbumKey>,
     release_request: Option<ReleaseRequest>,
+    /// Names learned since the last save to the account's cache.
+    unsaved: bool,
+    saved_at: Option<Instant>,
 }
+
+/// Saves of learned names are at most this frequent.
+const SAVE_EVERY: Duration = Duration::from_secs(5);
 
 fn unnamed(title: &str) -> bool {
     title.trim().eq_ignore_ascii_case("unnamed")
@@ -56,6 +64,24 @@ fn unnamed(title: &str) -> bool {
 impl State {
     pub(super) fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Names saved by an earlier run; fresher ones learned meanwhile win.
+    pub(super) fn restore(&mut self, saved: crate::screen_cache::AlbumNames) {
+        for (owner, id, title) in saved {
+            self.names.entry((owner, id)).or_insert(title);
+        }
+    }
+
+    fn learn(&mut self, key: AlbumKey, title: &str) {
+        let title = title.trim();
+        if title.is_empty() || unnamed(title) {
+            return;
+        }
+        if self.names.get(&key).map(String::as_str) != Some(title) {
+            self.names.insert(key, title.to_owned());
+            self.unsaved = true;
+        }
     }
 
     /// The album text of a drawn row, asking VK when it only gave an ID or
@@ -74,7 +100,7 @@ impl State {
             return None;
         }
         if !unnamed(raw) {
-            self.names.insert(key, raw.to_owned());
+            self.learn(key, raw);
             return Some(raw.to_owned());
         }
         if self.releases_attempted.contains(&key) {
@@ -110,7 +136,9 @@ fn album_text(track: &Track, name: &str) -> Option<String> {
 impl MusicApp {
     /// Asks VK for the names the drawn rows are missing.
     pub(super) fn request_album_titles(&mut self, ctx: &egui::Context) {
+        self.fill_own_playlist_albums();
         self.request_release_titles(ctx);
+        self.save_album_names(false);
         let wanted = std::mem::take(&mut self.album_titles.wanted);
         if self.demo || self.album_titles.request.is_some() || wanted.is_empty() {
             return;
@@ -156,7 +184,78 @@ impl MusicApp {
         }
     }
 
-    fn request_release_titles(&mut self, ctx: &egui::Context) {
+    /// An open own playlist names all its rows, not only the visible ones,
+    /// so the account's cache holds the whole list. Releases VK calls
+    /// "Unnamed" are read as well.
+    fn fill_own_playlist_albums(&mut self) {
+        if self.own_playlist().is_none()
+            || !self.album_titles.wanted.is_empty()
+            || !self.album_titles.releases.is_empty()
+        {
+            return;
+        }
+        let state = &self.album_titles;
+        let mut wanted = Vec::new();
+        let mut releases = Vec::new();
+        for track in self.view_tracks() {
+            let Some(album) = &track.album else { continue };
+            let key = (album.owner_id, album.id);
+            if state.names.contains_key(&key) {
+                continue;
+            }
+            if album.title.trim().is_empty() {
+                if wanted.len() < 100 && !state.attempted.contains(&track.key()) {
+                    wanted.push(track.key());
+                }
+            } else if unnamed(&album.title)
+                && releases.len() < RELEASES_PER_REQUEST
+                && !state.releases_attempted.contains(&key)
+            {
+                releases.push(album.clone());
+            }
+            if wanted.len() >= 100 && releases.len() >= RELEASES_PER_REQUEST {
+                break;
+            }
+        }
+        self.album_titles.wanted = wanted;
+        self.album_titles.releases = releases;
+    }
+
+    /// Keeps learned names in the account's cache, written off the UI
+    /// thread; `now` skips the wait between saves, as on exit.
+    pub(super) fn save_album_names(&mut self, now: bool) {
+        let state = &self.album_titles;
+        if !state.unsaved
+            || cfg!(test)
+            || self.demo
+            || (!now && state.saved_at.is_some_and(|at| at.elapsed() < SAVE_EVERY))
+        {
+            return;
+        }
+        let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
+            return;
+        };
+        let names: crate::screen_cache::AlbumNames = state
+            .names
+            .iter()
+            .take(crate::screen_cache::MAX_ALBUM_NAMES)
+            .map(|((album_owner, id), title)| (*album_owner, *id, title.clone()))
+            .collect();
+        self.album_titles.unsaved = false;
+        self.album_titles.saved_at = Some(Instant::now());
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-screen-cache-save".into())
+            .spawn(move || {
+                let _ = crate::screen_cache::save_album_names(owner, &names);
+            })
+        {
+            self.workers.push(worker);
+        }
+    }
+
+    /// Also runs from the background tick: the player, system media and
+    /// Discord need the playing track's release without window frames.
+    pub(super) fn request_release_titles(&mut self, ctx: &egui::Context) {
         // The playing track's release too: the player, system media and
         // Discord name it as well.
         if let Some(album) = self
@@ -191,9 +290,13 @@ impl MusicApp {
             return;
         }
         let owner = session.profile.id;
+        let asked: HashSet<_> = albums
+            .iter()
+            .map(|album| (album.owner_id, album.id))
+            .collect();
         self.album_titles
             .releases_attempted
-            .extend(albums.iter().map(|album| (album.owner_id, album.id)));
+            .extend(asked.iter().copied());
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_cancel = canceled.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -220,6 +323,7 @@ impl MusicApp {
             self.workers.push(worker);
             self.album_titles.release_request = Some(ReleaseRequest {
                 owner,
+                albums: asked,
                 canceled,
                 receiver,
             });
@@ -247,9 +351,9 @@ impl MusicApp {
             ctx.request_repaint();
             return;
         }
-        self.album_titles
-            .names
-            .extend(named.iter().map(|(key, title)| (*key, title.clone())));
+        for (key, title) in &named {
+            self.album_titles.learn(*key, title);
+        }
         self.name_tracks(ctx, &named);
     }
 
@@ -307,11 +411,8 @@ impl MusicApp {
             if !album.title.trim().is_empty() {
                 // "Unnamed" still moves the row on to reading the release.
                 by_album.insert((album.owner_id, album.id), album.clone());
-                if !unnamed(&album.title) {
-                    self.album_titles
-                        .names
-                        .insert((album.owner_id, album.id), album.title.trim().to_owned());
-                }
+                self.album_titles
+                    .learn((album.owner_id, album.id), &album.title);
             }
         }
         if by_album.is_empty() {
@@ -346,6 +447,35 @@ impl MusicApp {
             self.save_library(ctx);
         }
         ctx.request_repaint();
+    }
+}
+
+impl MusicApp {
+    /// The album the player, system media and Discord show: a release's
+    /// own title once known. While VK is asked about an "Unnamed" release
+    /// none is shown, so the song's title does not flash first; the song
+    /// stands in only when VK gives no title or cannot be asked.
+    pub(super) fn player_album(&self, track: &Track) -> Option<String> {
+        let album = track.album.as_ref()?;
+        let key = (album.owner_id, album.id);
+        if let Some(name) = self.album_titles.names.get(&key) {
+            return Some(name.clone());
+        }
+        let can_ask = !self.demo
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.music.is_some());
+        let answered = self.album_titles.releases_attempted.contains(&key)
+            && !self
+                .album_titles
+                .release_request
+                .as_ref()
+                .is_some_and(|request| request.albums.contains(&key));
+        if unnamed(&album.title) && can_ask && !answered {
+            return None;
+        }
+        track.display_album_title().map(str::to_owned)
     }
 }
 
@@ -446,6 +576,97 @@ mod tests {
         single.subtitle = Some("Slowed".into());
         app.album_titles.releases_attempted.insert((-9, 6));
         assert_eq!(app.album_titles.label(&single).as_deref(), Some("Song"));
+    }
+
+    #[test]
+    fn the_player_waits_for_a_release_title_instead_of_flashing_the_song() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let mut track = with_album(1, 5, "Unnamed");
+        track.title = "BANANATEKK - Slowed".into();
+        // Without a VK connection (here, the demo) the song stands in.
+        assert_eq!(
+            app.player_album(&track).as_deref(),
+            Some("BANANATEKK - Slowed")
+        );
+        app.demo = false;
+        app.session.as_mut().unwrap().music = Some(
+            WebAudioClient::new(vec![crate::web_session::SessionCookie {
+                domain: ".vk.ru".into(),
+                path: "/".into(),
+                name: "remixsid".into(),
+                value: "synthetic-release-title".into(),
+                secure: true,
+                expires_unix: None,
+            }])
+            .unwrap(),
+        );
+        assert_eq!(app.player_album(&track), None, "not asked yet");
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        app.album_titles.releases_attempted.insert((-9, 5));
+        app.album_titles.release_request = Some(ReleaseRequest {
+            owner: 42,
+            albums: HashSet::from([(-9, 5)]),
+            canceled: Arc::new(AtomicBool::new(false)),
+            receiver,
+        });
+        assert_eq!(app.player_album(&track), None, "asked, no answer yet");
+        app.album_titles.release_request = None;
+        assert_eq!(
+            app.player_album(&track).as_deref(),
+            Some("BANANATEKK - Slowed"),
+            "VK gave no title"
+        );
+        app.album_titles
+            .names
+            .insert((-9, 5), "BANANATEKK (Versions)".into());
+        assert_eq!(
+            app.player_album(&track).as_deref(),
+            Some("BANANATEKK (Versions)")
+        );
+    }
+
+    #[test]
+    fn own_playlists_name_every_row_and_saved_names_show_at_once() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let album = AlbumRef {
+            owner_id: 42,
+            id: 7,
+            title: "Mine".into(),
+            access_key: None,
+            cover_url: None,
+        };
+        app.page = MusicPage::Playlist(album.clone());
+        let tracks: Vec<_> = (1..=150)
+            .map(|id| with_album(id, 1000 + id, if id % 2 == 0 { "Unnamed" } else { "" }))
+            .collect();
+        app.details.insert(
+            app.page.detail_key().unwrap(),
+            Arc::new(DetailPage::Playlist(crate::web_audio::AlbumPage {
+                album,
+                artists: Vec::new(),
+                year: None,
+                description: None,
+                creator: None,
+                tracks: tracks.clone(),
+                total_tracks: Some(150),
+                stats: crate::web_audio::AlbumStats::default(),
+            })),
+        );
+        app.fill_own_playlist_albums();
+        // Rows beyond the screen too: 100 IDs at a time, a few releases.
+        assert_eq!(app.album_titles.wanted.len(), 75);
+        assert_eq!(app.album_titles.releases.len(), RELEASES_PER_REQUEST);
+        // Names saved by an earlier run show without asking VK.
+        let mut restored = State::default();
+        restored.restore(vec![(-9, 1001, "Saved album".into())]);
+        assert_eq!(restored.label(&tracks[0]).as_deref(), Some("Saved album"));
+        assert!(restored.wanted.is_empty() && !restored.unsaved);
+        restored.learn((-9, 1002), "Unnamed");
+        assert!(!restored.unsaved, "the placeholder is never saved");
+        restored.learn((-9, 1002), "BANANATEKK (Versions)");
+        assert!(restored.unsaved);
     }
 
     #[test]
