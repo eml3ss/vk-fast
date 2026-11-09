@@ -502,3 +502,60 @@ fn source_rows_drag_into_a_new_play_order_without_touching_the_list_itself() {
     assert_eq!(unchanged, library, "My music keeps its own order");
     assert_eq!(app.playing.as_ref().unwrap().key(), library[0]);
 }
+
+#[test]
+fn a_track_coming_back_after_being_hidden_appears_in_place_instead_of_flying() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    app.library.tracks = page(8, &[1, 2, 3, 4, 5, 6, 7, 8]).items;
+    for (index, track) in app.library.tracks.iter_mut().enumerate() {
+        track.title = format!("Song {index}");
+    }
+    app.play_queue = Some(app.library.tracks.clone());
+    let play = |app: &mut MusicApp, index: usize| {
+        let track = app.library.tracks[index].clone();
+        app.selected = Some(track.key());
+        app.play_order.select_source(track.key());
+        app.playing = Some(track);
+        app.synchronize_order();
+    };
+    play(&mut app, 4);
+    app.page = MusicPage::Library;
+    app.queue_ui.open = true;
+    let size = egui::vec2(1280.0, 800.0);
+    let mut frame = 0;
+    let row = |output: &egui::FullOutput| {
+        account_ui_shapes(output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Song 5" => {
+                    let rect = text.visual_bounding_rect();
+                    (rect.left() > size.x * 0.5).then_some(rect.top())
+                }
+                _ => None,
+            })
+    };
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..4 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    let first_place = row(&output).unwrap();
+    // Hidden while the queue is closed, Song 5 moves four rows down.
+    app.queue_ui.open = false;
+    for _ in 0..6 {
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    play(&mut app, 0);
+    app.queue_ui.open = true;
+    let mut places = Vec::new();
+    for _ in 0..6 {
+        let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        places.extend(row(&output));
+    }
+    let settled = *places.last().unwrap();
+    assert!(settled > first_place + 150.0);
+    assert!(
+        places.iter().all(|y| (y - settled).abs() < 0.5),
+        "Song 5 flew from its old place: {places:?}"
+    );
+}

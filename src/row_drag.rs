@@ -22,6 +22,11 @@ struct Memory {
     active: Option<Drag>,
     /// The press that started a drag must not also click on release.
     suppress_release: bool,
+    /// Rows drawn in the frame below; only they keep moving. A row that
+    /// was hidden for a while starts in place instead of flying in from
+    /// wherever it was last seen.
+    drawn: HashSet<u64>,
+    frame: u64,
 }
 
 /// A finished drag: the row at `from` goes to `to`, both in display order.
@@ -112,6 +117,11 @@ pub(super) struct Lane {
     escape: bool,
     settled: Option<Drag>,
     pub(super) moved: Option<Move>,
+    previous: HashSet<u64>,
+    drawn: HashSet<u64>,
+    /// How far the row above still is from its place, so a row entering
+    /// below it moves along instead of waiting in its final place.
+    carry: f32,
 }
 
 impl Lane {
@@ -160,7 +170,14 @@ impl Lane {
             escape,
             settled: None,
             moved: None,
+            previous: HashSet::new(),
+            drawn: HashSet::new(),
+            carry: 0.0,
         };
+        let frame = ctx.cumulative_frame_nr();
+        if frame.saturating_sub(memory.frame) <= 1 {
+            lane.previous = std::mem::take(&mut memory.drawn);
+        }
         if let Some(drag) = &mut memory.active {
             match position(drag.key) {
                 Some(from) if drag.slots.contains(&from) => {
@@ -229,19 +246,23 @@ impl Lane {
             .is_some_and(|drag| drag.key == key)
     }
 
-    /// Where row `index` is drawn now, sliding to its slot.
-    pub(super) fn rect(&self, ctx: &egui::Context, index: usize, key: u64) -> egui::Rect {
+    /// Where row `index` is drawn now, sliding to its slot. Call it for the
+    /// drawn rows from top to bottom.
+    pub(super) fn rect(&mut self, ctx: &egui::Context, index: usize, key: u64) -> egui::Rect {
         let slot = match self.memory.active.as_ref().or(self.settled.as_ref()) {
             Some(drag) if index == drag.from => drag.to,
             Some(drag) if drag.from < drag.to && index > drag.from && index <= drag.to => index - 1,
             Some(drag) if drag.to < drag.from && index >= drag.to && index < drag.from => index + 1,
             _ => index,
         };
-        let y = ctx.animate_value_with_time(
-            self.id.with(("row-y", key)),
-            slot as f32 * self.stride,
-            REORDER_SECONDS,
-        );
+        let id = self.id.with(("row-y", key));
+        let target = slot as f32 * self.stride;
+        if !self.previous.contains(&key) {
+            ctx.animate_value_with_time(id, target + self.carry, 0.0);
+        }
+        let y = ctx.animate_value_with_time(id, target, REORDER_SECONDS);
+        self.carry = y - target;
+        self.drawn.insert(key);
         egui::Rect::from_min_size(
             egui::pos2(self.left, self.origin_y + y),
             egui::vec2(self.width, self.height),
@@ -340,6 +361,11 @@ impl Lane {
         if !self.held {
             self.memory.suppress_release = false;
         }
+        if let Some(drag) = &self.memory.active {
+            self.drawn.insert(drag.key);
+        }
+        self.memory.drawn = std::mem::take(&mut self.drawn);
+        self.memory.frame = ctx.cumulative_frame_nr();
         ctx.data_mut(|data| data.insert_temp(self.id, self.memory));
         ghost
     }
