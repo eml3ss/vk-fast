@@ -5518,6 +5518,15 @@ fn parse_track(value: &Value) -> Result<Track, WebAudioError> {
         } else {
             audio_unavailable_from_object(value)
         },
+        explicit: if let Some(row) = value.as_array() {
+            row.get(10)
+                .and_then(Value::as_u64)
+                .is_some_and(|flags| flags & crate::model::TUPLE_EXPLICIT_FLAG != 0)
+        } else {
+            crate::model::explicit_from_value(
+                value.get("is_explicit").or_else(|| value.get("isExplicit")),
+            )
+        },
     })
 }
 
@@ -6247,6 +6256,22 @@ mod tests {
         );
         row[14] = json!("");
         assert!(parse_track(&row).unwrap().cover_url.is_none());
+        // The explicit mark: tuple flag bit 1024, or the object's field.
+        assert!(!parse_track(&row).unwrap().explicit);
+        row[10] = json!(1024 | 16);
+        assert!(parse_track(&row).unwrap().explicit);
+        row[10] = json!(16);
+        assert!(!parse_track(&row).unwrap().explicit);
+        for (field, value, explicit) in [
+            ("is_explicit", json!(true), true),
+            ("isExplicit", json!(1), true),
+            ("is_explicit", json!(false), false),
+        ] {
+            let object = json!({"id":42,"owner_id":-7,"title":"Title","artist":"Artist","duration":180, field: value});
+            assert_eq!(parse_track(&object).unwrap().explicit, explicit, "{field}");
+            let api: Track = serde_json::from_value(object).unwrap();
+            assert_eq!(api.explicit, explicit, "API {field}");
+        }
         let object = json!({"id":42,"owner_id":-7,"title":"Title","artist":"Artist","duration":180,"coverUrl":"https://images.example.test/object.jpg"});
         assert_eq!(
             parse_track(&object).unwrap().cover_url.as_deref(),

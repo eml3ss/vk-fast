@@ -478,6 +478,7 @@ mod tests {
 
     fn track() -> Track {
         Track {
+            explicit: false,
             added: None,
             id: 8,
             owner_id: -9,

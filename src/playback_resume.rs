@@ -252,6 +252,7 @@ mod tests {
             queue: None,
             position,
             track: Track {
+                explicit: false,
                 added: None,
                 id,
                 owner_id: -7,

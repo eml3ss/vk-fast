@@ -572,12 +572,15 @@ impl MusicApp {
                     .truncate()
                     .selectable(false),
                 );
-                if let Some(artist) = detail_ui::artist_links_with_font(
-                    ui,
-                    &track.artists,
-                    &track.artist,
-                    egui::FontId::proportional(12.0),
-                ) {
+                let badge = theme::explicit_badge(ui.ctx(), Some(track), 12.0);
+                if let Some(artist) = theme::badged_line(ui, badge, |ui| {
+                    detail_ui::artist_links_with_font(
+                        ui,
+                        &track.artists,
+                        &track.artist,
+                        egui::FontId::proportional(12.0),
+                    )
+                }) {
                     action = Some(Action::Track(Box::new(TrackAction::Artist(artist))));
                 }
             },

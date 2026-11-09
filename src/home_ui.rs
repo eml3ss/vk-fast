@@ -526,11 +526,18 @@ fn friend_card(
             .truncate()
             .selectable(false),
         );
-        line.add(
-            egui::Label::new(RichText::new(&track.artist).small().color(theme::MUTED))
-                .truncate()
-                .selectable(false),
+        let badge = theme::explicit_badge(
+            line.ctx(),
+            Some(track),
+            egui::TextStyle::Small.resolve(line.style()).size,
         );
+        theme::badged_line(&mut line, badge, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(&track.artist).small().color(theme::MUTED))
+                    .truncate()
+                    .selectable(false),
+            )
+        });
         hit.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &track.title));
         if hit
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -846,6 +853,17 @@ fn card_text(
     title: impl Into<egui::WidgetText>,
     subtitle: &str,
 ) {
+    card_text_badged(ui, rect, title, subtitle, None);
+}
+
+/// The card's text with the track's explicit badge before the subtitle.
+fn card_text_badged(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    title: impl Into<egui::WidgetText>,
+    subtitle: &str,
+    badge: Option<f32>,
+) {
     let mut text = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("home-card-text")
@@ -855,11 +873,13 @@ fn card_text(
     text.set_clip_rect(ui.clip_rect().intersect(rect));
     text.spacing_mut().item_spacing.y = 3.0;
     text.add(egui::Label::new(title).truncate().selectable(false));
-    text.add(
-        egui::Label::new(RichText::new(subtitle).small().color(theme::MUTED))
-            .truncate()
-            .selectable(false),
-    );
+    theme::badged_line(&mut text, badge, |ui| {
+        ui.add(
+            egui::Label::new(RichText::new(subtitle).small().color(theme::MUTED))
+                .truncate()
+                .selectable(false),
+        )
+    });
 }
 
 fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) -> Option<Action> {
@@ -988,7 +1008,12 @@ fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width:
     if response.hovered() {
         hover_play(ui.painter(), art);
     }
-    card_text(
+    let badge = theme::explicit_badge(
+        ui.ctx(),
+        Some(track),
+        egui::TextStyle::Small.resolve(ui.style()).size,
+    );
+    card_text_badged(
         ui,
         egui::Rect::from_min_max(
             rect.min + egui::vec2(72.0, 15.0),
@@ -1000,6 +1025,7 @@ fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width:
             egui::FontId::new(16.0, theme::semibold()),
         ),
         &track.artist,
+        badge,
     );
     response
 }

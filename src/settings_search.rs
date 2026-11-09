@@ -15,6 +15,7 @@ pub enum Setting {
     DoubleClickPlay,
     SearchOnEnter,
     MiddleAutoscroll,
+    ExplicitBadge,
     NormalizeVolume,
     MixAfterQueue,
     Broadcast,
@@ -70,6 +71,9 @@ impl Query {
             }
             Setting::MiddleAutoscroll => {
                 "интерфейс автопрокрутка прокрутка колёсико колесико средняя кнопка мыши щелчок interface autoscroll auto scroll middle click mouse wheel button"
+            }
+            Setting::ExplicitBadge => {
+                "интерфейс значок иконка метка буква е e explicit эксплисит нецензурный ненормативная лексика мат 18+ треки название interface badge icon label letter explicit content mature lyrics tracks title"
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"

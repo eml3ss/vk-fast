@@ -1315,6 +1315,9 @@ pub struct MusicApp {
     search_on_enter_save_failed: bool,
     middle_autoscroll: bool,
     middle_autoscroll_save_failed: bool,
+    /// The "E" badge by explicit tracks' titles.
+    explicit_badge: bool,
+    explicit_badge_save_failed: bool,
     autoscroll: crate::autoscroll::Autoscroll,
     /// The page area of the last frame, where a middle click autoscrolls.
     page_rect: egui::Rect,
@@ -1682,6 +1685,8 @@ impl MusicApp {
             search_on_enter_save_failed: false,
             middle_autoscroll: preferences::load_middle_autoscroll(),
             middle_autoscroll_save_failed: false,
+            explicit_badge: preferences::load_explicit_badge(),
+            explicit_badge_save_failed: false,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
@@ -8346,9 +8351,14 @@ impl MusicApp {
                             .truncate()
                             .selectable(false),
                         );
-                        if let Some(artist) =
+                        let badge = theme::explicit_badge(
+                            ui.ctx(),
+                            Some(track),
+                            egui::TextStyle::Small.resolve(ui.style()).size,
+                        );
+                        if let Some(artist) = theme::badged_line(ui, badge, |ui| {
                             detail_ui::artist_links(ui, &track.artists, &track.artist)
-                        {
+                        }) {
                             action = Some(TrackAction::Artist(artist));
                         }
                     },
@@ -8645,6 +8655,10 @@ impl MusicApp {
                             + separator * artists.len().saturating_sub(1) as f32
                     }
                 });
+                let artist_badge =
+                    theme::explicit_badge(ui.ctx(), title_track.as_ref(), artist_font.size);
+                let artist_width =
+                    artist_width + artist_badge.map_or(0.0, |size| size + theme::EXPLICIT_GAP);
                 let text_width = title_width.max(artist_width).ceil().min(max_text_width);
                 ui.spacing_mut().item_spacing.x = heart_gap;
                 ui.allocate_ui_with_layout(
@@ -8694,12 +8708,14 @@ impl MusicApp {
                             ),
                         ));
                         if has_track {
-                            if let Some(artist) = detail_ui::artist_links_with_font(
-                                ui,
-                                &artists,
-                                &artist,
-                                artist_font.clone(),
-                            ) {
+                            if let Some(artist) = theme::badged_line(ui, artist_badge, |ui| {
+                                detail_ui::artist_links_with_font(
+                                    ui,
+                                    &artists,
+                                    &artist,
+                                    artist_font.clone(),
+                                )
+                            }) {
                                 metadata_action = Some(TrackAction::Artist(artist));
                             }
                         } else {
@@ -9749,6 +9765,7 @@ impl MusicApp {
                 Setting::DoubleClickPlay,
                 Setting::SearchOnEnter,
                 Setting::MiddleAutoscroll,
+                Setting::ExplicitBadge,
             ],
             SettingsSection::Playback => &[
                 Setting::NormalizeVolume,
@@ -9964,6 +9981,7 @@ impl MusicApp {
                         || query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
                         || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
                     {
                         ui.add_space(16.0);
                     }
@@ -9993,6 +10011,7 @@ impl MusicApp {
                     if query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
                         || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
                     {
                         ui.add_space(16.0);
                     }
@@ -10046,7 +10065,9 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::MiddleAutoscroll) {
+                    if query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -10068,6 +10089,33 @@ impl MusicApp {
                         .color(MUTED),
                     );
                     if self.middle_autoscroll_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::ExplicitBadge) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::ExplicitBadge) {
+                    let label = t("Значок Explicit у треков", "Explicit badge on tracks");
+                    if theme::switch(ui, &mut self.explicit_badge, label).changed() {
+                        self.explicit_badge_save_failed = !cfg!(test)
+                            && preferences::save_explicit_badge(self.explicit_badge).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Буква E в квадрате рядом с названием трека, который VK отметил как содержащий ненормативную лексику.",
+                            "A boxed E next to the title of tracks VK marks as explicit.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.explicit_badge_save_failed {
                         ui.colored_label(
                             Color32::from_rgb(255, 158, 153),
                             t(
@@ -10344,6 +10392,7 @@ impl MusicApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        theme::set_explicit_badges(ui.ctx(), self.explicit_badge);
         self.render_frame(ui);
         // Rows drawn this frame that still miss their album's name.
         self.request_album_titles(ui.ctx());
@@ -11129,6 +11178,7 @@ mod tests {
             for duration in [0, 180, 600, 3661] {
                 let mut first_track = None;
                 app.playing = Some(Track {
+                    explicit: false,
                     added: None,
                     unavailable: None,
                     id: 77,
@@ -11352,6 +11402,8 @@ mod tests {
             search_on_enter_save_failed: false,
             middle_autoscroll: false,
             middle_autoscroll_save_failed: false,
+            explicit_badge: true,
+            explicit_badge_save_failed: false,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,
@@ -11595,6 +11647,7 @@ mod tests {
                     let count = if connected { 4 } else { 100 };
                     app.library.tracks = (1..=count)
                         .map(|id| Track {
+                            explicit: false,
                             added: None,
                             unavailable: None,
                             id,
@@ -12776,6 +12829,7 @@ mod tests {
                     music: None,
                 });
                 let track = Track {
+                    explicit: false,
                     added: None,
                     unavailable: None,
                     id: 2,
@@ -13768,6 +13822,7 @@ mod tests {
             items: ids
                 .iter()
                 .map(|id| Track {
+                    explicit: false,
                     added: None,
                     unavailable: None,
                     id: *id,

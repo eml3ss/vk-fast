@@ -140,6 +140,8 @@ pub struct Track {
     /// When the track was added to the list it came from (Unix seconds), as
     /// VK's API reports it; website rows do not carry it.
     pub added: Option<i64>,
+    /// VK marks the track as explicit content.
+    pub explicit: bool,
 }
 
 /// Canonical VK identity, kept separately from the display-only artist string.
@@ -459,7 +461,23 @@ struct TrackWire {
     is_claimed: Option<serde_json::Value>,
     #[serde(default)]
     unavailable: Option<serde_json::Value>,
+    #[serde(default, alias = "isExplicit")]
+    is_explicit: Option<serde_json::Value>,
 }
+
+/// VK's explicit mark: `is_explicit` in API objects, `isExplicit` on the
+/// website, a bool or 0/1.
+pub(crate) fn explicit_from_value(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|value| {
+        value
+            .as_bool()
+            .or_else(|| value.as_i64().map(|flag| flag != 0))
+            .unwrap_or(false)
+    })
+}
+
+/// The website's audio tuple keeps flags at index 10; EXPLICIT is bit 1024.
+pub(crate) const TUPLE_EXPLICIT_FLAG: u64 = 1024;
 
 impl From<TrackWire> for Track {
     fn from(wire: TrackWire) -> Self {
@@ -529,6 +547,7 @@ impl From<TrackWire> for Track {
                 .as_ref()
                 .and_then(serde_json::Value::as_i64)
                 .filter(|date| *date > 0),
+            explicit: explicit_from_value(wire.is_explicit.as_ref()),
         }
     }
 }
@@ -712,6 +731,7 @@ pub fn demo_tracks() -> Vec<Track> {
     .into_iter()
     .enumerate()
     .map(|(i, (title, artist, duration))| Track {
+        explicit: false,
         added: None,
         id: i as i64,
         owner_id: 0,

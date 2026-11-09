@@ -273,15 +273,25 @@ pub fn show(
         {
             action = Some(Action::Album);
         }
-        if let Some(artist) = artist_links(
-            ui,
-            Rect::from_min_size(
-                metadata.min + egui::vec2(50.0, 23.0),
-                egui::vec2((metadata.width() - 50.0).max(0.0), 20.0),
-            ),
-            track,
-            FontId::proportional(12.0),
-        ) {
+        let artists_line = Rect::from_min_size(
+            metadata.min + egui::vec2(50.0, 23.0),
+            egui::vec2((metadata.width() - 50.0).max(0.0), 20.0),
+        );
+        let badge = theme::explicit_badge(ui.ctx(), Some(track), 12.0);
+        let artists_line = badge.map_or(artists_line, |size| {
+            theme::paint_explicit_badge(
+                &ui.painter()
+                    .with_clip_rect(ui.clip_rect().intersect(artists_line)),
+                Rect::from_center_size(
+                    egui::pos2(artists_line.left() + size * 0.5, artists_line.center().y),
+                    egui::vec2(size, size),
+                ),
+            );
+            artists_line.with_min_x(
+                (artists_line.left() + size + theme::EXPLICIT_GAP).min(artists_line.right()),
+            )
+        });
+        if let Some(artist) = artist_links(ui, artists_line, track, FontId::proportional(12.0)) {
             action = Some(Action::Artist(artist));
         }
         content.min.y += 62.0;
@@ -749,6 +759,7 @@ mod tests {
     #[test]
     fn cover_title_and_artists_open_the_album_and_each_artist_in_both_layouts() {
         let track = Track {
+            explicit: false,
             added: None,
             id: 5,
             owner_id: 4,

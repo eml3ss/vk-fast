@@ -232,6 +232,75 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+const EXPLICIT_BADGES: &str = "vk-fast-explicit-badges";
+/// The gap between the explicit badge and the artists after it.
+pub const EXPLICIT_GAP: f32 = 6.0;
+
+/// Whether Settings show the explicit badge, for every list drawn this frame.
+pub fn set_explicit_badges(ctx: &egui::Context, shown: bool) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(EXPLICIT_BADGES), shown));
+}
+
+/// The size of `track`'s explicit badge at the start of an artists line in
+/// `font_size`, when VK marks it explicit and Settings show the badge.
+pub fn explicit_badge(
+    ctx: &egui::Context,
+    track: Option<&crate::model::Track>,
+    font_size: f32,
+) -> Option<f32> {
+    let shown = ctx.data(|data| data.get_temp::<bool>(egui::Id::new(EXPLICIT_BADGES)));
+    (track.is_some_and(|track| track.explicit) && shown.unwrap_or(true))
+        .then(|| (font_size + 2.0).round().clamp(12.0, 16.0))
+}
+
+/// A boxed "E", like the explicit mark of other music services.
+pub fn paint_explicit_badge(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 3.0, MUTED);
+    painter.text(
+        rect.center() + egui::vec2(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        "E",
+        FontId::new((rect.height() * 0.7).round(), semibold()),
+        BACKGROUND,
+    );
+}
+
+/// The artists line of a track: the explicit badge first, then `contents`
+/// in the width left, laid out as without the badge.
+pub fn badged_line<R>(
+    ui: &mut egui::Ui,
+    badge: Option<f32>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let Some(size) = badge else {
+        return contents(ui);
+    };
+    let width = ui.available_width().max(0.0);
+    let left = ui.cursor().left();
+    let line = ui.allocate_ui_with_layout(
+        egui::vec2(width, 0.0),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.add_space(size + EXPLICIT_GAP);
+            ui.allocate_ui_with_layout(
+                egui::vec2((width - size - EXPLICIT_GAP).max(0.0), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                contents,
+            )
+        },
+    );
+    // Centred on the line drawn after it, whatever its height.
+    let rows = line.inner.response.rect;
+    paint_explicit_badge(
+        &ui.painter().with_clip_rect(ui.clip_rect()),
+        egui::Rect::from_center_size(
+            egui::pos2(left + size * 0.5, rows.center().y),
+            egui::vec2(size, size),
+        ),
+    );
+    line.inner.inner
+}
+
 pub fn track_title(
     track: &crate::model::Track,
     color: Color32,

@@ -105,6 +105,8 @@ struct StoredTrack {
     added: Option<i64>,
     #[serde(default)]
     added_revision: Option<u8>,
+    #[serde(default)]
+    explicit: bool,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +164,8 @@ struct BorrowedTrack<'a> {
     added: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     added_revision: Option<u8>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    explicit: bool,
 }
 
 #[derive(Serialize)]
@@ -384,6 +388,7 @@ pub(crate) fn encode_bounded(
                 availability_revision: track.unavailable.map(|_| AVAILABILITY_REVISION),
                 added: track.added,
                 added_revision: track.added.map(|_| ADDED_REVISION),
+                explicit: track.explicit,
             });
         }
     }
@@ -522,6 +527,7 @@ pub(crate) fn decode_bounded(
         }
         if seen.insert((track.owner_id, track.id)) {
             tracks.push(Track {
+                explicit: track.explicit,
                 added: track
                     .added
                     .filter(|added| *added > 0)
@@ -698,6 +704,7 @@ mod tests {
 
     fn track(id: i64) -> Track {
         Track {
+            explicit: false,
             added: None,
             id,
             owner_id: -7,
@@ -934,6 +941,7 @@ mod tests {
         let mut liked_source = track(8);
         liked_source.library_liked = Some(true);
         liked_source.release_key = Some((-7, 8));
+        liked_source.explicit = true;
         save_at(&path, 42, &[unliked_own_copy, liked_source, track(3)]).unwrap();
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("synthetic-secret") && !raw.contains("synthetic-library-secret"));
@@ -945,6 +953,11 @@ mod tests {
             serde_json::json!([-7, 8])
         );
         let restored = load_at(&path, 42).unwrap().unwrap();
+        assert!(restored[1].explicit && !restored[0].explicit && !restored[2].explicit);
+        assert!(
+            !raw.contains("\"explicit\":false"),
+            "clean tracks stay compact"
+        );
         assert_eq!(restored[0].key(), (42, 901));
         assert_eq!(restored[0].library_liked, Some(false));
         assert_eq!(restored[0].library_source_key, Some((-7, 80)));

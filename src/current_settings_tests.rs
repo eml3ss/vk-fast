@@ -522,3 +522,59 @@ fn track_hover_shows_only_the_clipped_title_and_no_hint_for_a_fitting_title() {
         assert_eq!(titles, if long { 2 } else { 1 }, "{labels:?}");
     }
 }
+
+#[test]
+fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    app.page = MusicPage::Library;
+    let mut tracks = page(2, &[1, 2]).items;
+    tracks[0].title = "Loud song".into();
+    tracks[0].artist = "Rude".into();
+    tracks[0].explicit = true;
+    tracks[1].title = "Quiet song".into();
+    tracks[1].artist = "Polite".into();
+    app.library.tracks = tracks;
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let badges = |output: &egui::FullOutput| -> Vec<egui::Rect> {
+        account_ui_shapes(output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == "E" => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let rude = content_text(&output, "Rude");
+    let polite = content_text(&output, "Polite");
+    let shown = badges(&output);
+    assert_eq!(shown.len(), 1, "only the explicit track: {shown:?}");
+    let badge = shown[0];
+    assert!(badge.right() < rude.left() && rude.left() - badge.right() < 14.0);
+    assert!(
+        (badge.center().y - rude.center().y).abs() < 3.0,
+        "{badge:?} {rude:?}"
+    );
+    // The badge (14px for small captions) and its 6px gap come first.
+    assert!(
+        (rude.left() - polite.left() - 20.0).abs() < 1.5,
+        "the artists move right by the badge: {rude:?} {polite:?}"
+    );
+
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Interface;
+    app.settings_query = "explicit".into();
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    let point = content_text(&settings, "Explicit badge on tracks").center();
+    assert!(app.explicit_badge);
+    account_ui_click(&ctx, &mut app, size, &mut tick, point);
+    assert!(!app.explicit_badge && !app.explicit_badge_save_failed);
+    app.settings_open = false;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(badges(&output).is_empty());
+    assert!((content_text(&output, "Rude").left() - polite.left()).abs() < 1.0);
+}

@@ -27,6 +27,7 @@ const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
 const DEFAULT_AUTO_UPDATES: bool = true;
 const DEFAULT_SEARCH_ON_ENTER: bool = true;
 const DEFAULT_MIX_AFTER_QUEUE: bool = true;
+const DEFAULT_EXPLICIT_BADGE: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -64,6 +65,8 @@ struct Preferences {
     middle_autoscroll: bool,
     #[serde(deserialize_with = "deserialize_mix_after_queue")]
     mix_after_queue: bool,
+    #[serde(deserialize_with = "deserialize_explicit_badge")]
+    explicit_badge: bool,
     /// Off unless the user turns it on: it changes the account's page.
     #[serde(deserialize_with = "deserialize_broadcast")]
     broadcast: bool,
@@ -97,6 +100,7 @@ impl Default for Preferences {
             search_on_enter: DEFAULT_SEARCH_ON_ENTER,
             middle_autoscroll: false,
             mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
+            explicit_badge: DEFAULT_EXPLICIT_BADGE,
             broadcast: false,
             link_browser: String::new(),
             extra: serde_json::Map::new(),
@@ -243,6 +247,14 @@ fn deserialize_mix_after_queue<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_MIX_AFTER_QUEUE))
+}
+
+fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(DEFAULT_EXPLICIT_BADGE))
 }
 
 fn deserialize_broadcast<'de, D: serde::Deserializer<'de>>(
@@ -750,6 +762,22 @@ pub fn save_mix_after_queue(enabled: bool) -> io::Result<()> {
     })
 }
 
+/// The "E" badge by explicit tracks; on unless turned off in Settings.
+pub fn load_explicit_badge() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_EXPLICIT_BADGE, |preferences| {
+            preferences.explicit_badge
+        })
+}
+
+pub fn save_explicit_badge(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.explicit_badge = enabled
+    })
+}
+
 pub fn load_broadcast() -> bool {
     preferences_path()
         .ok()
@@ -880,6 +908,21 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn explicit_badge_defaults_on_and_turning_it_off_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [r#"{}"#, r#"{"explicit_badge":"invalid"}"#] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(preferences.explicit_badge);
+        }
+        update_at(&path, |preferences| preferences.explicit_badge = false).unwrap();
+        save_at(&path, 0.375).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(!restored.explicit_badge);
+        assert_eq!(restored.volume, 0.375);
     }
 
     #[test]
