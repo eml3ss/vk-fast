@@ -996,6 +996,8 @@ struct Entry<'a> {
     subtitle: &'a str,
     image: Option<&'a str>,
     artist: bool,
+    /// Pinned rows show a pin before the subtitle.
+    pinned: bool,
 }
 
 fn paint_playlist_row(
@@ -1030,6 +1032,7 @@ fn paint_playlist_row(
             subtitle: &subtitle,
             image: item.reference.cover_url.as_deref(),
             artist: false,
+            pinned: item.pinned,
         },
     );
 }
@@ -1090,9 +1093,20 @@ fn paint_entry(
             ui.visuals().text_color()
         },
     );
+    let mut subtitle =
+        egui::Rect::from_min_max(egui::pos2(text.left(), rect.center().y + 2.0), text.max);
+    if entry.pinned {
+        // paint_line centers the text in its rect; the pin shares that line.
+        let pin = egui::Rect::from_center_size(
+            egui::pos2(subtitle.left() + 6.0, subtitle.center().y),
+            egui::vec2(12.0, 12.0),
+        );
+        icons::paint(ui.painter(), pin, Icon::Pin, theme::MUTED);
+        subtitle.min.x = pin.right() + 4.0;
+    }
     paint_line(
         ui,
-        egui::Rect::from_min_max(egui::pos2(text.left(), rect.center().y + 2.0), text.max),
+        subtitle,
         entry.subtitle,
         egui::TextStyle::Small.resolve(ui.style()),
         theme::MUTED,
@@ -1144,6 +1158,7 @@ fn artist_rows(
                 subtitle: language.text("Исполнитель", "Artist"),
                 image: item.image_url.as_deref(),
                 artist: true,
+                pinned: false,
             },
         );
         response.widget_info(|| {
@@ -1539,6 +1554,55 @@ mod tests {
             }
             _ => None,
         })
+    }
+
+    #[test]
+    fn pinned_collections_show_a_pin_before_their_subtitle() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut items = vec![item(1), item(2)];
+        items[0].pinned = true;
+        let view = |items| View {
+            items,
+            selected: None,
+            loading: false,
+            error: None,
+        };
+        frame(
+            &ctx,
+            &mut covers,
+            view(&items),
+            Language::English,
+            1,
+            Vec::new(),
+        );
+        let (output, _) = frame(
+            &ctx,
+            &mut covers,
+            view(&items),
+            Language::English,
+            2,
+            Vec::new(),
+        );
+        let subtitles: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Playlist · 3 tracks" => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(subtitles.len(), 2);
+        let (pinned, plain) = if subtitles[0].top() < subtitles[1].top() {
+            (subtitles[0], subtitles[1])
+        } else {
+            (subtitles[1], subtitles[0])
+        };
+        let shift = pinned.left() - plain.left();
+        assert!((15.0..=17.0).contains(&shift), "Pin gap {shift}");
     }
 
     #[test]
