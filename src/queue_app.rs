@@ -450,7 +450,9 @@ impl MusicApp {
             }
         }
         let right = if !current {
-            remove.left() - 4.0
+            // Half the old gap to the overlay scrollbar; the cross icon itself
+            // starts 7 px inside its area, so the text still clears it.
+            remove.left() + 3.0
         } else {
             rect.right() - 5.0
         };
