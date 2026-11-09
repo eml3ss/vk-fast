@@ -38,10 +38,14 @@ mod playlist_actions;
 mod playlist_removal;
 #[path = "queue_app.rs"]
 mod queue_app;
+#[path = "row_drag.rs"]
+mod row_drag;
 #[path = "screen_cache_app.rs"]
 mod screen_cache_app;
 #[path = "system_media_app.rs"]
 mod system_media_app;
+#[path = "track_reorder.rs"]
+mod track_reorder;
 #[path = "track_sort.rs"]
 mod track_sort;
 #[path = "track_view_cache.rs"]
@@ -596,6 +600,8 @@ type LinkHandlerReply = (
 
 enum TrackAction {
     Menu(Track, track_menu::Action),
+    /// A row of the open list dropped at a new place.
+    Reorder(row_drag::Move),
     ToggleLike(Track),
     Play((i64, i64)),
     Artist(ArtistRef),
@@ -1210,6 +1216,11 @@ pub struct MusicApp {
     /// A dismissed error notice fading out until this moment.
     error_closing: Option<Instant>,
     playlist_removal: playlist_removal::State,
+    /// Set while a reorderable list draws its rows: rows may then be dragged.
+    row_drag_enabled: bool,
+    /// The rect of the row whose drag began this frame.
+    row_drag_started: Option<egui::Rect>,
+    reorder_request: Option<track_reorder::Request>,
     playlist_request: Option<PlaylistRequest>,
     playlists_requested: bool,
     playlist_error: Option<WebAudioError>,
@@ -1572,6 +1583,9 @@ impl MusicApp {
             library_undo: None,
             error_closing: None,
             playlist_removal: playlist_removal::State::default(),
+            row_drag_enabled: false,
+            row_drag_started: None,
+            reorder_request: None,
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -1910,6 +1924,7 @@ impl MusicApp {
         self.library_undo = None;
         self.error_closing = None;
         self.playlist_removal.reset();
+        self.reorder_request = None;
         self.playlist_request = None;
         self.playlists_requested = false;
         self.playlist_error = None;
@@ -4735,12 +4750,94 @@ impl MusicApp {
             self.player.snapshot().state,
             PlaybackState::Playing | PlaybackState::Loading
         );
-        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows", false)
+        self.clipped_track_rows(ui, tracks, 1, active, "search-track-rows", false, false)
     }
 
     // Reserve the complete list height, but lay out only rows in the viewport.
     // Detail pages share this with search so large playlists do not create
     // widgets and text layouts for every off-screen track.
+    /// Track rows that can be dragged into a new order, sliding like the
+    /// sidebar. Rows are looked up in the open list by display row.
+    #[allow(clippy::too_many_arguments)]
+    fn lane_track_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &'static str,
+        origin_y: f32,
+        range: std::ops::Range<usize>,
+        count: usize,
+        source: &dyn Fn(usize) -> usize,
+        active: bool,
+        show_date: bool,
+        visit: &mut dyn FnMut(&Track),
+    ) -> Option<TrackAction> {
+        let lane_id = egui::Id::new(("track-row-drag", id));
+        let mut lane = row_drag::Lane::begin(
+            ui,
+            lane_id,
+            origin_y,
+            58.0,
+            54.0,
+            0..=count.saturating_sub(1),
+            |key| {
+                let tracks = self.view_tracks();
+                (0..count).position(|row| {
+                    tracks
+                        .get(source(row))
+                        .is_some_and(|track| row_drag::track_key(track.key()) == key)
+                })
+            },
+        );
+        let lifted = lane.dragging() || lane.suppressing();
+        let mut action = None;
+        // One extra row at each edge covers rows sliding into view.
+        for row in range.start.saturating_sub(1)..(range.end + 1).min(count) {
+            let index = source(row);
+            let Some(track) = self.view_tracks().get(index).cloned() else {
+                continue;
+            };
+            if range.contains(&row) {
+                visit(&track);
+            }
+            let key = row_drag::track_key(track.key());
+            if lane.hides(key) {
+                continue;
+            }
+            let rect = lane.rect(ui.ctx(), row, key);
+            self.row_drag_enabled = !lane.dragging();
+            let intent = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .id_salt(("lane-row", track.key())),
+                    |ui| self.track_row(ui, &track, index, active, show_date),
+                )
+                .inner;
+            self.row_drag_enabled = false;
+            if let Some(started) = self.row_drag_started.take() {
+                lane.start(ui, row, key, started);
+            }
+            if !lifted && !lane.dragging() && intent.is_some() {
+                action = intent;
+            }
+        }
+        if let Some(moved) = lane.moved {
+            action = Some(TrackAction::Reorder(moved));
+        }
+        if let Some((from, rect)) = lane.finish(ui)
+            && let Some(track) = self.view_tracks().get(source(from)).cloned()
+        {
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(rect).id_salt("lane-ghost"),
+                |ui| {
+                    self.track_row(ui, &track, source(from), active, show_date);
+                },
+            );
+        }
+        action
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn clipped_track_rows(
         &mut self,
         ui: &mut egui::Ui,
@@ -4749,6 +4846,7 @@ impl MusicApp {
         active: bool,
         id: &'static str,
         show_date: bool,
+        reorder: bool,
     ) -> Option<TrackAction> {
         if tracks.is_empty() {
             return None;
@@ -4771,6 +4869,30 @@ impl MusicApp {
             return None;
         }
         let mut action = None;
+        if reorder && columns == 1 {
+            // Rows of the open list itself, so drags find them again.
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(id)
+                    .max_rect(rect)
+                    .layout(Layout::top_down(Align::Min)),
+                |ui| {
+                    action = self.lane_track_rows(
+                        ui,
+                        id,
+                        rect.top(),
+                        first..last,
+                        rows,
+                        &|row| row,
+                        active,
+                        show_date,
+                        &mut |_| {},
+                    );
+                },
+            );
+            ui.advance_cursor_after_rect(rect);
+            return action;
+        }
         ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt(id)
@@ -6714,6 +6836,7 @@ impl MusicApp {
                 } else {
                     None
                 };
+                let reorder = artist.is_none() && sorted.is_none() && self.playlist_reorderable();
                 track_action = self.clipped_track_rows(
                     ui,
                     &sorted.as_deref().unwrap_or(tracks)[..count],
@@ -6721,6 +6844,7 @@ impl MusicApp {
                     active,
                     "detail-track-rows",
                     show_date,
+                    reorder,
                 );
                 if let Some(DetailPage::Album(release) | DetailPage::Playlist(release)) = data {
                     release_info::show(ui, language, tracks, &release.stats);
@@ -6918,6 +7042,7 @@ impl MusicApp {
                     1,
                     active,
                     "owner-track-rows",
+                    false,
                     false,
                 );
                 ui.add_space(22.0);
@@ -7629,6 +7754,7 @@ impl MusicApp {
         );
         let mut track_action = None;
         let mut metadata_keys = Vec::new();
+        let reorder = is_library && self.library_reorderable();
         let scroll = ui
             .scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
@@ -7649,17 +7775,36 @@ impl MusicApp {
                     row_height,
                     visible.len(),
                     |ui, range| {
-                        for row in range {
-                            let i = visible.source_index(row);
-                            let Some(track) = self.view_tracks().get(i).cloned() else {
-                                continue;
-                            };
+                        let mut visit = |track: &Track| {
                             if track.artists.is_empty()
                                 || track.subtitle.is_none()
                                 || track.library_liked.is_none()
                             {
                                 metadata_keys.push(track.key());
                             }
+                        };
+                        if reorder {
+                            let stride = row_height + ui.spacing().item_spacing.y;
+                            let origin_y = ui.max_rect().top() - range.start as f32 * stride;
+                            track_action = self.lane_track_rows(
+                                ui,
+                                "library",
+                                origin_y,
+                                range,
+                                visible.len(),
+                                &|row| visible.source_index(row),
+                                active,
+                                show_date,
+                                &mut visit,
+                            );
+                            return;
+                        }
+                        for row in range {
+                            let i = visible.source_index(row);
+                            let Some(track) = self.view_tracks().get(i).cloned() else {
+                                continue;
+                            };
+                            visit(&track);
                             if let Some(action) = self.track_row(ui, &track, i, active, show_date) {
                                 track_action = Some(action);
                             }
@@ -7993,8 +8138,15 @@ impl MusicApp {
         let response = ui.interact(
             rect,
             ui.id().with(("track-row", track.key(), index)),
-            Sense::click(),
+            if self.row_drag_enabled {
+                Sense::click_and_drag()
+            } else {
+                Sense::click()
+            },
         );
+        if self.row_drag_enabled && response.drag_started_by(egui::PointerButton::Primary) {
+            self.row_drag_started = Some(rect);
+        }
         let row_hovered = ui.is_enabled()
             && response.contains_pointer()
             && ui.input(|input| {
@@ -8176,6 +8328,7 @@ impl MusicApp {
             self.set_lyrics_fullscreen(ctx, false);
         }
         match action {
+            TrackAction::Reorder(moved) => self.reorder_view(ctx, moved),
             TrackAction::Menu(track, action) => self.handle_track_menu_action(ctx, &track, action),
             TrackAction::ToggleLike(track) => self.toggle_like(ctx, track),
             TrackAction::Artist(artist) => self.navigate_music(ctx, MusicPage::Artist(artist)),
@@ -10408,6 +10561,7 @@ impl MusicApp {
         self.poll_dislike(ctx);
         self.poll_playlist_add(ctx);
         self.poll_playlist_removal(ctx);
+        self.poll_reorder(ctx);
         self.poll_playlist_create(ctx);
         self.poll_audio_upload(ctx);
         self.poll_playlist_actions(ctx);
@@ -10953,6 +11107,9 @@ mod tests {
             library_undo: None,
             error_closing: None,
             playlist_removal: playlist_removal::State::default(),
+            row_drag_enabled: false,
+            row_drag_started: None,
+            reorder_request: None,
             playlist_request: None,
             playlists_requested: false,
             playlist_error: None,
@@ -17213,6 +17370,7 @@ mod tests {
                                         false,
                                         "test-rows",
                                         false,
+                                        false,
                                     );
                                 },
                             );
@@ -17317,6 +17475,7 @@ mod tests {
                                 columns,
                                 false,
                                 "stable-track-rows",
+                                false,
                                 false,
                             );
                         },

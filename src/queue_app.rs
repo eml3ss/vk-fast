@@ -21,6 +21,11 @@ enum Action {
     Play(usize),
     ToggleCurrent,
     Remove(u64),
+    /// An added track dragged to another place among the added tracks.
+    Move {
+        from: usize,
+        to: usize,
+    },
     Clear,
     Track(Box<TrackAction>),
 }
@@ -240,8 +245,48 @@ impl MusicApp {
                         50.0,
                         panel.upcoming.len(),
                         |ui, range| {
-                            for index in range {
+                            // Added tracks come first in "Up next"; only they
+                            // can be dragged, and only among themselves.
+                            let start = panel
+                                .upcoming
+                                .iter()
+                                .position(|entry| entry.queued_id.is_some())
+                                .unwrap_or(0);
+                            let added = panel.upcoming[start..]
+                                .iter()
+                                .take_while(|entry| entry.queued_id.is_some())
+                                .count();
+                            let stride = 50.0 + ui.spacing().item_spacing.y;
+                            let row_key = |index: usize| {
+                                let entry: Upcoming = panel.upcoming[index];
+                                entry.queued_id.unwrap_or_else(|| {
+                                    row_drag::track_key(entry.key) ^ index as u64
+                                })
+                            };
+                            let mut lane = row_drag::Lane::begin(
+                                ui,
+                                egui::Id::new("queue-row-drag"),
+                                ui.max_rect().top() - range.start as f32 * stride,
+                                stride,
+                                50.0,
+                                start..=(start + added).saturating_sub(1),
+                                |key| {
+                                    panel.upcoming[start..start + added]
+                                        .iter()
+                                        .position(|entry| entry.queued_id == Some(key))
+                                        .map(|index| start + index)
+                                },
+                            );
+                            let lifted = lane.dragging() || lane.suppressing();
+                            let rows = range.start.saturating_sub(1)
+                                ..(range.end + 1).min(panel.upcoming.len());
+                            for index in rows {
                                 let entry = panel.upcoming[index];
+                                let key = row_key(index);
+                                if lane.hides(key) {
+                                    continue;
+                                }
+                                let rect = lane.rect(ui.ctx(), index, key);
                                 let Some(track) = self
                                     .queue_track(
                                         entry.key,
@@ -249,19 +294,59 @@ impl MusicApp {
                                     )
                                     .cloned()
                                 else {
-                                    ui.allocate_space(egui::vec2(ui.available_width(), 50.0));
                                     continue;
                                 };
-                                ui.push_id((stamp.0, index, entry.queued_id, entry.key), |ui| {
-                                    if let Some(row_action) =
-                                        self.queue_row(ui, &track, entry.queued_id, false)
-                                    {
-                                        action = Some(match row_action {
-                                            Action::Play(_) => Action::Play(index),
-                                            other => other,
-                                        });
-                                    }
+                                self.row_drag_enabled =
+                                    added > 1 && entry.queued_id.is_some() && !lane.dragging();
+                                let row_action = ui
+                                    .scope_builder(
+                                        egui::UiBuilder::new().max_rect(rect).id_salt((
+                                            stamp.0,
+                                            index,
+                                            entry.queued_id,
+                                            entry.key,
+                                        )),
+                                        |ui| self.queue_row(ui, &track, entry.queued_id, false),
+                                    )
+                                    .inner;
+                                self.row_drag_enabled = false;
+                                if let Some(started) = self.row_drag_started.take() {
+                                    lane.start(ui, index, key, started);
+                                }
+                                if !lifted
+                                    && !lane.dragging()
+                                    && let Some(row_action) = row_action
+                                {
+                                    action = Some(match row_action {
+                                        Action::Play(_) => Action::Play(index),
+                                        other => other,
+                                    });
+                                }
+                            }
+                            if let Some(moved) = lane.moved {
+                                action = Some(Action::Move {
+                                    from: moved.from - start,
+                                    to: moved.to - start,
                                 });
+                            }
+                            if let Some((from, rect)) = lane.finish(ui) {
+                                let entry = panel.upcoming[from];
+                                if let Some(track) = self
+                                    .queue_track(
+                                        entry.key,
+                                        panel.source_indices.get(&entry.key).copied(),
+                                    )
+                                    .cloned()
+                                {
+                                    ui.scope_builder(
+                                        egui::UiBuilder::new()
+                                            .max_rect(rect)
+                                            .id_salt("queue-drag-ghost"),
+                                        |ui| {
+                                            self.queue_row(ui, &track, entry.queued_id, false);
+                                        },
+                                    );
+                                }
                             }
                         },
                     );
@@ -281,6 +366,11 @@ impl MusicApp {
                 self.play_order.remove_queued(id);
                 self.prune_queued_tracks();
             }
+            Some(Action::Move { from, to })
+                if self.queue_ui.stamp == Some(stamp) && self.play_order.revision() == stamp.0 =>
+            {
+                self.play_order.move_queued(from, to);
+            }
             Some(Action::Clear) => {
                 self.play_order.clear_queued();
                 self.prune_queued_tracks();
@@ -298,8 +388,17 @@ impl MusicApp {
         queued_id: Option<u64>,
         current: bool,
     ) -> Option<Action> {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 50.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 50.0),
+            if self.row_drag_enabled {
+                Sense::click_and_drag()
+            } else {
+                Sense::click()
+            },
+        );
+        if self.row_drag_enabled && response.drag_started_by(egui::PointerButton::Primary) {
+            self.row_drag_started = Some(rect);
+        }
         let hovered = response.contains_pointer();
         if hovered {
             ui.painter().rect_filled(rect, 8.0, theme::SELECTED);

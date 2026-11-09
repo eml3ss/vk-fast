@@ -357,3 +357,78 @@ fn navigation_and_queue_panels_resize_by_dragging_their_edges_and_stay_open() {
         ]
     );
 }
+
+#[test]
+fn added_tracks_drag_into_a_new_order_with_the_source_rows_fixed() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    app.page = MusicPage::Library;
+    for index in 0..3 {
+        let mut track = external();
+        track.id = 20 + index;
+        track.title = format!("Added {index}");
+        app.play_order.enqueue(track.key());
+        app.queued_tracks.insert(track.key(), track);
+    }
+    let ids: Vec<_> = app
+        .play_order
+        .queued()
+        .iter()
+        .map(|entry| entry.id)
+        .collect();
+    app.queue_ui.open = true;
+    let size = egui::vec2(1280.0, 800.0);
+    let mut frame = 0;
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..4 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    let first = account_ui_text_rect(&output, "Added 0").unwrap();
+    let last = account_ui_text_rect(&output, "Added 2").unwrap();
+    let source = account_ui_text_rect(&output, &app.library.tracks[1].title).unwrap();
+    assert!(source.top() > last.bottom(), "the source continues below");
+    let pointer = |pos, pressed| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    };
+    // Press on the first added row and drag it below the last one; a drop
+    // past the added tracks stays within them.
+    let start = egui::pos2(first.right() + 30.0, first.center().y);
+    account_ui_frame(&ctx, &mut app, size, &mut frame, pointer(start, true));
+    let mut at = start;
+    for _ in 0..12 {
+        at.y += 20.0;
+        let output = account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::PointerMoved(at)],
+        );
+        assert!(
+            account_ui_text_rect(&output, "Added 0").is_some(),
+            "the lifted row stays visible"
+        );
+    }
+    account_ui_frame(&ctx, &mut app, size, &mut frame, pointer(at, false));
+    let moved: Vec<_> = app
+        .play_order
+        .queued()
+        .iter()
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(moved, [ids[1], ids[2], ids[0]]);
+    assert_eq!(
+        app.playing.as_ref().unwrap().key(),
+        app.library.tracks[0].key(),
+        "dragging never plays a row"
+    );
+    assert_eq!(app.play_queue.as_ref().unwrap().len(), 3);
+}

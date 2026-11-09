@@ -246,6 +246,13 @@ pub struct RelatedArtist {
     pub image_url: Option<String>,
 }
 
+/// Where a moved audio goes: behind one audio or in front of another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Neighbour {
+    After((i64, i64)),
+    Before((i64, i64)),
+}
+
 #[derive(Clone)]
 pub struct AlbumPage {
     pub album: AlbumRef,
@@ -2312,6 +2319,91 @@ impl WebAudioClient {
         )?;
         self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
         // VK's own client ignores this reply; only an explicit refusal fails.
+        if playlist_manage::native_bool(Some(&response)) == Some(false)
+            || playlist_manage::native_bool(response.get("success")) == Some(false)
+        {
+            return Err(WebAudioError::Rejected);
+        }
+        Ok(())
+    }
+
+    /// Move one audio next to a neighbour, as VK's audio.reorder does: in
+    /// My music, or with `playlist` inside the account's own playlist.
+    /// `after` places it behind that audio, otherwise in front of `before`.
+    pub fn reorder_audio(
+        &self,
+        expected_owner: i64,
+        audio: (i64, i64),
+        playlist: Option<&AlbumRef>,
+        neighbour: Neighbour,
+        canceled: &AtomicBool,
+    ) -> Result<(), WebAudioError> {
+        self.reorder_audio_request(
+            expected_owner,
+            audio,
+            playlist,
+            neighbour,
+            canceled,
+            |generation, method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        )
+    }
+
+    fn reorder_audio_request(
+        &self,
+        expected_owner: i64,
+        audio: (i64, i64),
+        playlist: Option<&AlbumRef>,
+        neighbour: Neighbour,
+        canceled: &AtomicBool,
+        mut request: impl FnMut(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<(), WebAudioError> {
+        let (side, other) = match neighbour {
+            Neighbour::After(key) => ("after", key),
+            Neighbour::Before(key) => ("before", key),
+        };
+        if expected_owner <= 0
+            || audio.0 == 0
+            || audio.0.checked_abs().is_none()
+            || audio.1 <= 0
+            || other.1 <= 0
+            || other == audio
+        {
+            return Err(WebAudioError::Format);
+        }
+        if let Some(playlist) = playlist {
+            // Only the account's own playlists: VK takes no playlist owner.
+            if playlist.owner_id != expected_owner || playlist.id <= 0 {
+                return Err(WebAudioError::WrongAccount);
+            }
+        } else if audio.0 != expected_owner {
+            return Err(WebAudioError::WrongAccount);
+        }
+        let generation = self.home_owner(expected_owner, canceled)?;
+        if let Some(playlist) = playlist {
+            self.confirm_editable_playlist(
+                expected_owner,
+                generation,
+                playlist,
+                canceled,
+                &mut request,
+            )?;
+        }
+        let mut params = vec![
+            ("audio_id", audio.1.to_string()),
+            ("owner_id", audio.0.to_string()),
+        ];
+        if let Some(playlist) = playlist {
+            params.push(("playlist_id", playlist.id.to_string()));
+        }
+        params.push((side, other.1.to_string()));
+        let response = request(generation, "audio.reorder", params)?;
+        self.commit_home_streams(expected_owner, generation, HashMap::new(), canceled)?;
         if playlist_manage::native_bool(Some(&response)) == Some(false)
             || playlist_manage::native_bool(response.get("success")) == Some(false)
         {
@@ -10427,6 +10519,107 @@ mod playlist_action_tests {
             assert_eq!(result, Err(WebAudioError::Rejected));
             assert_eq!(written, writes);
         }
+    }
+
+    #[test]
+    fn reorder_moves_next_to_a_neighbour_in_my_music_or_an_own_playlist() {
+        let client = client();
+        for (playlist, neighbour, expected) in [
+            (
+                None,
+                Neighbour::After((42, 5)),
+                vec![
+                    ("audio_id", "7".to_string()),
+                    ("owner_id", "42".into()),
+                    ("after", "5".into()),
+                ],
+            ),
+            (
+                Some(playlist(42)),
+                Neighbour::Before((-200, 9)),
+                vec![
+                    ("audio_id", "7".to_string()),
+                    ("owner_id", "-200".into()),
+                    ("playlist_id", "10".into()),
+                    ("before", "9".into()),
+                ],
+            ),
+        ] {
+            let audio = if playlist.is_some() {
+                (-200, 7)
+            } else {
+                (42, 7)
+            };
+            let mut calls = Vec::new();
+            client
+                .reorder_audio_request(
+                    42,
+                    audio,
+                    playlist.as_ref(),
+                    neighbour,
+                    &AtomicBool::new(false),
+                    |_, method, params| {
+                        calls.push(method);
+                        if method == "audio.getPlaylistById" {
+                            Ok(json!({"playlist":editable(42)}))
+                        } else {
+                            assert_eq!(params, expected);
+                            Ok(json!(1))
+                        }
+                    },
+                )
+                .unwrap();
+            assert_eq!(calls.last(), Some(&"audio.reorder"));
+            assert_eq!(calls.len(), if playlist.is_some() { 2 } else { 1 });
+        }
+        let never = |_: u64,
+                     _: &'static str,
+                     _: Vec<(&'static str, String)>|
+         -> Result<Value, WebAudioError> { panic!("no request expected") };
+        // Foreign rows in My music, foreign playlists and self-neighbours
+        // are refused before any request.
+        assert_eq!(
+            client.reorder_audio_request(
+                42,
+                (-1, 7),
+                None,
+                Neighbour::After((42, 5)),
+                &AtomicBool::new(false),
+                never
+            ),
+            Err(WebAudioError::WrongAccount)
+        );
+        assert_eq!(
+            client.reorder_audio_request(
+                42,
+                (42, 7),
+                Some(&playlist(-50)),
+                Neighbour::After((42, 5)),
+                &AtomicBool::new(false),
+                never
+            ),
+            Err(WebAudioError::WrongAccount)
+        );
+        assert_eq!(
+            client.reorder_audio_request(
+                42,
+                (42, 7),
+                None,
+                Neighbour::Before((42, 7)),
+                &AtomicBool::new(false),
+                never
+            ),
+            Err(WebAudioError::Format)
+        );
+        let refused = client.reorder_audio_request(
+            42,
+            (42, 7),
+            None,
+            Neighbour::After((42, 5)),
+            &AtomicBool::new(false),
+            |_, _, _| Ok(json!(0)),
+        );
+        assert_eq!(refused, Err(WebAudioError::Rejected));
     }
 
     #[test]

@@ -101,6 +101,17 @@ impl PlaybackOrder {
         }
     }
 
+    /// Moves an added track within the added tracks, by queue position.
+    pub fn move_queued(&mut self, from: usize, to: usize) -> bool {
+        if from == to || from >= self.queued.len() || to >= self.queued.len() {
+            return false;
+        }
+        let entry = self.queued.remove(from).unwrap();
+        self.queued.insert(to, entry);
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
     pub fn clear_queued(&mut self) {
         if !self.queued.is_empty() {
             self.queued.clear();
@@ -904,6 +915,33 @@ mod tests {
         assert_eq!(order.advance_previous(keys[2], false), Some(external));
         assert_eq!(order.advance_next(external, false, false), Some(keys[2]));
         assert_eq!(order.advance_next(keys[2], false, false), Some(keys[1]));
+    }
+
+    #[test]
+    fn added_tracks_can_be_reordered_among_themselves_only() {
+        let source = keys(3);
+        let mut order = PlaybackOrder::default();
+        order.reset_source(&source, Some(source[0]));
+        for key in [(9, 1), (9, 2), (9, 1)] {
+            assert!(order.enqueue(key));
+        }
+        let ids: Vec<_> = order.queued().iter().map(|entry| entry.id).collect();
+        let revision = order.revision();
+        assert!(order.move_queued(2, 0));
+        assert_ne!(order.revision(), revision);
+        let moved: Vec<_> = order.queued().iter().map(|entry| entry.id).collect();
+        assert_eq!(
+            moved,
+            [ids[2], ids[0], ids[1]],
+            "duplicates keep their own entries"
+        );
+        assert!(!order.move_queued(0, 3) && !order.move_queued(1, 1));
+        let upcoming = order.upcoming(Some(source[0]), false);
+        assert_eq!(upcoming[0].queued_id, Some(ids[2]));
+        assert_eq!(
+            upcoming[3].key, source[1],
+            "the source continues after them"
+        );
     }
 
     #[test]
