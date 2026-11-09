@@ -9,7 +9,7 @@ pub enum Command {
     Volume(f32),
     Previous,
     Next,
-    /// Ctrl+R: refresh the open page, like its Refresh button.
+    /// Ctrl+R or F5: refresh the open page, like its Refresh button.
     Reload,
 }
 
@@ -40,11 +40,13 @@ fn binding(key: Key, modifiers: Modifiers) -> Option<Binding> {
         Key::ArrowRight => Command::Seek(5.0),
         Key::ArrowUp => Command::Volume(0.05),
         Key::ArrowDown => Command::Volume(-0.05),
+        // F5 refreshes the open page, like Ctrl+R.
+        Key::F5 => Command::Reload,
         _ => return None,
     };
     Some(Binding {
         command,
-        repeat: key != Key::Space,
+        repeat: !matches!(key, Key::Space | Key::F5),
     })
 }
 
@@ -220,6 +222,7 @@ mod tests {
             (Key::ArrowRight, Modifiers::CTRL, Command::Next, None),
             (Key::ArrowLeft, Modifiers::CTRL, Command::Previous, None),
             (Key::R, Modifiers::CTRL, Command::Reload, None),
+            (Key::F5, Modifiers::NONE, Command::Reload, None),
             (
                 Key::ArrowRight,
                 Modifiers::NONE,
