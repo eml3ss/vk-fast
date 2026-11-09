@@ -16,6 +16,9 @@ pub struct OwnerPage {
     pub next_offset: Option<usize>,
     pub playlists_error: Option<WebAudioError>,
     pub retry_offset: Option<usize>,
+    /// The owner's first tracks, read with the first playlist batch.
+    pub tracks: Vec<Track>,
+    pub tracks_error: Option<WebAudioError>,
 }
 
 impl OwnerPage {
@@ -108,6 +111,8 @@ impl WebAudioClient {
             next_offset: None,
             playlists_error: None,
             retry_offset: None,
+            tracks: Vec::new(),
+            tracks_error: None,
         };
         if offset == 0 {
             let (method, params) = if id > 0 {
@@ -177,6 +182,42 @@ impl WebAudioClient {
                 page.retry_offset = Some(offset);
             }
         }
+        if offset == 0 {
+            // The community's or user's own audio list, best effort: a closed
+            // list leaves the playlists usable.
+            let result = request(
+                generation,
+                "audio.get",
+                vec![
+                    ("owner_id", id.to_string()),
+                    ("count", "100".into()),
+                    ("offset", "0".into()),
+                ],
+            );
+            self.commit_home_streams(viewer, generation, HashMap::new(), canceled)?;
+            match result.and_then(|value| {
+                let rows = value
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .ok_or(WebAudioError::Format)?;
+                home_tracks(rows)
+            }) {
+                Ok((mut tracks, _)) => {
+                    for track in &mut tracks {
+                        track.url = None;
+                    }
+                    page.tracks = tracks;
+                }
+                Err(
+                    error @ (WebAudioError::WrongAccount
+                    | WebAudioError::Canceled
+                    | WebAudioError::Unverified
+                    | WebAudioError::NoSession
+                    | WebAudioError::Expired),
+                ) => return Err(error),
+                Err(error) => page.tracks_error = Some(error),
+            }
+        }
         Ok(page)
     }
 }
@@ -241,6 +282,11 @@ mod tests {
                     assert!(params.contains(&("owner_id", owner.to_string())));
                     return Ok(json!({"count":201,"items":[playlist(owner,8),playlist(-99,9)]}));
                 }
+                if method == "audio.get" {
+                    // The owner's own tracks, read with the first page only.
+                    assert!(params.contains(&("owner_id", owner.to_string())));
+                    return Ok(json!({"count":1,"items":[{"id":5,"owner_id":owner,"title":"Song","artist":"Band","duration":120,"url":"https://cs.example.test/private.mp3","date":1_660_000_000}]}));
+                }
                 let record = json!({"id":71,"name":"Group &amp; name","first_name":"Test","last_name":"Person", "photo_200":"https://images.example.test/avatar.jpg", "description":"<b>Music</b>","status":"Hello"});
                 if owner > 0 {
                     assert_eq!(method,"users.get");
@@ -265,7 +311,10 @@ mod tests {
             assert_eq!(page.next_offset, Some(100));
             assert_eq!(page.playlists[1].album.owner_id, -99);
             assert_eq!(client.state.lock().unwrap().verified_owner, Some(42));
-            assert_eq!(calls.len(), 2);
+            assert_eq!(calls.len(), 3);
+            assert_eq!(page.tracks.len(), 1);
+            assert!(page.tracks[0].url.is_none(), "stream links are not kept");
+            assert_eq!(page.tracks[0].added, Some(1_660_000_000));
 
             let next = client
                 .owner_page_request(

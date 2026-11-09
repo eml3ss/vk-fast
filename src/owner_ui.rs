@@ -18,6 +18,22 @@ pub enum Action {
     Retry,
 }
 
+/// Which part of a community or user page is shown. "All" is the default:
+/// a couple of playlist rows on top, then the tracks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    All,
+    Tracks,
+    Playlists,
+}
+
+/// Playlist rows "All" shows before the tracks.
+const ALL_PLAYLIST_ROWS: usize = 2;
+
+/// The header, the tabs and, unless "Tracks" is chosen, the playlists. The
+/// caller owns the scroll area and draws the tracks below.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
@@ -26,14 +42,11 @@ pub fn show(
     page: Option<&OwnerPage>,
     loading: bool,
     playback: Playback,
+    tab: &mut Tab,
 ) -> Option<Action> {
     let mut action = None;
-    theme::scroll_area(
-        ui,
-        egui::ScrollArea::vertical()
-            .id_salt(("playlist-owner", reference.owner_id))
-            .auto_shrink([false, false]),
-        |ui| {
+    {
+        {
             header(
                 ui,
                 covers,
@@ -44,7 +57,20 @@ pub fn show(
             if let Some(description) = page.and_then(|page| page.description.as_deref()) {
                 detail_ui::playlist_description(ui, description);
             }
-            ui.add_space(20.0);
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                for (value, label) in [
+                    (Tab::All, language.text("Всё", "All")),
+                    (Tab::Tracks, language.text("Треки", "Tracks")),
+                    (Tab::Playlists, language.text("Плейлисты", "Playlists")),
+                ] {
+                    ui.selectable_value(tab, value, label);
+                }
+            });
+            if *tab == Tab::Tracks {
+                return None;
+            }
+            ui.add_space(16.0);
             theme::inset_heading(ui, |ui| {
                 ui.add(
                     egui::Label::new(
@@ -60,7 +86,7 @@ pub fn show(
                 if loading {
                     ui.spinner();
                 }
-                return;
+                return action;
             };
             if page.unavailable {
                 ui.label(
@@ -70,9 +96,27 @@ pub fn show(
                     ))
                     .color(theme::MUTED),
                 );
-                return;
+                return action;
             }
-            action = grid(ui, covers, language, &page.playlists, playback);
+            let limit = (*tab == Tab::All).then_some(ALL_PLAYLIST_ROWS);
+            let (selected, cut) = grid(ui, covers, language, &page.playlists, playback, limit);
+            action = selected;
+            if cut
+                && ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(language.text("Показать все", "Show all"))
+                                .color(theme::ACCENT),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+            {
+                *tab = Tab::Playlists;
+            }
+            if *tab == Tab::All {
+                return action;
+            }
             if let Some(error) = &page.playlists_error {
                 ui.add_space(12.0);
                 let message = if *error == WebAudioError::Rejected {
@@ -117,8 +161,8 @@ pub fn show(
             }
             // The same space from the bottom edge as between page blocks.
             ui.add_space(22.0);
-        },
-    );
+        }
+    }
     action
 }
 
@@ -206,19 +250,24 @@ fn header(
     }
 }
 
+/// The playlist grid, at most `max_rows` rows; also says whether rows were cut.
 fn grid(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     language: Language,
     playlists: &[UserPlaylist],
     playback: Playback,
-) -> Option<Action> {
+    max_rows: Option<usize>,
+) -> (Option<Action>, bool) {
     if playlists.is_empty() {
-        return None;
+        return (None, false);
     }
     let columns = ((ui.available_width() + 14.0) / 174.0)
         .floor()
         .clamp(1.0, 16.0) as usize;
+    let shown = max_rows.map_or(playlists.len(), |rows| playlists.len().min(rows * columns));
+    let cut = shown < playlists.len();
+    let playlists = &playlists[..shown];
     let width = ((ui.available_width() - 14.0 * columns.saturating_sub(1) as f32) / columns as f32)
         .max(1.0);
     let art_size = (width - 24.0).clamp(1.0, 200.0);
@@ -334,7 +383,7 @@ fn grid(
             }
         }
     }
-    selected
+    (selected, cut)
 }
 
 #[cfg(test)]
@@ -350,6 +399,8 @@ mod tests {
             image_url: None,
             description: None,
             unavailable: false,
+            tracks: Vec::new(),
+            tracks_error: None,
             playlists: (0..count)
                 .map(|index| UserPlaylist {
                     kind: crate::web_audio::CollectionKind::Playlist,
@@ -417,6 +468,7 @@ mod tests {
                             Some(&page),
                             false,
                             Playback::default(),
+                            &mut Tab::Playlists,
                         )
                     },
                 );
@@ -452,6 +504,51 @@ mod tests {
     }
 
     #[test]
+    fn all_tab_shows_two_playlist_rows_and_never_pages() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut page = page(40);
+        page.next_offset = Some(100);
+        let mut tab = Tab::default();
+        assert_eq!(tab, Tab::All);
+        let mut action = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 3000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                action = show(
+                    ui,
+                    &mut covers,
+                    Language::English,
+                    &page.creator,
+                    Some(&page),
+                    false,
+                    Playback::default(),
+                    &mut tab,
+                )
+            },
+        );
+        output.textures_delta.clear();
+        let cards = output
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text().starts_with("Collection "))
+            })
+            .count();
+        // Three columns fit 600 px: two rows are six cards.
+        assert_eq!(cards, 6);
+        assert!(action.is_none(), "All does not load more playlists");
+    }
+
+    #[test]
     fn pagination_stops_on_failure_and_private_profiles_never_offer_more() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
@@ -484,6 +581,7 @@ mod tests {
                             Some(&page),
                             false,
                             Playback::default(),
+                            &mut Tab::Playlists,
                         ),
                         Some(Action::More)
                     )

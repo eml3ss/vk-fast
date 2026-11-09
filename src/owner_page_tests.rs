@@ -14,6 +14,8 @@ fn page(id: i64, offset: usize, items: &[i64]) -> OwnerPage {
         image_url: Some("https://images.example.test/owner.jpg".into()),
         description: Some("Public music".into()),
         unavailable: false,
+        tracks: Vec::new(),
+        tracks_error: None,
         playlists: items
             .iter()
             .map(|item| UserPlaylist {

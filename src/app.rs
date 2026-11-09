@@ -448,7 +448,7 @@ impl DetailPage {
         match self {
             Self::Artist(page) => &page.tracks,
             Self::Album(page) | Self::Playlist(page) => &page.tracks,
-            Self::Owner(_) => &[],
+            Self::Owner(page) => &page.tracks,
         }
     }
 }
@@ -3749,6 +3749,7 @@ impl MusicApp {
                 | MusicPage::Artist(_)
                 | MusicPage::Album(_)
                 | MusicPage::Playlist(_)
+                | MusicPage::Owner(_)
                 | MusicPage::TrackAlbum(_, _)
         ) {
             Some(self.view_tracks().to_vec())
@@ -6524,16 +6525,106 @@ impl MusicApp {
             _ => None,
         });
         let playback = self.cover_playback();
-        let action = crate::owner_ui::show(
+        let language = self.language;
+        let loading = self.detail_request.is_some();
+        let tab_id = egui::Id::new(("owner-tab", creator.owner_id));
+        let mut tab: crate::owner_ui::Tab =
+            ui.data(|data| data.get_temp(tab_id)).unwrap_or_default();
+        let mut action = None;
+        let mut track_action = None;
+        theme::scroll_area(
             ui,
-            &mut self.covers,
-            self.language,
-            creator,
-            page,
-            self.detail_request.is_some(),
-            playback,
+            egui::ScrollArea::vertical()
+                .id_salt(("playlist-owner", creator.owner_id))
+                .auto_shrink([false, false]),
+            |ui| {
+                action = crate::owner_ui::show(
+                    ui,
+                    &mut self.covers,
+                    language,
+                    creator,
+                    page,
+                    loading,
+                    playback,
+                    &mut tab,
+                );
+                if tab == crate::owner_ui::Tab::Playlists {
+                    return;
+                }
+                let Some(page) = page.filter(|page| !page.unavailable) else {
+                    return;
+                };
+                ui.add_space(if tab == crate::owner_ui::Tab::All {
+                    24.0
+                } else {
+                    16.0
+                });
+                theme::inset_heading(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(language.text("Треки", "Tracks"))
+                                .size(20.0)
+                                .family(theme::semibold()),
+                        )
+                        .selectable(false),
+                    )
+                });
+                ui.add_space(10.0);
+                if page.tracks.is_empty() {
+                    let message = if page.tracks_error == Some(WebAudioError::Rejected) {
+                        language
+                            .text(
+                                "VK не предоставил доступ к трекам.",
+                                "VK did not grant access to these tracks.",
+                            )
+                            .into()
+                    } else if let Some(error) = &page.tracks_error {
+                        error.localized(language)
+                    } else {
+                        language
+                            .text("Нет доступных треков.", "No available tracks.")
+                            .into()
+                    };
+                    theme::inset_heading(ui, |ui| ui.label(RichText::new(message).color(MUTED)));
+                    return;
+                }
+                let tracks = &page.tracks;
+                let sort = self.current_sort();
+                let index_width = track_index_width(ui, tracks.len());
+                if let Some(column) =
+                    track_sort::header(ui, language, sort, false, index_width, false)
+                {
+                    self.set_sort(column);
+                    ui.ctx().request_repaint();
+                }
+                let sort = self.current_sort();
+                let sorted = sort.active().then(|| {
+                    track_sort::order(tracks, 0..tracks.len(), sort)
+                        .into_iter()
+                        .map(|index| tracks[index].clone())
+                        .collect::<Vec<_>>()
+                });
+                let active = matches!(
+                    self.player.snapshot().state,
+                    PlaybackState::Playing | PlaybackState::Loading
+                );
+                ui.spacing_mut().item_spacing.y = 4.0;
+                track_action = self.clipped_track_rows(
+                    ui,
+                    sorted.as_deref().unwrap_or(tracks),
+                    1,
+                    active,
+                    "owner-track-rows",
+                    false,
+                );
+                ui.add_space(22.0);
+            },
         );
+        ui.data_mut(|data| data.insert_temp(tab_id, tab));
         let ctx = ui.ctx().clone();
+        if let Some(track_action) = track_action {
+            self.handle_track_action(&ctx, track_action);
+        }
         match action {
             Some(crate::owner_ui::Action::OpenPlaylist(playlist)) => {
                 self.navigate_music(&ctx, MusicPage::Playlist(playlist))
@@ -15362,6 +15453,8 @@ mod tests {
                 next_offset: None,
                 playlists_error: None,
                 retry_offset: None,
+                tracks: Vec::new(),
+                tracks_error: None,
             })),
         );
         account_ui_frame(
