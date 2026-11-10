@@ -254,56 +254,28 @@ pub fn explicit_badge(
 }
 
 /// A boxed "E", like the explicit mark of other music services.
-/// The letter is drawn as bars rather than a font glyph: a glyph this small
-/// is rasterised with its own bearings and hinting and lands off centre.
-/// The box and every bar sit on whole physical pixels, so it stays crisp.
+/// The letter is centred by its own outline, not by the text line around
+/// it (which adds the font's ascent and descent and sat it a pixel low), and
+/// the box and the letter sit on whole physical pixels.
 pub fn paint_explicit_badge(painter: &egui::Painter, rect: egui::Rect) {
-    for (part, fill) in explicit_badge_parts(rect, painter.pixels_per_point()) {
-        if fill == MUTED {
-            painter.rect_filled(part, 3.0, fill);
-        } else {
-            painter.rect_filled(part, 0.0, fill);
-        }
-    }
-}
-
-/// The box, then the E's stem and its top, middle and bottom bars. Sizes
-/// are whole physical pixels with the box's parity, so the letter centres
-/// exactly, and its bars keep at least a pixel between them.
-fn explicit_badge_parts(rect: egui::Rect, pixels: f32) -> Vec<(egui::Rect, Color32)> {
-    let side = ((rect.height() * pixels).round() as i32).max(7);
-    let stroke = ((side as f32 / 7.0).round() as i32).max(1);
-    let same_parity = |mut length: i32| {
-        if (length - side).rem_euclid(2) != 0 {
-            length += 1;
-        }
-        length
-    };
-    let mut height = same_parity((side as f32 * 0.57).round() as i32);
-    while height < 3 * stroke + 2 {
-        height += 2;
-    }
-    let width = same_parity((side as f32 * 0.43).round() as i32).max(stroke + 2);
-    let origin = egui::pos2(
-        ((rect.center().x * pixels).round() as i32 - side / 2) as f32,
-        ((rect.center().y * pixels).round() as i32 - side / 2) as f32,
+    let pixels = painter.pixels_per_point();
+    let snap = |value: f32| (value * pixels).round() / pixels;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(snap(rect.left()), snap(rect.top())),
+        egui::vec2(snap(rect.width()), snap(rect.height())),
     );
-    let at = |x: i32, y: i32, w: i32, h: i32| {
-        egui::Rect::from_min_size(
-            egui::pos2(origin.x + x as f32, origin.y + y as f32) / pixels,
-            egui::vec2(w as f32, h as f32) / pixels,
-        )
-    };
-    let left = (side - width) / 2;
-    let top = (side - height) / 2;
-    let middle = top + (height - stroke) / 2;
-    vec![
-        (at(0, 0, side, side), MUTED),
-        (at(left, top, stroke, height), BACKGROUND),
-        (at(left, top, width, stroke), BACKGROUND),
-        (at(left, middle, width - stroke / 2 - 1, stroke), BACKGROUND),
-        (at(left, top + height - stroke, width, stroke), BACKGROUND),
-    ]
+    painter.rect_filled(rect, 3.0, MUTED);
+    let galley = painter.layout_no_wrap(
+        "E".into(),
+        FontId::new((rect.height() * 0.7).round(), semibold()),
+        BACKGROUND,
+    );
+    let offset = rect.center() - galley.mesh_bounds.center();
+    painter.galley(
+        egui::pos2(snap(offset.x), snap(offset.y)),
+        galley,
+        BACKGROUND,
+    );
 }
 
 /// The artists line of a track: the explicit badge first, then `contents`
@@ -508,47 +480,6 @@ pub fn install(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_explicit_e_is_centred_on_whole_pixels_at_any_scale() {
-        for pixels in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
-            for (x, y, size) in [
-                (10.0, 20.0, 14.0),
-                (10.3, 20.6, 14.0),
-                (0.45, 7.2, 12.0),
-                (5.0, 5.0, 16.0),
-            ] {
-                let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(size, size));
-                let parts = explicit_badge_parts(rect, pixels);
-                let boxed = parts[0].0;
-                let letter = parts[1..]
-                    .iter()
-                    .map(|(part, _)| *part)
-                    .reduce(|a, b| a.union(b))
-                    .unwrap();
-                for part in parts.iter().map(|(part, _)| part) {
-                    for edge in [part.left(), part.right(), part.top(), part.bottom()] {
-                        let physical = edge * pixels;
-                        assert!(
-                            (physical - physical.round()).abs() < 1e-3,
-                            "{pixels}: {part:?}"
-                        );
-                    }
-                }
-                assert!(boxed.contains_rect(letter));
-                // Within half a physical pixel of the middle, both ways.
-                let off = (letter.center() - boxed.center()) * pixels;
-                assert!(
-                    off.x.abs() <= 0.5 && off.y.abs() <= 0.5,
-                    "{pixels} {rect:?}: {off:?}"
-                );
-                assert!(letter.height() > letter.width(), "an E, not a square");
-                // Three bars with gaps between them.
-                let (top, middle, bottom) = (parts[2].0, parts[3].0, parts[4].0);
-                assert!(top.bottom() < middle.top() && middle.bottom() < bottom.top());
-            }
-        }
-    }
 
     #[test]
     fn gradient_card_edges_fade_all_around_like_other_rounded_shapes() {

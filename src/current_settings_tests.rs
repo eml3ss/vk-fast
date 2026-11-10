@@ -537,17 +537,12 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     app.library.tracks = tracks;
     let size = egui::vec2(1120.0, 850.0);
     let mut tick = 0;
-    // The badge is a 14px grey box holding the bars of its E.
     let badges = |output: &egui::FullOutput| -> Vec<egui::Rect> {
         account_ui_shapes(output)
             .into_iter()
             .filter_map(|shape| match shape {
-                egui::Shape::Rect(rect)
-                    if rect.fill == MUTED
-                        && rect.rect.width() == 14.0
-                        && rect.rect.height() == 14.0 =>
-                {
-                    Some(rect.rect)
+                egui::Shape::Text(text) if text.galley.text() == "E" => {
+                    Some(text.visual_bounding_rect())
                 }
                 _ => None,
             })
@@ -559,21 +554,19 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     let shown = badges(&output);
     assert_eq!(shown.len(), 1, "only the explicit track: {shown:?}");
     let badge = shown[0];
-    let letter = account_ui_shapes(&output)
+    // The letter sits in the middle of its box.
+    let boxed = account_ui_shapes(&output)
         .into_iter()
-        .filter_map(|shape| match shape {
-            egui::Shape::Rect(rect)
-                if rect.fill == BACKGROUND && badge.contains_rect(rect.rect) =>
-            {
+        .find_map(|shape| match shape {
+            egui::Shape::Rect(rect) if rect.fill == MUTED && rect.rect.contains_rect(badge) => {
                 Some(rect.rect)
             }
             _ => None,
         })
-        .reduce(|a, b| a.union(b))
-        .expect("the E's bars");
+        .expect("the badge's box");
     assert!(
-        (letter.center() - badge.center()).length() <= 0.5,
-        "E off centre: {letter:?} in {badge:?}"
+        (boxed.center() - badge.center()).length() <= 0.25,
+        "E off centre: {badge:?} in {boxed:?}"
     );
     assert!(badge.right() < rude.left() && rude.left() - badge.right() < 14.0);
     assert!(
