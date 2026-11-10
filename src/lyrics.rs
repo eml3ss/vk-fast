@@ -644,12 +644,26 @@ fn parse_lrc(text: &str) -> Result<Vec<Line>, Error> {
 }
 
 fn complete_metadata(lyrics: &mut Lyrics, track: Option<&Value>, query: &Query) {
+    complete_timed_metadata(lyrics, track, None, query);
+}
+
+/// `timed_length` is the length the timed lines were made for. Musixmatch's
+/// track record can give another version's length (a video's, say) while
+/// the subtitle it returns was made for the very recording asked about.
+fn complete_timed_metadata(
+    lyrics: &mut Lyrics,
+    track: Option<&Value>,
+    timed_length: Option<u64>,
+    query: &Query,
+) {
     lyrics.source_url = track.and_then(|track| source_url(track.get("track_share_url")));
     lyrics.instrumental |= track.is_some_and(|track| flag(track.get("instrumental")));
-    let length = track
-        .and_then(|track| track.get("track_length"))
-        .and_then(number)
-        .filter(|length| *length > 0);
+    let length = timed_length.filter(|length| *length > 0).or_else(|| {
+        track
+            .and_then(|track| track.get("track_length"))
+            .and_then(number)
+            .filter(|length| *length > 0)
+    });
     let different_version = length.is_some_and(|length| {
         query.duration > 0 && length.abs_diff(u64::from(query.duration)) > (8_u64.max(length / 20))
     });
@@ -704,7 +718,8 @@ fn parse_macro(value: &Value, query: &Query) -> Result<Lyrics, Error> {
                     }
                     match parse_subtitle(subtitle) {
                         Ok(mut lyrics) => {
-                            complete_metadata(&mut lyrics, Some(track), query);
+                            let length = subtitle.get("subtitle_length").and_then(number);
+                            complete_timed_metadata(&mut lyrics, Some(track), length, query);
                             return Ok(lyrics);
                         }
                         Err(error) => subtitle_error = Some(error),
@@ -797,6 +812,43 @@ mod tests {
         );
         assert_eq!(lyrics._copyright, "© Synthetic test");
         assert!(lyrics.source_url.is_some());
+    }
+    #[test]
+    fn timing_is_judged_by_the_subtitle_length_not_another_versions_track_length() {
+        // Musixmatch's record can carry another version's length (264 s, a
+        // video's) while the subtitle it returns fits the 211 s recording.
+        let query = Query {
+            title: "Godzilla".into(),
+            artist: "Eminem".into(),
+            album: "Music To Be Murdered By - Side B (Deluxe Edition)".into(),
+            duration: 211,
+            ..query()
+        };
+        let data = |subtitle_length: Option<u64>| {
+            let mut subtitle = json!({"subtitle_body":serde_json::to_string(&json!([
+                {"text":"First synthetic line","time":{"total":1.0}},
+                {"text":"Second synthetic line","time":{"total":12.0}}
+            ])).unwrap(),"subtitle_language":"en"});
+            if let Some(length) = subtitle_length {
+                subtitle["subtitle_length"] = length.into();
+            }
+            json!({"macro_calls":{
+                "matcher.track.get":call(json!({"track":{"track_name":"Godzilla","artist_name":"Eminem feat. Juice WRLD","track_length":264}})),
+                "track.subtitles.get":call(json!({"subtitle_list":[{"subtitle":subtitle}]})),
+                "track.lyrics.get":call(json!({"lyrics":{"lyrics_body":"Synthetic plain text","lyrics_language":"en"}}))
+            }})
+        };
+        let fitting = parse_macro(&data(Some(211)), &query).unwrap();
+        assert!(fitting.synced && fitting.lines.iter().all(|line| line.at.is_some()));
+        // A subtitle for a really different version still loses its timing,
+        // and without its own length the track's length decides as before.
+        for length in [Some(264), None] {
+            let other = parse_macro(&data(length), &query).unwrap();
+            assert!(
+                !other.synced && other.lines.iter().all(|line| line.at.is_none()),
+                "{length:?}"
+            );
+        }
     }
     #[test]
     fn lrc_and_plain_text_keep_unicode_and_do_not_invent_timing() {
