@@ -656,7 +656,7 @@ fn ctrl_volume_keys_switch_changes_app_volume_and_stays_grey_on_wayland() {
     app.settings_section = SettingsSection::Playback;
     app.settings_query = "volume keys".into();
     let mut tick = 0;
-    let label = "VK Fast volume with Ctrl + volume keys";
+    let label = "Adjust the volume with Ctrl + media keys";
     let output = warm(&ctx, &mut app, size, &mut tick);
     assert!(!app.volume_keys_enabled, "off by default");
     account_ui_click(
