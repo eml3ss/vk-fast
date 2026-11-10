@@ -142,7 +142,9 @@ impl Backend {
             &quit,
         ])
         .map_err(|error| Error(error.to_string()))?;
-        let image = crate::app_icon::tray_icon();
+        // Drawn at the notification area's own size: a larger image is
+        // shrunk by the shell and ends up smaller than other tray icons.
+        let image = crate::app_icon::tray_icon(eframe::windows_small_icon_size().unwrap_or(32));
         let icon = Icon::from_rgba(image.rgba.clone(), image.width, image.height)
             .map_err(|error| Error(error.to_string()))?;
         let icon = TrayIconBuilder::new()

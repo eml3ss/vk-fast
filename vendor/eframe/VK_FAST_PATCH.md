@@ -25,6 +25,10 @@ Changes:
   the existing DWM cloak. Both immediate WGL and deferred creation use this
   order; a different monitor scale does not multiply the stored desktop origin.
 
+- A safe Windows `windows_small_icon_size()` wrapper reads `SM_CXSMICON`,
+  so the application builds its tray image at the notification area's exact
+  size instead of letting the shell rescale a larger one.
+
 - A safe Windows `allow_foreground_activation(pid)` wrapper lets a newly
   user-launched secondary process transfer foreground permission to the
   existing instance before notifying it. Zero and the all-processes sentinel

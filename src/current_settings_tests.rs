@@ -537,12 +537,17 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     app.library.tracks = tracks;
     let size = egui::vec2(1120.0, 850.0);
     let mut tick = 0;
+    // The badge is a 14px grey box holding the bars of its E.
     let badges = |output: &egui::FullOutput| -> Vec<egui::Rect> {
         account_ui_shapes(output)
             .into_iter()
             .filter_map(|shape| match shape {
-                egui::Shape::Text(text) if text.galley.text() == "E" => {
-                    Some(text.visual_bounding_rect())
+                egui::Shape::Rect(rect)
+                    if rect.fill == MUTED
+                        && rect.rect.width() == 14.0
+                        && rect.rect.height() == 14.0 =>
+                {
+                    Some(rect.rect)
                 }
                 _ => None,
             })
@@ -554,6 +559,22 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     let shown = badges(&output);
     assert_eq!(shown.len(), 1, "only the explicit track: {shown:?}");
     let badge = shown[0];
+    let letter = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == BACKGROUND && badge.contains_rect(rect.rect) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .reduce(|a, b| a.union(b))
+        .expect("the E's bars");
+    assert!(
+        (letter.center() - badge.center()).length() <= 0.5,
+        "E off centre: {letter:?} in {badge:?}"
+    );
     assert!(badge.right() < rude.left() && rude.left() - badge.right() < 14.0);
     assert!(
         (badge.center().y - rude.center().y).abs() < 3.0,

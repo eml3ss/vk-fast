@@ -22,12 +22,26 @@ pub fn native_icon() -> Arc<IconData> {
     .clone()
 }
 
-/// Prepare before creating the GUI: the tray needs a tightly framed small
-/// image instead of asking the shell to shrink the padded window icon.
+/// The emblem fills more of the tray's circle than of the window icon's: on
+/// a dark taskbar the navy circle all but disappears, and the emblem alone
+/// looked far smaller than other tray icons.
 #[cfg(any(windows, test))]
-pub fn tray_icon() -> Arc<IconData> {
-    static ICON: OnceLock<Arc<IconData>> = OnceLock::new();
-    ICON.get_or_init(|| {
+const TRAY_EMBLEM_SCALE: f32 = 1.3;
+
+/// The tray's image at `size` pixels: the notification area's own small-icon
+/// size, so the shell shows it as large as other tray icons instead of
+/// shrinking a bigger image. Tightly framed, unlike the padded window icon.
+#[cfg(any(windows, test))]
+pub fn tray_icon(size: u32) -> Arc<IconData> {
+    static ICONS: std::sync::Mutex<Vec<(u32, Arc<IconData>)>> = std::sync::Mutex::new(Vec::new());
+    let size = size.clamp(8, 256);
+    let mut icons = ICONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, icon)) = icons.iter().find(|(known, _)| *known == size) {
+        return icon.clone();
+    }
+    let icon = {
         let source = native_icon();
         let pixels = image::RgbaImage::from_raw(source.width, source.height, source.rgba.clone())
             .expect("Embedded VK Fast icon must contain RGBA pixels");
@@ -40,11 +54,43 @@ pub fn tray_icon() -> Arc<IconData> {
                 bottom = bottom.max(y + 1);
             }
         }
-        let cropped = image::imageops::crop_imm(&pixels, left, top, right - left, bottom - top);
+        let center = ((left + right) as f32 * 0.5, (top + bottom) as f32 * 0.5);
+        // The circle's own colour, read inside its left edge.
+        let base = f32::from(pixels.get_pixel(left + 12, center.1 as u32)[0]);
+        // How much of the white emblem covers a point of the original.
+        let emblem = |x: i64, y: i64| -> f32 {
+            if x < 0 || y < 0 || x >= i64::from(source.width) || y >= i64::from(source.height) {
+                return 0.0;
+            }
+            let pixel = pixels.get_pixel(x as u32, y as u32);
+            let white = ((f32::from(pixel[0]) - base) / (255.0 - base)).clamp(0.0, 1.0);
+            white * f32::from(pixel[3]) / 255.0
+        };
+        let enlarged = image::RgbaImage::from_fn(source.width, source.height, |x, y| {
+            let circle = pixels.get_pixel(left + 12, center.1 as u32);
+            let alpha = pixels.get_pixel(x, y)[3];
+            let sx = center.0 + (x as f32 + 0.5 - center.0) / TRAY_EMBLEM_SCALE - 0.5;
+            let sy = center.1 + (y as f32 + 0.5 - center.1) / TRAY_EMBLEM_SCALE - 0.5;
+            let (x0, y0) = (sx.floor() as i64, sy.floor() as i64);
+            let (fx, fy) = (sx - sx.floor(), sy - sy.floor());
+            let cover = emblem(x0, y0) * (1.0 - fx) * (1.0 - fy)
+                + emblem(x0 + 1, y0) * fx * (1.0 - fy)
+                + emblem(x0, y0 + 1) * (1.0 - fx) * fy
+                + emblem(x0 + 1, y0 + 1) * fx * fy;
+            let channel =
+                |navy: u8| (f32::from(navy) + (255.0 - f32::from(navy)) * cover).round() as u8;
+            image::Rgba([
+                channel(circle[0]),
+                channel(circle[1]),
+                channel(circle[2]),
+                alpha,
+            ])
+        });
+        let cropped = image::imageops::crop_imm(&enlarged, left, top, right - left, bottom - top);
         let pixels = image::imageops::resize(
             &cropped.to_image(),
-            32,
-            32,
+            size,
+            size,
             image::imageops::FilterType::Lanczos3,
         );
         Arc::new(IconData {
@@ -52,8 +98,9 @@ pub fn tray_icon() -> Arc<IconData> {
             height: pixels.height(),
             rgba: pixels.into_raw(),
         })
-    })
-    .clone()
+    };
+    icons.push((size, icon.clone()));
+    icon
 }
 
 /// Context memory is copied during window recreation; its old GPU handle is
@@ -88,7 +135,7 @@ mod tests {
     #[test]
     fn tray_badge_fills_the_small_canvas_without_changing_the_window_icon() {
         let window = native_icon();
-        let tray = tray_icon();
+        let tray = tray_icon(32);
         assert_eq!((tray.width, tray.height), (32, 32));
         assert_eq!(tray.rgba.len(), 32 * 32 * 4);
         let alpha = |x: usize, y: usize| tray.rgba[(y * 32 + x) * 4 + 3];
@@ -101,9 +148,44 @@ mod tests {
         for (x, y) in [(0, 0), (31, 0), (0, 31), (31, 31)] {
             assert_eq!(alpha(x, y), 0);
         }
+        // The same navy circle as the window icon.
+        let pixel = |x: usize, y: usize| &tray.rgba[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4];
+        let edge = pixel(16, 2);
+        assert!(edge[0] < 20 && edge[2] < 120 && edge[3] > 200, "{edge:?}");
+        // An emblem filling more of it than the window icon's does.
+        let white = |rgba: &[u8], side: usize| {
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 200)
+                .count() as f32
+                / (side * side) as f32
+        };
+        let tray_white = white(&tray.rgba, 32);
+        let window_white = white(&window.rgba, 256);
+        assert!(
+            tray_white > window_white * 1.3,
+            "{tray_white} vs {window_white}"
+        );
         assert_eq!((window.width, window.height), (256, 256));
         assert!(Arc::ptr_eq(&window, &native_icon()));
-        assert!(Arc::ptr_eq(&tray, &tray_icon()));
+        assert!(Arc::ptr_eq(&tray, &tray_icon(32)));
+        // Every notification-area size is drawn exactly, edge to edge.
+        for size in [16, 20, 24, 32, 40] {
+            let icon = tray_icon(size);
+            assert_eq!((icon.width, icon.height), (size, size));
+            let side = size as usize;
+            let middle = side / 2;
+            let alpha = |x: usize, y: usize| icon.rgba[(y * side + x) * 4 + 3];
+            assert!(
+                alpha(0, middle) > 100 && alpha(side - 1, middle) > 100,
+                "{size}"
+            );
+            assert!(
+                alpha(middle, 0) > 100 && alpha(middle, side - 1) > 100,
+                "{size}"
+            );
+        }
     }
 
     #[test]

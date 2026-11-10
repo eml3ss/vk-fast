@@ -285,7 +285,7 @@ fn main() -> eframe::Result {
     let system_titlebar = preferences::load_system_titlebar();
     ui_fonts::preload();
     #[cfg(windows)]
-    let _ = app_icon::tray_icon();
+    let _ = app_icon::tray_icon(eframe::windows_small_icon_size().unwrap_or(32));
     let options = move || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("VK Fast")

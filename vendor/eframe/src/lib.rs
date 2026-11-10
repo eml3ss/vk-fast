@@ -207,6 +207,13 @@ pub fn set_windows_context_menu_theme(dark: bool) -> bool {
     native::windows_menu::apply(dark)
 }
 
+/// The side of a small icon as the Windows notification area draws it, in
+/// physical pixels at the system DPI, so a tray image needs no rescaling.
+#[cfg(target_os = "windows")]
+pub fn windows_small_icon_size() -> Option<u32> {
+    native::windows_metrics::small_icon_size()
+}
+
 pub(crate) mod stopwatch;
 
 // ----------------------------------------------------------------------------

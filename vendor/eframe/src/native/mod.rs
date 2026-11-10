@@ -10,6 +10,8 @@ pub(crate) mod windows_focus;
 pub(crate) mod activation_token;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_menu;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_metrics;
 #[cfg(any(target_os = "windows", test))]
 mod windows_startup;
 
