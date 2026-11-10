@@ -28,6 +28,7 @@ const DEFAULT_AUTO_UPDATES: bool = true;
 const DEFAULT_SEARCH_ON_ENTER: bool = true;
 const DEFAULT_MIX_AFTER_QUEUE: bool = true;
 const DEFAULT_EXPLICIT_BADGE: bool = true;
+const DEFAULT_ANIMATED_BACKDROP: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
@@ -67,6 +68,8 @@ struct Preferences {
     mix_after_queue: bool,
     #[serde(deserialize_with = "deserialize_explicit_badge")]
     explicit_badge: bool,
+    #[serde(deserialize_with = "deserialize_animated_backdrop")]
+    animated_backdrop: bool,
     /// Off unless the user turns it on: it changes the account's page.
     #[serde(deserialize_with = "deserialize_broadcast")]
     broadcast: bool,
@@ -101,6 +104,7 @@ impl Default for Preferences {
             middle_autoscroll: false,
             mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
+            animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
             broadcast: false,
             link_browser: String::new(),
             extra: serde_json::Map::new(),
@@ -255,6 +259,14 @@ fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_EXPLICIT_BADGE))
+}
+
+fn deserialize_animated_backdrop<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(DEFAULT_ANIMATED_BACKDROP))
 }
 
 fn deserialize_broadcast<'de, D: serde::Deserializer<'de>>(
@@ -778,6 +790,22 @@ pub fn save_explicit_badge(enabled: bool) -> io::Result<()> {
     })
 }
 
+/// The animated blurred backdrop of the fullscreen player; on by default.
+pub fn load_animated_backdrop() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_ANIMATED_BACKDROP, |preferences| {
+            preferences.animated_backdrop
+        })
+}
+
+pub fn save_animated_backdrop(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.animated_backdrop = enabled
+    })
+}
+
 pub fn load_broadcast() -> bool {
     preferences_path()
         .ok()
@@ -908,6 +936,21 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn animated_backdrop_defaults_on_and_turning_it_off_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [r#"{}"#, r#"{"animated_backdrop":"invalid"}"#] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(preferences.animated_backdrop);
+        }
+        update_at(&path, |preferences| preferences.animated_backdrop = false).unwrap();
+        save_at(&path, 0.375).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(!restored.animated_backdrop);
+        assert_eq!(restored.volume, 0.375);
     }
 
     #[test]

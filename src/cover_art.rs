@@ -433,6 +433,29 @@ impl CoverCache {
         }
     }
 
+    /// The decoded cover behind `header_color`, for effects drawn from it.
+    pub fn ready_image(
+        &mut self,
+        context: &egui::Context,
+        url: Option<&str>,
+        size: f32,
+    ) -> Option<Arc<ColorImage>> {
+        self.receive(context);
+        self.clock = self.clock.wrapping_add(1);
+        let url = url.filter(|url| !url.is_empty())?;
+        let key = Key {
+            url: url.to_owned(),
+            edge: texture_edge(size),
+        };
+        self.request(context, key.clone());
+        let entry = self.entries.get_mut(&key)?;
+        entry.touched = self.clock;
+        match &entry.state {
+            State::Ready(_, _, image) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_image_for_test(
         &mut self,

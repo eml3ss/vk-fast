@@ -16,6 +16,7 @@ pub enum Setting {
     SearchOnEnter,
     MiddleAutoscroll,
     ExplicitBadge,
+    AnimatedBackdrop,
     NormalizeVolume,
     MixAfterQueue,
     Broadcast,
@@ -74,6 +75,9 @@ impl Query {
             }
             Setting::ExplicitBadge => {
                 "интерфейс значок иконка метка буква е e explicit эксплисит нецензурный ненормативная лексика мат 18+ треки название interface badge icon label letter explicit content mature lyrics tracks title"
+            }
+            Setting::AnimatedBackdrop => {
+                "интерфейс анимированный анимация фон размытый размытие обложка полноэкранный полный экран текст плеер interface animated animation background backdrop blur blurred cover fullscreen lyrics player"
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"

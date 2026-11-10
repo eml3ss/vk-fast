@@ -115,10 +115,13 @@ fn dot_radius(size: f32, dot: usize, phase: Option<f64>) -> f32 {
     size * 0.13 * pulse
 }
 
+/// `backdrop` is the animated fullscreen background; without it, the
+/// fullscreen view keeps its plain gradient.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut State,
     covers: &mut CoverCache,
+    backdrop: Option<&mut crate::backdrop::Backdrop>,
     view: View<'_>,
 ) -> Option<Action> {
     let t = |ru, en| view.language.text(ru, en);
@@ -143,6 +146,10 @@ pub fn show(
     if view.fullscreen {
         let color = covers.header_color(ui.ctx(), cover_url, 512.0);
         background(ui.painter(), rect, color);
+        if let Some(backdrop) = backdrop {
+            let image = covers.ready_image(ui.ctx(), cover_url, 512.0);
+            backdrop.paint(ui, rect, cover_url, image, view.playing);
+        }
     }
     caption(
         ui,
@@ -809,6 +816,7 @@ mod tests {
                             ui,
                             &mut state,
                             &mut covers,
+                            None,
                             View {
                                 language: Language::English,
                                 track: Some(&track),

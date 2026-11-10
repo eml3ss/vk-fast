@@ -1318,6 +1318,9 @@ pub struct MusicApp {
     /// The "E" badge by explicit tracks' titles.
     explicit_badge: bool,
     explicit_badge_save_failed: bool,
+    /// The fullscreen player's animated blurred backdrop.
+    animated_backdrop: bool,
+    animated_backdrop_save_failed: bool,
     autoscroll: crate::autoscroll::Autoscroll,
     /// The page area of the last frame, where a middle click autoscrolls.
     page_rect: egui::Rect,
@@ -1687,6 +1690,8 @@ impl MusicApp {
             middle_autoscroll_save_failed: false,
             explicit_badge: preferences::load_explicit_badge(),
             explicit_badge_save_failed: false,
+            animated_backdrop: preferences::load_animated_backdrop(),
+            animated_backdrop_save_failed: false,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
@@ -9804,6 +9809,7 @@ impl MusicApp {
                 Setting::SearchOnEnter,
                 Setting::MiddleAutoscroll,
                 Setting::ExplicitBadge,
+                Setting::AnimatedBackdrop,
             ],
             SettingsSection::Playback => &[
                 Setting::NormalizeVolume,
@@ -10020,6 +10026,7 @@ impl MusicApp {
                         || query.matches(Setting::SearchOnEnter)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
                     {
                         ui.add_space(16.0);
                     }
@@ -10050,6 +10057,7 @@ impl MusicApp {
                         || query.matches(Setting::SearchOnEnter)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
                     {
                         ui.add_space(16.0);
                     }
@@ -10105,6 +10113,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
                     {
                         ui.add_space(16.0);
                     }
@@ -10154,6 +10163,36 @@ impl MusicApp {
                         .color(MUTED),
                     );
                     if self.explicit_badge_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::AnimatedBackdrop) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::AnimatedBackdrop) {
+                    let label = t(
+                        "Анимированный фон в полноэкранном режиме",
+                        "Animated fullscreen background",
+                    );
+                    if theme::switch(ui, &mut self.animated_backdrop, label).changed() {
+                        self.animated_backdrop_save_failed = !cfg!(test)
+                            && preferences::save_animated_backdrop(self.animated_backdrop).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Размытая обложка трека медленно переливается за текстом. Выключено — спокойный градиент в её цвете.",
+                            "The track's blurred cover slowly drifts behind the lyrics. Off: a still gradient in its colour.",
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                    if self.animated_backdrop_save_failed {
                         ui.colored_label(
                             Color32::from_rgb(255, 158, 153),
                             t(
@@ -11444,6 +11483,8 @@ mod tests {
             middle_autoscroll_save_failed: false,
             explicit_badge: true,
             explicit_badge_save_failed: false,
+            animated_backdrop: true,
+            animated_backdrop_save_failed: false,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,

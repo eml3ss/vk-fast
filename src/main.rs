@@ -14,6 +14,7 @@ mod audio_upload;
 mod audio_upload_ui;
 mod autoscroll;
 mod avatar_cache;
+mod backdrop;
 mod carousel;
 mod client_platform;
 mod cover_art;

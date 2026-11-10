@@ -25,6 +25,7 @@ pub(super) struct State {
     settings_busy: bool,
     settings_error: Option<Error>,
     view: lyrics_ui::State,
+    backdrop: crate::backdrop::Backdrop,
 }
 
 impl State {
@@ -368,6 +369,7 @@ impl MusicApp {
             ui,
             &mut self.lyrics.view,
             &mut self.covers,
+            self.animated_backdrop.then_some(&mut self.lyrics.backdrop),
             lyrics_ui::View {
                 language: self.language,
                 track: self.playing.as_ref(),

@@ -257,3 +257,35 @@ fn lyric_button_sits_to_the_left_of_queue_in_both_player_layouts() {
         assert!(!app.queue_ui.open && app.lyrics.open && app.lyrics.active);
     }
 }
+
+#[test]
+fn fullscreen_draws_the_blurred_cover_backdrop_unless_settings_turn_it_off() {
+    for animated in [true, false] {
+        let ctx = egui::Context::default();
+        let mut app = prepared(&ctx, Language::English);
+        let url = "https://images.example.test/backdrop.jpg";
+        app.playing.as_mut().unwrap().cover_url = Some(url.into());
+        app.covers.seed_image_for_test(
+            &ctx,
+            url,
+            512.0,
+            egui::ColorImage::new(
+                [32, 32],
+                vec![egui::Color32::from_rgb(200, 40, 90); 32 * 32],
+            ),
+        );
+        app.animated_backdrop = animated;
+        app.lyrics.open = true;
+        app.set_lyrics_fullscreen(&ctx, true);
+        let size = egui::vec2(1200.0, 760.0);
+        let mut frame = 0;
+        for _ in 0..3 {
+            account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert_eq!(
+            app.lyrics.backdrop.cover(),
+            animated.then_some(url),
+            "animated={animated}"
+        );
+    }
+}
