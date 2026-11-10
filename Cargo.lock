@@ -4681,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "vk-fast"
-version = "0.5.9"
+version = "0.6.0"
 dependencies = [
  "aes",
  "audioadapter-buffers",
