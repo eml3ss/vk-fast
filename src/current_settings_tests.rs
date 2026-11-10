@@ -568,6 +568,11 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
         (boxed.center() - badge.center()).length() <= 0.25,
         "E off centre: {badge:?} in {boxed:?}"
     );
+    // The box is centred on the artist name, capitals to baseline.
+    assert!(
+        (boxed.center().y - rude.center().y).abs() <= 0.5,
+        "badge {boxed:?}, artist {rude:?}"
+    );
     assert!(badge.right() < rude.left() && rude.left() - badge.right() < 14.0);
     assert!(
         (badge.center().y - rude.center().y).abs() < 3.0,
