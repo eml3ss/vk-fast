@@ -10263,8 +10263,8 @@ impl MusicApp {
                     let support = crate::volume_keys::support();
                     let available = support == crate::volume_keys::Support::Available;
                     let label = t(
-                        "Громкость VK Fast клавишами Ctrl + громкость",
-                        "VK Fast volume with Ctrl + volume keys",
+                        "Изменение громкости с помощью Ctrl + мультимедийных клавиш",
+                        "Adjust the volume with Ctrl + media keys",
                     );
                     let mut enabled = self.volume_keys_enabled && available;
                     if ui
@@ -10278,8 +10278,8 @@ impl MusicApp {
                     }
                     let hint = match support {
                         crate::volume_keys::Support::Available => t(
-                            "Ctrl + клавиши громкости меняют громкость только VK Fast, а не системы, даже когда окно не в фокусе.",
-                            "Ctrl + the volume keys change only VK Fast's volume, not the system's, even when the window is in the background.",
+                            "Зажатие Ctrl при использовании мультимедийных клавиш будет менять громкость треков в VK Fast.",
+                            "Holding down Ctrl while using media keys will change the volume of tracks in VK Fast.",
                         ),
                         crate::volume_keys::Support::Wayland => t(
                             "Недоступно в сеансе Wayland: он не позволяет приложениям перехватывать клавиши глобально.",
