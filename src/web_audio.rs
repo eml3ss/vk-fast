@@ -482,6 +482,8 @@ fn now() -> i64 {
 
 fn domain_matches(domain: &str, host: &str) -> bool {
     // An explicit allowlist also protects restored local session files.
+    // `login.vk.*` holds the cookies that renew a sign-in; they go to that
+    // host alone, like any host-only cookie.
     matches!(
         domain,
         "vk.ru"
@@ -492,6 +494,8 @@ fn domain_matches(domain: &str, host: &str) -> bool {
             | ".www.vk.ru"
             | "www.vk.com"
             | ".www.vk.com"
+            | "login.vk.ru"
+            | "login.vk.com"
     ) && (domain == host
         || domain.strip_prefix('.') == Some(host)
         || matches!(host, "login.vk.ru" | "login.vk.com")
@@ -532,7 +536,7 @@ fn apply_set_cookie(
             let domain = domain.trim_start_matches('.').to_ascii_lowercase();
             let allowed = matches!(
                 domain.as_str(),
-                "vk.ru" | "vk.com" | "www.vk.ru" | "www.vk.com"
+                "vk.ru" | "vk.com" | "www.vk.ru" | "www.vk.com" | "login.vk.ru" | "login.vk.com"
             );
             let covers = request_host == domain
                 || request_host
@@ -541,10 +545,16 @@ fn apply_set_cookie(
             if !allowed || !covers {
                 return false;
             }
-            format!(".{domain}")
+            // A login host has no subdomains: keep it as its own cookie.
+            if domain.starts_with("login.") {
+                domain
+            } else {
+                format!(".{domain}")
+            }
         }
-        // Host-only cookies are kept for the website itself, not login hosts.
-        None if request_host == site => site.to_owned(),
+        // Host-only cookies of the website, or of its login host, which
+        // keeps the cookies that renew the sign-in.
+        None if request_host == site || request_host == login_host(site) => request_host.to_owned(),
         None => return false,
     };
     let path = parsed
@@ -607,6 +617,22 @@ fn apply_set_cookie(
         None => return false,
     }
     true
+}
+
+/// One answer on the way to the viewer's start page, with its Set-Cookie
+/// headers.
+enum ViewerAnswer {
+    Redirect(Option<String>, Vec<Zeroizing<String>>),
+    Page(Zeroizing<String>, Vec<Zeroizing<String>>),
+}
+
+/// The host that signs into `site` and renews its sign-in.
+fn login_host(site: &str) -> &'static str {
+    if site == "vk.com" {
+        "login.vk.com"
+    } else {
+        "login.vk.ru"
+    }
 }
 
 fn live(cookie: &SessionCookie) -> bool {
@@ -1013,41 +1039,119 @@ impl WebAudioClient {
         profile_from_html(&self.fetch_viewer_html()?)
     }
 
+    /// The website's start page as the signed-in viewer sees it. When VK
+    /// wants the sign-in renewed it sends the page through login.vk.* and
+    /// back, setting fresh cookies on the way, as it does for a browser; they
+    /// are kept only once the page shows a signed-in viewer, so a failed
+    /// renewal never replaces working cookies with signed-out ones.
     fn fetch_viewer_html(&self) -> Result<Zeroizing<String>, WebAudioError> {
-        let mut url = reqwest::Url::parse(&format!("https://{}/feed", self.host))
-            .map_err(|_| WebAudioError::Format)?;
-        // Follow only HTTPS redirects on the same exact website host, rebuilding
-        // the cookie header for each path. Nothing is sent to login or third parties.
-        for _ in 0..5 {
+        self.viewer_html_with(|url, cookie| {
             let response = self
                 .http
                 .get(url.clone())
-                .header(COOKIE, self.cookie_header(self.host, url.path())?)
+                .header(COOKIE, cookie)
                 .send()
                 .map_err(network)?;
-            self.absorb_set_cookies(&response);
+            let set_cookies = response
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .map(|value| Zeroizing::new(value.to_owned()))
+                .collect();
             if response.status().is_redirection() {
                 let location = response
                     .headers()
                     .get(LOCATION)
                     .and_then(|h| h.to_str().ok())
-                    .ok_or(WebAudioError::Expired)?;
-                let target = url.join(location).map_err(|_| WebAudioError::Expired)?;
-                if is_challenge(&target, self.host) {
-                    return Err(WebAudioError::Temporary);
-                }
-                if target.scheme() != "https"
-                    || target.host_str() != Some(self.host)
-                    || target.port_or_known_default() != Some(443)
-                    || !target.username().is_empty()
-                    || target.password().is_some()
-                {
-                    return Err(WebAudioError::Expired);
-                }
-                url = target;
-                continue;
+                    .map(str::to_owned);
+                return Ok(ViewerAnswer::Redirect(location, set_cookies));
             }
-            return body(response);
+            Ok(ViewerAnswer::Page(body(response)?, set_cookies))
+        })
+    }
+
+    fn viewer_html_with(
+        &self,
+        fetch: impl FnMut(&reqwest::Url, HeaderValue) -> Result<ViewerAnswer, WebAudioError>,
+    ) -> Result<Zeroizing<String>, WebAudioError> {
+        let (html, renewal, renewing) = self.fetch_viewer_page(fetch)?;
+        if viewer_record(&html).is_some_and(|viewer| viewer.id > 0) {
+            if renewing {
+                crate::diagnostics::event("session", "sign_in_renewed");
+            }
+            for host in [self.host, login_host(self.host)] {
+                let headers: Vec<&str> = renewal
+                    .iter()
+                    .filter(|(from, _)| *from == host)
+                    .map(|(_, header)| header.as_str())
+                    .collect();
+                self.renew_cookies(host, true, &headers);
+            }
+        } else if renewing {
+            // VK asked to renew the sign-in and still shows no viewer: the
+            // session really ended.
+            return Err(WebAudioError::Expired);
+        }
+        Ok(html)
+    }
+
+    /// Follows HTTPS redirects only between the website and its login host,
+    /// sending each the cookies a browser would and collecting what they set.
+    #[allow(clippy::type_complexity)]
+    fn fetch_viewer_page(
+        &self,
+        mut fetch: impl FnMut(&reqwest::Url, HeaderValue) -> Result<ViewerAnswer, WebAudioError>,
+    ) -> Result<
+        (
+            Zeroizing<String>,
+            Vec<(&'static str, Zeroizing<String>)>,
+            bool,
+        ),
+        WebAudioError,
+    > {
+        let login = login_host(self.host);
+        let mut cookies = self
+            .cookies
+            .read()
+            .map_err(|_| WebAudioError::NoSession)?
+            .clone();
+        let mut renewal = Vec::new();
+        let mut renewing = false;
+        let mut url = reqwest::Url::parse(&format!("https://{}/feed", self.host))
+            .map_err(|_| WebAudioError::Format)?;
+        for _ in 0..12 {
+            let host = match url.host_str() {
+                Some(host) if host == self.host => self.host,
+                Some(host) if host == login => login,
+                _ => return Err(WebAudioError::Expired),
+            };
+            let answer = fetch(&url, cookie_header(&cookies, host, url.path())?)?;
+            let (ViewerAnswer::Redirect(_, set) | ViewerAnswer::Page(_, set)) = &answer;
+            for header in set {
+                apply_set_cookie(&mut cookies, self.host, host, header, true, now());
+                renewal.push((host, header.clone()));
+            }
+            let location = match answer {
+                ViewerAnswer::Page(html, _) => return Ok((html, renewal, renewing)),
+                ViewerAnswer::Redirect(location, _) => location.ok_or(WebAudioError::Expired)?,
+            };
+            let target = url.join(&location).map_err(|_| WebAudioError::Expired)?;
+            if is_challenge(&target, self.host) {
+                return Err(WebAudioError::Temporary);
+            }
+            if target.scheme() != "https"
+                || !target
+                    .host_str()
+                    .is_some_and(|host| host == self.host || host == login)
+                || target.port_or_known_default() != Some(443)
+                || !target.username().is_empty()
+                || target.password().is_some()
+            {
+                return Err(WebAudioError::Expired);
+            }
+            renewing |= target.host_str() == Some(login);
+            url = target;
         }
         Err(WebAudioError::Expired)
     }
@@ -3227,11 +3331,7 @@ impl WebAudioClient {
         // The official browser uses this endpoint when the page has no BFF
         // token. Only domain-scoped VK cookies reach the explicit VK login host;
         // host-only cookies remain confined to their original host.
-        let login_host = if self.host == "vk.ru" {
-            "login.vk.ru"
-        } else {
-            "login.vk.com"
-        };
+        let login_host = login_host(self.host);
         let response = self
             .http
             .post(format!("https://{login_host}/?act=web_token"))
@@ -6760,13 +6860,29 @@ mod tests {
         for (host, header) in [
             ("vk.ru", "foreign=1; Domain=.example.com; path=/"),
             ("vk.ru", "sibling=1; Domain=.vk.com; path=/"),
-            ("login.vk.ru", "login_only=1; path=/"),
+            ("id.vk.ru", "id_only=1; path=/"),
             ("vk.ru", "bad=x\u{7f}; path=/"),
             ("vk.ru", "not a cookie"),
         ] {
             assert!(!apply(&mut cookies, host, true, header), "{header}");
         }
         assert_eq!(cookies.len(), 3);
+        // The login host's own cookies renew the sign-in: kept for it alone.
+        assert!(apply(
+            &mut cookies,
+            "login.vk.ru",
+            true,
+            "login_only=1; path=/"
+        ));
+        assert_eq!(value(&cookies, "login_only").unwrap().1, "login.vk.ru");
+        assert!(
+            !cookie_header(&cookies, "vk.ru", "/")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("login_only")
+        );
+        cookies.retain(|cookie| cookie.name != "login_only");
         assert!(apply(
             &mut cookies,
             "login.vk.ru",
@@ -6774,6 +6890,139 @@ mod tests {
             "remixnsid=from-login; Domain=.vk.ru; Path=/"
         ));
         assert_eq!(value(&cookies, "remixnsid").unwrap().0, "from-login");
+    }
+
+    #[test]
+    fn vk_sign_in_renewal_is_followed_like_a_browser_and_kept_only_when_it_works() {
+        let session = || {
+            WebAudioClient::new(vec![
+                cookie("vk.ru", "/", "remixsid", "old-session"),
+                cookie("login.vk.ru", "/", "p", "login-key"),
+                cookie(".vk.ru", "/", "remixlang", "0"),
+            ])
+            .unwrap()
+        };
+        let viewer = "<script>window.vk = {\"id\":42};</script>";
+        let set = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| Zeroizing::new((*value).to_owned()))
+                .collect()
+        };
+        // VK's renewal: the start page goes through login.vk.ru and back.
+        let renewal = |final_page: &'static str| {
+            let mut step = 0;
+            move |url: &reqwest::Url, cookie: HeaderValue| {
+                let header = cookie.to_str().unwrap().to_owned();
+                step += 1;
+                let host = url.host_str().unwrap().to_owned();
+                Ok(match step {
+                    1 => {
+                        assert_eq!(host, "vk.ru");
+                        assert!(
+                            header.contains("remixsid=old-session")
+                                && !header.contains("p=login-key")
+                        );
+                        ViewerAnswer::Redirect(
+                            Some("https://login.vk.ru/?role=fast&to=feed&ip_h=synthetic".into()),
+                            Vec::new(),
+                        )
+                    }
+                    2 => {
+                        // The login host gets its own cookie and the shared
+                        // ones, never the website's host-only session.
+                        assert_eq!(host, "login.vk.ru");
+                        assert!(header.contains("p=login-key") && header.contains("remixlang=0"));
+                        assert!(!header.contains("remixsid"));
+                        ViewerAnswer::Redirect(
+                            Some("https://vk.ru/login.php?act=slogin&role=fast&to=feed".into()),
+                            set(&[
+                                "remixsid=renewed; Domain=.vk.ru; Path=/",
+                                "p=login-key-2; Path=/",
+                            ]),
+                        )
+                    }
+                    3 => {
+                        assert_eq!(host, "vk.ru");
+                        assert!(header.contains("remixsid=renewed"));
+                        ViewerAnswer::Redirect(
+                            Some("/feed".into()),
+                            set(&["httoken=fresh; Domain=.vk.ru; Max-Age=3600; Path=/"]),
+                        )
+                    }
+                    _ => ViewerAnswer::Page(Zeroizing::new(final_page.into()), Vec::new()),
+                })
+            }
+        };
+        let value = |cookies: &[SessionCookie], name: &str| {
+            cookies
+                .iter()
+                .find(|cookie| cookie.name == name)
+                .map(|cookie| cookie.value.clone())
+        };
+
+        // Renewed: the fresh cookies are kept and handed out to be saved.
+        let client = session();
+        assert!(client.viewer_html_with(renewal(viewer)).is_ok());
+        let saved = client
+            .take_cookie_update()
+            .expect("renewed cookies are saved");
+        assert_eq!(value(&saved, "remixsid").as_deref(), Some("renewed"));
+        assert_eq!(value(&saved, "p").as_deref(), Some("login-key-2"));
+        assert_eq!(value(&saved, "httoken").as_deref(), Some("fresh"));
+        assert_eq!(
+            saved
+                .iter()
+                .filter(|cookie| cookie.name == "remixsid")
+                .count(),
+            1
+        );
+
+        // Not renewed: VK shows no viewer after all. The session ended, and
+        // the working cookies are not replaced with signed-out ones.
+        let client = session();
+        assert_eq!(
+            client
+                .viewer_html_with(renewal("<html>Welcome</html>"))
+                .unwrap_err(),
+            WebAudioError::Expired
+        );
+        assert!(client.take_cookie_update().is_none());
+        assert!(
+            client
+                .cookie_header("vk.ru", "/")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("old-session")
+        );
+
+        // Nowhere else: another host ends it too.
+        let client = session();
+        let elsewhere = client.viewer_html_with(|_, _| {
+            Ok(ViewerAnswer::Redirect(
+                Some("https://id.vk.ru/auth".into()),
+                Vec::new(),
+            ))
+        });
+        assert_eq!(elsewhere.unwrap_err(), WebAudioError::Expired);
+
+        // An ordinary visit still keeps what the page sets.
+        let client = session();
+        assert!(
+            client
+                .viewer_html_with(|_, _| {
+                    Ok(ViewerAnswer::Page(
+                        Zeroizing::new(viewer.into()),
+                        set(&["httoken=plain; Domain=.vk.ru; Path=/"]),
+                    ))
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            value(&client.take_cookie_update().unwrap(), "httoken").as_deref(),
+            Some("plain")
+        );
     }
 
     #[test]

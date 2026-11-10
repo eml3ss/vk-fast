@@ -47,6 +47,8 @@ fn allowed_domain(domain: &str) -> bool {
             | ".vk.com"
             | "www.vk.com"
             | ".www.vk.com"
+            | "login.vk.ru"
+            | "login.vk.com"
     )
 }
 

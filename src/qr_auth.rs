@@ -596,30 +596,63 @@ fn finish(
     }
     Ok(SignedIn { profile, cookies })
 }
+/// The session's cookies as the jar would send them to the website and to
+/// its login host. A cookie the jar sends to both with one value is set on
+/// the whole domain; one only the login host gets is that host's own: those
+/// renew the sign-in when VK asks for it later.
 fn website_cookies(jar: &Jar) -> Result<Vec<SessionCookie>, Error> {
-    let mut cookies = Vec::new();
-    for host in ["vk.ru", "vk.com"] {
+    let sent = |host: &str| -> Result<Vec<(String, Zeroizing<String>)>, Error> {
         let url = Url::parse(&format!("https://{host}/")).map_err(|_| Error::Finish)?;
         let Some(header) = jar.cookies(&url) else {
-            continue;
+            return Ok(Vec::new());
         };
         let values = Zeroizing::new(header.to_str().map_err(|_| Error::Finish)?.to_owned());
-        for item in values.split(';') {
-            let Some((name, value)) = item.trim().split_once('=') else {
-                return Err(Error::Finish);
+        values
+            .split(';')
+            .map(|item| {
+                item.trim()
+                    .split_once('=')
+                    .map(|(name, value)| (name.to_owned(), Zeroizing::new(value.to_owned())))
+                    .ok_or(Error::Finish)
+            })
+            .collect()
+    };
+    let mut cookies = Vec::new();
+    let mut push = |domain: String, name: &str, value: &str| -> Result<(), Error> {
+        let cookie = SessionCookie {
+            domain,
+            path: "/".into(),
+            name: name.into(),
+            value: value.into(),
+            secure: true,
+            expires_unix: None,
+        };
+        if !cookie.is_valid() || cookies.len() >= 256 {
+            return Err(Error::Finish);
+        }
+        cookies.push(cookie);
+        Ok(())
+    };
+    for (site, login) in [("vk.ru", "login.vk.ru"), ("vk.com", "login.vk.com")] {
+        let website = sent(site)?;
+        let signing = sent(login)?;
+        let shared = |name: &str, value: &str| {
+            signing
+                .iter()
+                .any(|(n, v)| n == name && v.as_str() == value)
+        };
+        for (name, value) in &website {
+            let domain = if shared(name, value) {
+                format!(".{site}")
+            } else {
+                site.to_owned()
             };
-            let cookie = SessionCookie {
-                domain: host.into(),
-                path: "/".into(),
-                name: name.into(),
-                value: value.into(),
-                secure: true,
-                expires_unix: None,
-            };
-            if !cookie.is_valid() || cookies.len() >= 256 {
-                return Err(Error::Finish);
+            push(domain, name, value)?;
+        }
+        for (name, value) in &signing {
+            if !website.iter().any(|(n, v)| n == name && v == value) {
+                push(login.to_owned(), name, value)?;
             }
-            cookies.push(cookie);
         }
     }
     Ok(cookies)
@@ -721,10 +754,28 @@ mod tests {
             "foreign=excluded; Path=/; Secure",
             &Url::parse("https://example.com/").unwrap(),
         );
+        // The login host's own cookies renew the sign-in later; a cookie set
+        // on the whole domain is kept once, for the domain.
+        jar.add_cookie_str(
+            "p=synthetic-login; Path=/; Secure",
+            &Url::parse("https://login.vk.ru/").unwrap(),
+        );
+        jar.add_cookie_str(
+            "remixlang=0; Domain=.vk.ru; Path=/; Secure",
+            &Url::parse("https://vk.ru/").unwrap(),
+        );
         let cookies = website_cookies(&jar).unwrap();
-        assert_eq!(cookies.len(), 1);
-        assert_eq!(cookies[0].domain, "vk.ru");
-        assert_eq!(cookies[0].name, "remixsid");
+        let found = |name: &str| {
+            cookies
+                .iter()
+                .filter(|cookie| cookie.name == name)
+                .map(|cookie| cookie.domain.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cookies.len(), 3, "no id.vk.ru or foreign cookies");
+        assert_eq!(found("remixsid"), ["vk.ru"]);
+        assert_eq!(found("remixlang"), [".vk.ru"]);
+        assert_eq!(found("p"), ["login.vk.ru"]);
     }
     #[test]
     fn finish_uses_fresh_website_metadata_without_foreign_secrets() {

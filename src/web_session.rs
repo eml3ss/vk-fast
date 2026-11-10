@@ -35,6 +35,8 @@ impl SessionCookie {
                 | ".vk.com"
                 | "www.vk.com"
                 | ".www.vk.com"
+                | "login.vk.ru"
+                | "login.vk.com"
         ) && self.path.starts_with('/')
             && self.path.len() <= 4096
             && !self.path.chars().any(char::is_control)
