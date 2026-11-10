@@ -13,6 +13,8 @@ pub const CONTROLS_WIDTH: f32 = 108.0;
 const BUTTON_WIDTH: f32 = CONTROLS_WIDTH / 3.0;
 const EDGE: f32 = 3.0;
 const CORNER: f32 = 8.0;
+/// How far caption buttons reach across a gap to the window's edge.
+const EDGE_REACH: f32 = 12.0;
 
 pub fn controls_width(ctx: &Context) -> f32 {
     if ctx.input(|input| input.viewport().fullscreen == Some(true)) {
@@ -44,6 +46,16 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
         return Rect::from_min_size(ui.cursor().min, egui::Vec2::ZERO);
     }
     let maximized = ui.input(|input| input.viewport().maximized == Some(true));
+    // The buttons take clicks up to the window's top edge, and Close up to
+    // its right edge too. A window that can be resized keeps its thin edge
+    // and corner for resizing, as no native border lies outside it.
+    let window = ui.ctx().viewport_rect();
+    let resizable = resizable(ui.ctx());
+    let inset = if resizable { EDGE } else { 0.0 };
+    let resizing = resizable
+        && ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|point| resize_direction(window, point).is_some());
     ui.allocate_ui_with_layout(
         egui::vec2(CONTROLS_WIDTH, CONTROL_HEIGHT),
         Layout::left_to_right(Align::Center),
@@ -70,12 +82,36 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
                     egui::ViewportCommand::Close,
                 ),
             ] {
-                let (rect, response) = ui
-                    .allocate_exact_size(egui::vec2(BUTTON_WIDTH, CONTROL_HEIGHT), Sense::click());
+                let (rect, _) = ui
+                    .allocate_exact_size(egui::vec2(BUTTON_WIDTH, CONTROL_HEIGHT), Sense::hover());
+                // Only across the gap to the edge: buttons placed elsewhere
+                // never grow over the rest of the caption.
+                let top = window.top() + inset;
+                let right = window.right() - inset;
+                let hit = Rect::from_min_max(
+                    egui::pos2(
+                        rect.left(),
+                        if rect.top() - top <= EDGE_REACH {
+                            top.min(rect.top())
+                        } else {
+                            rect.top()
+                        },
+                    ),
+                    egui::pos2(
+                        if index == 2 && right - rect.right() <= EDGE_REACH {
+                            right.max(rect.right())
+                        } else {
+                            rect.right()
+                        },
+                        rect.bottom(),
+                    ),
+                );
+                let response =
+                    ui.interact(hit, ui.id().with(("caption-button", index)), Sense::click());
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
                 });
-                let highlighted = response.hovered() || response.has_focus();
+                let highlighted = (response.hovered() && !resizing) || response.has_focus();
                 let background = if highlighted {
                     if index == 2 {
                         Color32::from_rgb(139, 47, 62)
@@ -124,7 +160,7 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
                     }
                     _ => icons::paint(ui.painter(), icon, Icon::Close, color),
                 }
-                if response.clicked() {
+                if response.clicked() && !resizing {
                     ui.ctx()
                         .memory_mut(|memory| memory.surrender_focus(response.id));
                     send_once(ui.ctx(), command);
@@ -215,17 +251,24 @@ fn resize_direction(bounds: Rect, pointer: egui::Pos2) -> Option<egui::ResizeDir
 /// Run after normal widgets, only while custom chrome is enabled. Hit-testing
 /// narrow empty edges directly avoids a transparent foreground window that
 /// would otherwise intercept the search field, music rows or playback controls.
+/// Whether the window's edges resize it: a focused window that is neither
+/// maximized nor fullscreen.
+fn resizable(ctx: &Context) -> bool {
+    ctx.input(|input| {
+        input.focused
+            && input.viewport().fullscreen != Some(true)
+            && input.viewport().maximized != Some(true)
+    })
+}
+
 pub fn resize(ctx: &Context) {
-    let (pointer, pressed, enabled) = ctx.input(|input| {
+    let (pointer, pressed) = ctx.input(|input| {
         (
             input.pointer.interact_pos(),
             input.pointer.button_pressed(egui::PointerButton::Primary),
-            input.focused
-                && input.viewport().fullscreen != Some(true)
-                && input.viewport().maximized != Some(true),
         )
     });
-    if !enabled {
+    if !resizable(ctx) {
         return;
     }
     let Some(direction) = pointer.and_then(|point| resize_direction(ctx.viewport_rect(), point))
@@ -322,6 +365,84 @@ mod tests {
             let output = frame(&ctx, 4, pointer(point, false), maximized, false, render);
             assert_eq!(commands(&output), [expected]);
         }
+    }
+
+    #[test]
+    fn caption_buttons_take_clicks_up_to_the_window_edges() {
+        // Placed as in the toolbar: inset from the window's top-right corner.
+        let render = |ui: &mut egui::Ui| {
+            let rect = Rect::from_min_size(
+                egui::pos2(640.0 - 6.0 - CONTROLS_WIDTH, 6.0),
+                egui::vec2(CONTROLS_WIDTH, CONTROL_HEIGHT),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                controls(ui, Language::English);
+            });
+            resize(ui.ctx());
+        };
+        let click = |maximized: bool, point: egui::Pos2| {
+            let ctx = Context::default();
+            frame(&ctx, 1, Vec::new(), maximized, false, render);
+            frame(&ctx, 2, Vec::new(), maximized, false, render);
+            let mut sent = commands(&frame(
+                &ctx,
+                3,
+                pointer(point, true),
+                maximized,
+                false,
+                render,
+            ));
+            sent.extend(commands(&frame(
+                &ctx,
+                4,
+                pointer(point, false),
+                maximized,
+                false,
+                render,
+            )));
+            sent
+        };
+        use egui::{ResizeDirection, ViewportCommand};
+        // Maximized: nothing resizes, so the very corner closes the window
+        // and the very top edge reaches every button.
+        assert_eq!(
+            click(true, egui::pos2(639.5, 0.5)),
+            [ViewportCommand::Close]
+        );
+        assert_eq!(
+            click(true, egui::pos2(639.5, 25.0)),
+            [ViewportCommand::Close]
+        );
+        assert_eq!(
+            click(true, egui::pos2(640.0 - 6.0 - BUTTON_WIDTH * 1.5, 0.5)),
+            [ViewportCommand::Maximized(false)]
+        );
+        assert_eq!(
+            click(true, egui::pos2(640.0 - 6.0 - BUTTON_WIDTH * 2.5, 0.5)),
+            [ViewportCommand::Minimized(true)]
+        );
+        // A resizable window keeps its thin edges and corner for resizing,
+        // and the buttons take everything up to them.
+        assert_eq!(
+            click(false, egui::pos2(630.0, 4.0)),
+            [ViewportCommand::Close]
+        );
+        assert_eq!(
+            click(false, egui::pos2(636.0, 25.0)),
+            [ViewportCommand::Close]
+        );
+        assert_eq!(
+            click(false, egui::pos2(639.0, 1.0)),
+            [ViewportCommand::BeginResize(ResizeDirection::NorthEast)]
+        );
+        assert_eq!(
+            click(false, egui::pos2(639.0, 25.0)),
+            [ViewportCommand::BeginResize(ResizeDirection::East)]
+        );
+        assert_eq!(
+            click(false, egui::pos2(600.0, 1.0)),
+            [ViewportCommand::BeginResize(ResizeDirection::North)]
+        );
     }
 
     #[test]
