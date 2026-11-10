@@ -686,16 +686,19 @@ fn lines(
                             ui.ctx().request_repaint();
                         }
                     } else if scale > 1.001 {
-                        // Grown from its left edge, centred on its row.
-                        let grown = ui.painter().layout(
-                            data.lines[index].text.clone(),
-                            FontId::proportional(size * scale),
-                            color,
-                            (width - 8.0).max(1.0),
-                        );
-                        let lift = (grown.size().y - row.galley.size().y) * 0.5;
-                        ui.painter()
-                            .galley(line.min + egui::vec2(4.0, 2.0 - lift), grown, color);
+                        // The laid-out line is scaled as a shape, from its
+                        // left edge and middle: laying it out again at each
+                        // size would move its glyphs and could rewrap it.
+                        let origin = line.min + egui::vec2(4.0, 2.0);
+                        let anchor = origin + egui::vec2(0.0, row.galley.size().y * 0.5);
+                        let mut shape =
+                            egui::epaint::TextShape::new(origin, row.galley.clone(), color)
+                                .with_override_text_color(color);
+                        shape.transform(egui::emath::TSTransform::new(
+                            anchor.to_vec2() * (1.0 - scale),
+                            scale,
+                        ));
+                        ui.painter().add(shape);
                     } else {
                         ui.painter().galley_with_override_text_color(
                             line.min + egui::vec2(4.0, 2.0),
@@ -844,8 +847,33 @@ mod tests {
             output
         };
         let mut output = frame(&mut state, 1.0);
+        // While it grows, the line stays put on the left and keeps its
+        // wrapping; only its size changes, a little more each frame.
+        let mut sizes = Vec::new();
         for tick in 1..10 {
-            output = frame(&mut state, 1.0 + f64::from(tick) * 0.05);
+            output = frame(&mut state, 1.0 + f64::from(tick) * 0.03);
+            if let Some((_, rect, ..)) = texts(&output)
+                .into_iter()
+                .find(|(text, ..)| text == "Synthetic lyric line 3")
+            {
+                sizes.push(rect);
+            }
+        }
+        let lefts: Vec<_> = sizes.iter().map(|rect| rect.left()).collect();
+        assert!(
+            lefts
+                .windows(2)
+                .all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+            "{lefts:?}"
+        );
+        assert!(
+            sizes
+                .windows(2)
+                .all(|pair| pair[1].height() >= pair[0].height() - 0.01),
+            "{sizes:?}"
+        );
+        for _ in 0..10 {
+            output = frame(&mut state, 3.0);
         }
         let shown = texts(&output);
         let find = |line: &str| {
@@ -855,15 +883,12 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| panic!("missing {line}"))
         };
-        let (_, current_rect, current_color, current_size) = find("Synthetic lyric line 3");
-        let (_, other_rect, other_color, other_size) = find("Synthetic lyric line 5");
+        let (_, current_rect, current_color, _) = find("Synthetic lyric line 3");
+        let (_, other_rect, other_color, _) = find("Synthetic lyric line 5");
         assert_eq!(current_color, theme::ACCENT);
         assert_ne!(other_color, theme::ACCENT);
-        assert!(
-            (current_size / other_size - ACTIVE_SCALE).abs() < 0.01,
-            "{current_size} {other_size}"
-        );
-        assert!(current_rect.height() > other_rect.height());
+        let grown = current_rect.width() / other_rect.width();
+        assert!((grown - ACTIVE_SCALE).abs() < 0.01, "{grown}");
         assert!(
             (current_rect.left() - other_rect.left()).abs() < 1.0,
             "grows from the left"

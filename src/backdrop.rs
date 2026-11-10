@@ -16,6 +16,8 @@ use eframe::egui::{self, Color32, ColorImage, Rect, TextureHandle, TextureOption
 const SIDE: u32 = 32;
 /// How long a new cover takes to show through the previous one.
 const FADE_SECONDS: f64 = 1.2;
+/// How much the backdrop is darkened under the lyrics, out of 255.
+const DIMMING: u8 = 150;
 /// The animation's frame pace.
 const FRAME: Duration = Duration::from_millis(33);
 
@@ -101,7 +103,7 @@ impl Backdrop {
             draw(&painter, rect, layer, self.clock as f32, fade);
         }
         // Darkened so the lines stay easy to read on any cover.
-        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(95));
+        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(DIMMING));
         if self
             .current
             .as_ref()
