@@ -103,6 +103,9 @@ impl GapClock {
     }
 }
 
+/// How much the current lyric line grows.
+const ACTIVE_SCALE: f32 = 1.06;
+
 fn gap_marker(text: &str) -> bool {
     matches!(text.trim(), "" | "..." | "…" | "•••")
 }
@@ -213,6 +216,14 @@ pub fn show(
         }
     }
     let mut content = Rect::from_min_max(egui::pos2(rect.left(), header.bottom() + 12.0), rect.max);
+    // With no lines to show, the fullscreen cover moves to the middle and
+    // says why below the artists.
+    let missing = view.fullscreen
+        && view.track.is_some()
+        && match view.lyrics {
+            Some(lyrics) => lyrics.instrumental && lyrics.lines.is_empty(),
+            None => !view.loading && view.error == Some(Error::NotFound),
+        };
     if view.fullscreen {
         content = content.shrink2(egui::vec2(32.0, 12.0));
         let width = content.width().min(1280.0);
@@ -222,7 +233,14 @@ pub fn show(
             .min(512.0)
             .min((content.height() - 80.0).max(64.0));
         let artwork = Rect::from_min_size(
-            egui::pos2(content.left(), content.center().y - (art_size + 64.0) * 0.5),
+            egui::pos2(
+                if missing {
+                    content.center().x - art_size * 0.5
+                } else {
+                    content.left()
+                },
+                content.center().y - (art_size + 64.0) * 0.5,
+            ),
             egui::vec2(art_size, art_size),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(artwork), |ui| {
@@ -255,6 +273,23 @@ pub fn show(
             if let Some(artist) = artist_links(ui, artist_rect, track, FontId::proportional(14.0)) {
                 action = Some(Action::Artist(artist));
             }
+        }
+        if missing {
+            let reason = if view.lyrics.is_some() {
+                t("Инструментальный трек", "Instrumental track")
+            } else {
+                Error::NotFound.message(view.language)
+            };
+            caption(
+                ui,
+                Rect::from_min_size(
+                    artwork.left_bottom() + egui::vec2(0.0, 78.0),
+                    egui::vec2(art_size, 22.0),
+                ),
+                reason,
+                FontId::proportional(14.0),
+                theme::MUTED,
+            );
         }
         content.min.x = artwork.right() + gap;
     } else if let Some(track) = view.track.filter(|_| view.show_track) {
@@ -303,7 +338,9 @@ pub fn show(
         }
         content.min.y += 62.0;
     }
-    if let Some(lyrics) = view.lyrics {
+    if missing {
+        // Said under the centred cover.
+    } else if let Some(lyrics) = view.lyrics {
         if lyrics.instrumental && lyrics.lines.is_empty() {
             centered(
                 ui,
@@ -520,6 +557,25 @@ fn lines(
     let should_follow = state.follow && active != state.last_active;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(rect));
+        if fullscreen {
+            // Over the backdrop the bar's track shows only while the pointer
+            // is on the bar; its handle and the room it takes stay the same.
+            let solid = ui.spacing().scroll;
+            ui.spacing_mut().scroll = egui::style::ScrollStyle {
+                floating: true,
+                floating_width: solid.bar_width,
+                floating_allocated_width: solid.bar_width
+                    + solid.bar_inner_margin
+                    + solid.bar_outer_margin,
+                dormant_background_opacity: 0.0,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 1.0,
+                dormant_handle_opacity: 1.0,
+                active_handle_opacity: 1.0,
+                interact_handle_opacity: 1.0,
+                ..solid
+            };
+        }
         // A fresh identity also discards the previous track's animated target
         // and kinetic scrolling, which setting only the offset would retain.
         let shown = theme::scroll_viewport(
@@ -542,11 +598,13 @@ fn lines(
                     for line in &data.lines {
                         let gap = gap_marker(&line.text);
                         let text = if gap { "•••" } else { line.text.as_str() };
+                        // Narrower by the active line's growth, so it keeps
+                        // the same line breaks when it grows.
                         let galley = ui.painter().layout(
                             text.into(),
                             font.clone(),
                             Color32::WHITE,
-                            (width - 8.0).max(1.0),
+                            ((width - 8.0) / ACTIVE_SCALE).max(1.0),
                         );
                         let height = galley.size().y + if fullscreen { 24.0 } else { 16.0 };
                         state.rows.push(Row {
@@ -596,25 +654,48 @@ fn lines(
                             Sense::hover()
                         },
                     );
-                    let color = if !data.synced || active == Some(index) || response.hovered() {
+                    // The current line grows a little and turns accent blue,
+                    // easing in and out.
+                    let current = ui.ctx().animate_bool_with_time(
+                        ui.id().with(("lyric-active", stamp.0, index)),
+                        data.synced && active == Some(index),
+                        0.25,
+                    );
+                    let resting = if !data.synced || response.hovered() {
                         Color32::from_rgb(238, 241, 247)
                     } else {
                         Color32::from_gray(124)
                     };
+                    let color = resting.lerp_to_gamma(theme::ACCENT, current);
+                    let scale = 1.0 + (ACTIVE_SCALE - 1.0) * current;
                     if row.gap {
                         let animated = data.synced && active == Some(index);
                         let center = line.min
-                            + egui::vec2(4.0 + size * 0.18, row.galley.size().y * 0.5 + 2.0);
+                            + egui::vec2(
+                                4.0 + size * scale * 0.18,
+                                row.galley.size().y * 0.5 + 2.0,
+                            );
                         for dot in 0..3 {
                             ui.painter().circle_filled(
-                                center + egui::vec2(dot as f32 * size * 0.6, 0.0),
-                                dot_radius(size, dot, animated.then_some(phase)),
+                                center + egui::vec2(dot as f32 * size * scale * 0.6, 0.0),
+                                dot_radius(size * scale, dot, animated.then_some(phase)),
                                 color,
                             );
                         }
                         if animated && playing {
                             ui.ctx().request_repaint();
                         }
+                    } else if scale > 1.001 {
+                        // Grown from its left edge, centred on its row.
+                        let grown = ui.painter().layout(
+                            data.lines[index].text.clone(),
+                            FontId::proportional(size * scale),
+                            color,
+                            (width - 8.0).max(1.0),
+                        );
+                        let lift = (grown.size().y - row.galley.size().y) * 0.5;
+                        ui.painter()
+                            .galley(line.min + egui::vec2(4.0, 2.0 - lift), grown, color);
                     } else {
                         ui.painter().galley_with_override_text_color(
                             line.min + egui::vec2(4.0, 2.0),
@@ -702,6 +783,248 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    fn texts(output: &egui::FullOutput) -> Vec<(String, Rect, Color32, f32)> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<(String, Rect, Color32, f32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let section = text.galley.job.sections.first();
+                    found.push((
+                        text.galley.text().to_owned(),
+                        text.visual_bounding_rect(),
+                        text.override_text_color
+                            .or_else(|| section.map(|s| s.format.color))
+                            .unwrap_or(text.fallback_color),
+                        section.map_or(0.0, |s| s.format.font_id.size),
+                    ));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        output
+            .shapes
+            .iter()
+            .for_each(|shape| collect(&shape.shape, &mut found));
+        found
+    }
+
+    #[test]
+    fn the_current_line_grows_a_little_and_turns_accent_blue() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(12, true);
+        // Line 3 is current at 35 s; the change eases in over a quarter second.
+        let frame = |state: &mut State, time: f64| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 400.0),
+                    )),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    lines(
+                        ui,
+                        state,
+                        ui.available_rect_before_wrap(),
+                        &data,
+                        35.0,
+                        18.0,
+                        false,
+                        true,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let mut output = frame(&mut state, 1.0);
+        for tick in 1..10 {
+            output = frame(&mut state, 1.0 + f64::from(tick) * 0.05);
+        }
+        let shown = texts(&output);
+        let find = |line: &str| {
+            shown
+                .iter()
+                .find(|(text, ..)| text == line)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing {line}"))
+        };
+        let (_, current_rect, current_color, current_size) = find("Synthetic lyric line 3");
+        let (_, other_rect, other_color, other_size) = find("Synthetic lyric line 5");
+        assert_eq!(current_color, theme::ACCENT);
+        assert_ne!(other_color, theme::ACCENT);
+        assert!(
+            (current_size / other_size - ACTIVE_SCALE).abs() < 0.01,
+            "{current_size} {other_size}"
+        );
+        assert!(current_rect.height() > other_rect.height());
+        assert!(
+            (current_rect.left() - other_rect.left()).abs() < 1.0,
+            "grows from the left"
+        );
+    }
+
+    #[test]
+    fn fullscreen_scrollbar_track_shows_only_under_the_pointer() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(80, true);
+        let size = egui::vec2(600.0, 400.0);
+        let frame = |state: &mut State, time: f64, pointer: Option<egui::Pos2>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(time),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    lines(ui, state, ui.max_rect(), &data, 35.0, 18.0, true, false);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        // Visible fills along the bar's column, as tall boxes.
+        let bars = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.rect.left() > size.x - 20.0
+                            && rect.fill.a() > 0
+                            && rect.rect.height() > 20.0 =>
+                    {
+                        Some((rect.rect, rect.fill))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut idle = egui::FullOutput::default();
+        for tick in 0..20 {
+            idle = frame(
+                &mut state,
+                f64::from(tick) * 0.1,
+                Some(egui::pos2(200.0, 200.0)),
+            );
+        }
+        let mut hovered = egui::FullOutput::default();
+        for tick in 20..40 {
+            hovered = frame(
+                &mut state,
+                f64::from(tick) * 0.1,
+                Some(egui::pos2(size.x - 7.0, 200.0)),
+            );
+        }
+        let (idle, hovered) = (bars(&idle), bars(&hovered));
+        // The handle shows either way; the full-height track only on hover.
+        let track =
+            |found: &[(Rect, Color32)]| found.iter().any(|(rect, _)| rect.height() > size.y * 0.9);
+        assert!(!idle.is_empty(), "the handle stays visible");
+        assert!(!track(&idle), "no track away from the bar: {idle:?}");
+        assert!(track(&hovered), "the track shows on the bar: {hovered:?}");
+    }
+
+    #[test]
+    fn fullscreen_cover_moves_to_the_middle_when_there_are_no_lines() {
+        let track = Track {
+            id: 7,
+            owner_id: 1,
+            artist: "Synthetic artist".into(),
+            title: "Centred song".into(),
+            subtitle: None,
+            duration: 180,
+            url: None,
+            cover_url: None,
+            artists: Vec::new(),
+            album: None,
+            library_liked: None,
+            release_key: None,
+            library_source_key: None,
+            unavailable: None,
+            added: None,
+            explicit: false,
+        };
+        let lines = crate::lyrics::test_data(12, true);
+        let mut instrumental = crate::lyrics::test_data(0, false);
+        instrumental.instrumental = true;
+        let width = 1000.0;
+        let draw = |lyrics: Option<&Lyrics>, error: Option<Error>| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut covers = CoverCache::new();
+            let mut state = State::default();
+            let mut output = egui::FullOutput::default();
+            for tick in 0..3 {
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 600.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        show(
+                            ui,
+                            &mut state,
+                            &mut covers,
+                            None,
+                            View {
+                                language: Language::English,
+                                track: Some(&track),
+                                lyrics,
+                                error,
+                                loading: false,
+                                position: 0.0,
+                                playing: false,
+                                fullscreen: true,
+                                retry_allowed: true,
+                                show_track: true,
+                            },
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            texts(&output)
+        };
+        let title_left = |shown: &[(String, Rect, Color32, f32)]| {
+            shown
+                .iter()
+                .find(|(text, ..)| text == "Centred song")
+                .map(|(_, rect, ..)| rect.left())
+                .expect("the title")
+        };
+        let with_lines = draw(Some(&lines), None);
+        let beside = title_left(&with_lines);
+        assert!(beside < width * 0.25, "beside the lines: {beside}");
+        for (shown, reason) in [
+            (
+                draw(None, Some(Error::NotFound)),
+                Error::NotFound.message(Language::English),
+            ),
+            (draw(Some(&instrumental), None), "Instrumental track"),
+        ] {
+            let left = title_left(&shown);
+            assert!(left > width * 0.3, "the cover moves to the middle: {left}");
+            let (_, said, ..) = shown
+                .iter()
+                .find(|(text, ..)| text == reason)
+                .unwrap_or_else(|| panic!("missing {reason}"));
+            assert!((said.left() - left).abs() < 1.0, "said under the cover");
+            assert!(!shown.iter().any(|(text, ..)| text == "Retry"));
+        }
     }
 
     #[test]
@@ -936,27 +1259,28 @@ mod tests {
             let mut state = State::default();
             let data = crate::lyrics::test_data(3, synced);
             let output = draw(&ctx, &mut state, &data, 0.0, false);
-            let colors: Vec<_> = output
-                .shapes
-                .iter()
-                .filter_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text)
-                        if text.galley.text().starts_with("Synthetic lyric line") =>
-                    {
-                        Some(text.override_text_color)
-                    }
-                    _ => None,
-                })
+            let colors: Vec<_> = texts(&output)
+                .into_iter()
+                .filter(|(text, ..)| text.starts_with("Synthetic lyric line"))
+                .map(|(_, _, color, _)| color)
                 .collect();
             assert_eq!(colors.len(), 3);
-            assert_eq!(colors[0], Some(Color32::from_rgb(238, 241, 247)));
+            // The current synced line is accent blue; plain lyrics have none.
+            assert_eq!(
+                colors[0],
+                if synced {
+                    theme::ACCENT
+                } else {
+                    Color32::from_rgb(238, 241, 247)
+                }
+            );
             assert_eq!(
                 colors[1],
-                Some(if synced {
+                if synced {
                     Color32::from_gray(124)
                 } else {
                     Color32::from_rgb(238, 241, 247)
-                })
+                }
             );
         }
     }
