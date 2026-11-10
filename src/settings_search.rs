@@ -18,6 +18,7 @@ pub enum Setting {
     ExplicitBadge,
     AnimatedBackdrop,
     NormalizeVolume,
+    VolumeKeys,
     MixAfterQueue,
     Broadcast,
     Lyrics,
@@ -81,6 +82,9 @@ impl Query {
             }
             Setting::NormalizeVolume => {
                 "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"
+            }
+            Setting::VolumeKeys => {
+                "воспроизведение громкость клавиши кнопки мультимедийные ctrl контрол глобально горячие сочетание приложения playback volume keys media multimedia keyboard ctrl control global hotkey shortcut app"
             }
             Setting::MixAfterQueue => {
                 "воспроизведение микс конец очереди закончится продолжать продолжение автоматически по треку похожие playback mix end of queue continue autoplay similar track radio"

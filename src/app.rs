@@ -1321,6 +1321,10 @@ pub struct MusicApp {
     /// The fullscreen player's animated blurred backdrop.
     animated_backdrop: bool,
     animated_backdrop_save_failed: bool,
+    /// Ctrl + the keyboard's volume keys change VK Fast's own volume.
+    volume_keys_enabled: bool,
+    volume_keys_save_failed: bool,
+    volume_keys: crate::volume_keys::VolumeKeys,
     autoscroll: crate::autoscroll::Autoscroll,
     /// The page area of the last frame, where a middle click autoscrolls.
     page_rect: egui::Rect,
@@ -1692,6 +1696,9 @@ impl MusicApp {
             explicit_badge_save_failed: false,
             animated_backdrop: preferences::load_animated_backdrop(),
             animated_backdrop_save_failed: false,
+            volume_keys_enabled: preferences::load_volume_keys(),
+            volume_keys_save_failed: false,
+            volume_keys: crate::volume_keys::VolumeKeys::default(),
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
@@ -2540,14 +2547,7 @@ impl MusicApp {
         let commands = keybinds::read(ctx);
         for command in commands {
             match command {
-                keybinds::Command::Volume(delta) => {
-                    let previous = self.player.snapshot().volume;
-                    let value = (previous + delta).clamp(0.0, 1.0);
-                    if value != previous {
-                        self.player.set_volume(value);
-                        self.volume_save_at = Some(Instant::now() + Duration::from_millis(500));
-                    }
-                }
+                keybinds::Command::Volume(delta) => self.nudge_volume(delta),
                 keybinds::Command::Seek(seconds) => self.seek_by(seconds),
                 keybinds::Command::TogglePause if !self.demo && self.session.is_some() => {
                     self.toggle_playback(ctx)
@@ -3008,6 +3008,27 @@ impl MusicApp {
                 None => Ok(Reply::NoSavedSession),
             }
         });
+    }
+
+    /// Changes VK Fast's own volume by `delta` and saves it shortly after.
+    fn nudge_volume(&mut self, delta: f32) {
+        let previous = self.player.snapshot().volume;
+        let value = (previous + delta).clamp(0.0, 1.0);
+        if value != previous {
+            self.player.set_volume(value);
+            self.volume_save_at = Some(Instant::now() + Duration::from_millis(500));
+        }
+    }
+
+    /// Ctrl + volume keys, pressed anywhere: held only while enabled, and
+    /// applied without the window, like other media commands.
+    fn poll_volume_keys(&mut self) {
+        self.volume_keys
+            .sync(self.volume_keys_enabled, &self.repaint_target);
+        let change = self.volume_keys.take_change();
+        if change != 0.0 {
+            self.nudge_volume(change);
+        }
     }
 
     /// VK renews its website session cookies as the app talks to it; the
@@ -9813,6 +9834,7 @@ impl MusicApp {
             ],
             SettingsSection::Playback => &[
                 Setting::NormalizeVolume,
+                Setting::VolumeKeys,
                 Setting::MixAfterQueue,
                 Setting::Broadcast,
                 Setting::Lyrics,
@@ -10234,8 +10256,67 @@ impl MusicApp {
                         );
                     }
                 }
-                if query.matches(Setting::MixAfterQueue) {
+                if query.matches(Setting::VolumeKeys) {
                     if query.matches(Setting::NormalizeVolume) {
+                        ui.add_space(16.0);
+                    }
+                    let support = crate::volume_keys::support();
+                    let available = support == crate::volume_keys::Support::Available;
+                    let label = t(
+                        "Громкость VK Fast клавишами Ctrl + громкость",
+                        "VK Fast volume with Ctrl + volume keys",
+                    );
+                    let mut enabled = self.volume_keys_enabled && available;
+                    if ui
+                        .add_enabled_ui(available, |ui| theme::switch(ui, &mut enabled, label))
+                        .inner
+                        .changed()
+                    {
+                        self.volume_keys_enabled = enabled;
+                        self.volume_keys_save_failed =
+                            !cfg!(test) && preferences::save_volume_keys(enabled).is_err();
+                    }
+                    let hint = match support {
+                        crate::volume_keys::Support::Available => t(
+                            "Ctrl + клавиши громкости меняют громкость только VK Fast, а не системы, даже когда окно не в фокусе.",
+                            "Ctrl + the volume keys change only VK Fast's volume, not the system's, even when the window is in the background.",
+                        ),
+                        crate::volume_keys::Support::Wayland => t(
+                            "Недоступно в сеансе Wayland: он не позволяет приложениям перехватывать клавиши глобально.",
+                            "Unavailable in a Wayland session: it does not let applications take keys globally.",
+                        ),
+                        crate::volume_keys::Support::Unsupported => {
+                            t("Недоступно в этой системе.", "Unavailable on this system.")
+                        }
+                    };
+                    ui.label(RichText::new(hint).small().color(MUTED));
+                    if self.volume_keys_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    } else if let Some(error) = self.volume_keys.error().filter(|_| enabled) {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            match error {
+                                crate::volume_keys::Error::Taken => t(
+                                    "Эти сочетания уже заняты другой программой.",
+                                    "Another program already uses these combinations.",
+                                ),
+                                crate::volume_keys::Error::Failed => t(
+                                    "Не удалось занять клавиши громкости.",
+                                    "Could not take the volume keys.",
+                                ),
+                            },
+                        );
+                    }
+                }
+                if query.matches(Setting::MixAfterQueue) {
+                    if query.matches(Setting::NormalizeVolume) || query.matches(Setting::VolumeKeys)
+                    {
                         ui.add_space(16.0);
                     }
                     let label = t(
@@ -10266,6 +10347,7 @@ impl MusicApp {
                 }
                 if query.matches(Setting::Broadcast) {
                     if query.matches(Setting::NormalizeVolume)
+                        || query.matches(Setting::VolumeKeys)
                         || query.matches(Setting::MixAfterQueue)
                     {
                         ui.add_space(16.0);
@@ -10306,6 +10388,7 @@ impl MusicApp {
                 }
                 if query.matches(Setting::Lyrics) {
                     if query.matches(Setting::NormalizeVolume)
+                        || query.matches(Setting::VolumeKeys)
                         || query.matches(Setting::MixAfterQueue)
                         || query.matches(Setting::Broadcast)
                     {
@@ -10814,6 +10897,7 @@ impl MusicApp {
             }
         }
         self.save_session_cookies();
+        self.poll_volume_keys();
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
         self.poll_links(ctx);
@@ -11485,6 +11569,9 @@ mod tests {
             explicit_badge_save_failed: false,
             animated_backdrop: true,
             animated_backdrop_save_failed: false,
+            volume_keys_enabled: false,
+            volume_keys_save_failed: false,
+            volume_keys: crate::volume_keys::VolumeKeys::default(),
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,

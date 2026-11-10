@@ -66,6 +66,7 @@ mod track_menu;
 mod ui_fonts;
 #[cfg(any(windows, test))]
 mod updater;
+mod volume_keys;
 mod web_audio;
 mod web_session;
 mod window_focus;

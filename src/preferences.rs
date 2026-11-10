@@ -70,6 +70,9 @@ struct Preferences {
     explicit_badge: bool,
     #[serde(deserialize_with = "deserialize_animated_backdrop")]
     animated_backdrop: bool,
+    /// Off unless turned on: it takes Ctrl + volume keys from the system.
+    #[serde(deserialize_with = "deserialize_volume_keys")]
+    volume_keys: bool,
     /// Off unless the user turns it on: it changes the account's page.
     #[serde(deserialize_with = "deserialize_broadcast")]
     broadcast: bool,
@@ -105,6 +108,7 @@ impl Default for Preferences {
             mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
+            volume_keys: false,
             broadcast: false,
             link_browser: String::new(),
             extra: serde_json::Map::new(),
@@ -259,6 +263,14 @@ fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_EXPLICIT_BADGE))
+}
+
+fn deserialize_volume_keys<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
 }
 
 fn deserialize_animated_backdrop<'de, D: serde::Deserializer<'de>>(
@@ -790,6 +802,20 @@ pub fn save_explicit_badge(enabled: bool) -> io::Result<()> {
     })
 }
 
+/// Ctrl + the volume keys change VK Fast's volume; off by default.
+pub fn load_volume_keys() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.volume_keys)
+}
+
+pub fn save_volume_keys(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.volume_keys = enabled
+    })
+}
+
 /// The animated blurred backdrop of the fullscreen player; on by default.
 pub fn load_animated_backdrop() -> bool {
     preferences_path()
@@ -936,6 +962,21 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn volume_keys_default_off_and_turning_them_on_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [r#"{}"#, r#"{"volume_keys":"invalid"}"#] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(!preferences.volume_keys);
+        }
+        update_at(&path, |preferences| preferences.volume_keys = true).unwrap();
+        save_at(&path, 0.375).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(restored.volume_keys);
+        assert_eq!(restored.volume, 0.375);
     }
 
     #[test]

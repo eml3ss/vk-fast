@@ -645,3 +645,73 @@ fn track_titles_and_artists_are_centred_on_the_cover() {
     let bottom = cover.bottom() - artist.bottom();
     assert!((top - bottom).abs() <= 1.0, "top {top}, bottom {bottom}");
 }
+
+#[test]
+fn ctrl_volume_keys_switch_changes_app_volume_and_stays_grey_on_wayland() {
+    use crate::volume_keys::{Support, TEST_SUPPORT, press_for_test};
+    let size = egui::vec2(1120.0, 850.0);
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Playback;
+    app.settings_query = "volume keys".into();
+    let mut tick = 0;
+    let label = "VK Fast volume with Ctrl + volume keys";
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(!app.volume_keys_enabled, "off by default");
+    account_ui_click(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        content_text(&output, label).center(),
+    );
+    assert!(app.volume_keys_enabled && !app.volume_keys_save_failed);
+
+    app.player.set_volume(0.5);
+    app.poll_volume_keys();
+    press_for_test(2);
+    app.poll_volume_keys();
+    assert!((app.player.snapshot().volume - 0.6).abs() < 1e-4);
+    assert!(
+        app.volume_save_at.take().is_some(),
+        "saved like other volume changes"
+    );
+
+    // Turned off, the combinations are released and presses change nothing.
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    account_ui_click(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        content_text(&output, label).center(),
+    );
+    assert!(!app.volume_keys_enabled);
+    app.poll_volume_keys();
+    press_for_test(3);
+    app.poll_volume_keys();
+    assert!((app.player.snapshot().volume - 0.6).abs() < 1e-4);
+
+    // A Wayland session greys the switch out and says why.
+    TEST_SUPPORT.with(|support| support.set(Support::Wayland));
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    account_ui_click(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        content_text(&output, label).center(),
+    );
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(!app.volume_keys_enabled, "cannot be turned on");
+    assert!(
+        content_text(
+            &output,
+            "Unavailable in a Wayland session: it does not let applications take keys globally."
+        )
+        .is_positive()
+    );
+    TEST_SUPPORT.with(|support| support.set(Support::Available));
+    app.volume_save_at.take();
+}
