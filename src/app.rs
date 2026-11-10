@@ -8661,6 +8661,7 @@ impl MusicApp {
             egui::pos2(metadata_right.max(side_row.left()), side_row.bottom()),
         );
         let mut menu_areas = Vec::with_capacity(2);
+        let mut artwork_rect = None;
         let metadata_response = ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt("player-metadata")
@@ -8670,6 +8671,7 @@ impl MusicApp {
                 ui.set_clip_rect(ui.clip_rect().intersect(metadata));
                 let artwork = self.covers.show(ui, cover_url.as_deref(), artwork_size);
                 if let Some(album) = &album {
+                    artwork_rect = Some(artwork.rect);
                     let response = ui
                         .interact(artwork.rect, ui.id().with("player-album"), Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -9125,6 +9127,21 @@ impl MusicApp {
                 .small()
                 .color(MUTED),
             );
+        }
+        // In the player only the cover, the title and the artists are links
+        // with a hand; buttons and sliders keep the arrow. Menus opened over
+        // the bar are another layer and keep their own cursor.
+        let bar = egui::Rect::from_min_max(egui::pos2(body.left(), panel_top), body.max);
+        if let Some(pointer) = ctx.pointer_hover_pos()
+            && bar.contains(pointer)
+            && ctx.layer_id_at(pointer) == Some(ui.layer_id())
+            && !menu_areas
+                .iter()
+                .chain(artwork_rect.iter())
+                .any(|area| area.contains(pointer))
+            && ctx.output(|output| output.cursor_icon) == egui::CursorIcon::PointingHand
+        {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
         }
     }
 

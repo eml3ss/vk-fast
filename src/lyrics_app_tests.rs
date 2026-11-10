@@ -289,3 +289,51 @@ fn fullscreen_draws_the_blurred_cover_backdrop_unless_settings_turn_it_off() {
         );
     }
 }
+
+#[test]
+fn player_bar_shows_a_hand_only_on_its_cover_title_and_artists() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx, Language::English);
+    let size = egui::vec2(1200.0, 760.0);
+    let mut frame = 0;
+    let hover = |app: &mut MusicApp, frame: &mut u32, point: egui::Pos2| {
+        account_ui_frame(
+            &ctx,
+            app,
+            size,
+            frame,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        account_ui_frame(
+            &ctx,
+            app,
+            size,
+            frame,
+            vec![egui::Event::PointerMoved(point)],
+        )
+        .platform_output
+        .cursor_icon
+    };
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..3 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    // The same title also shows in the track list: the player's is lowest.
+    let title = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == "LYRICS_TRACK" => {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.center().y.total_cmp(&b.center().y))
+        .expect("the player's title");
+    assert_eq!(
+        hover(&mut app, &mut frame, title.center()),
+        egui::CursorIcon::PointingHand
+    );
+    // The play button sits in the middle of the bar, level with the title.
+    let play = egui::pos2(size.x * 0.5, title.center().y);
+    assert_eq!(hover(&mut app, &mut frame, play), egui::CursorIcon::Default);
+}
