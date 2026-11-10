@@ -12,8 +12,8 @@ use std::{
 
 use eframe::egui::{self, Color32, ColorImage, Rect, TextureHandle, TextureOptions};
 
-/// The blurred image's side: tiny, as only its colours remain.
-const SIDE: u32 = 48;
+/// The blurred image's side: tiny, as only patches of its colours remain.
+const SIDE: u32 = 32;
 /// How long a new cover takes to show through the previous one.
 const FADE_SECONDS: f64 = 1.2;
 /// The animation's frame pace.
@@ -23,10 +23,10 @@ const FRAME: Duration = Duration::from_millis(33);
 /// circles from the middle, the circling and turning speeds (radians a
 /// second), the starting angle, and its opacity.
 const LAYERS: [(f32, f32, f32, f32, f32, f32); 4] = [
-    (1.45, 0.00, 0.000, 0.035, 0.0, 1.0),
-    (1.25, 0.22, 0.050, -0.060, 1.7, 0.8),
-    (1.05, 0.28, -0.042, 0.080, 3.9, 0.7),
-    (0.90, 0.30, 0.031, -0.105, 5.3, 0.6),
+    (1.45, 0.00, 0.00, 0.11, 0.0, 1.0),
+    (1.00, 0.30, 0.16, -0.19, 1.7, 0.85),
+    (0.85, 0.36, -0.13, 0.24, 3.9, 0.8),
+    (0.70, 0.40, 0.10, -0.30, 5.3, 0.75),
 ];
 
 /// Two blurred copies of a cover: opaque for the bottom layer, whose edges
@@ -160,7 +160,9 @@ fn blurred(cover: &ColorImage) -> Option<Blurred> {
         .collect();
     let source = image::RgbaImage::from_raw(width as u32, height as u32, rgba)?;
     let small = image::imageops::resize(&source, SIDE, SIDE, image::imageops::FilterType::Triangle);
-    let soft = image::imageops::blur(&small, 3.5);
+    // Light enough that each layer keeps distinct patches of colour: those
+    // are what show the layers drifting and turning.
+    let soft = image::imageops::blur(&small, 1.6);
     let pixels = soft
         .pixels()
         .map(|pixel| {
@@ -272,6 +274,16 @@ mod tests {
         let half = rect.size().length() * scale * 0.5;
         // Its inscribed circle, around the unmoving centre, holds the screen.
         assert!(half >= rect.size().length() * 0.5);
+        // Motion is visible within seconds: every layer turns at least a
+        // fifth of a radian in 3 s, and the drifting ones move their centre
+        // by over 4% of the screen's diagonal.
+        for (scale, orbit, circling, turning, ..) in LAYERS {
+            assert!(turning.abs() * 3.0 >= 0.3, "{scale}");
+            if orbit > 0.0 {
+                let travel = orbit * 0.5 * 2.0 * (circling.abs() * 3.0 * 0.5).sin();
+                assert!(travel >= 0.04, "{scale}: {travel}");
+            }
+        }
     }
 
     #[test]
