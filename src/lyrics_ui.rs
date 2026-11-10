@@ -554,6 +554,20 @@ fn lines(
         playing,
         ui.input(|input| input.time),
     );
+    // Wake exactly when the next line starts, instead of polling for it.
+    if playing && data.synced {
+        let next = data
+            .lines
+            .iter()
+            .filter_map(|line| line.at)
+            .find(|at| *at > position);
+        if let Some(next) = next {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(
+                    (next - position).max(0.01),
+                ));
+        }
+    }
     let should_follow = state.follow && active != state.last_active;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(rect));
@@ -1050,6 +1064,42 @@ mod tests {
             assert!((said.left() - left).abs() < 1.0, "said under the cover");
             assert!(!shown.iter().any(|(text, ..)| text == "Retry"));
         }
+    }
+
+    #[test]
+    fn playing_synced_lyrics_wake_when_the_next_line_starts() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        // Lines start every 10 s; at 33 s the next one is 7 s away.
+        let data = crate::lyrics::test_data(12, true);
+        let mut output = egui::FullOutput::default();
+        for tick in 0..30 {
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 400.0),
+                    )),
+                    time: Some(f64::from(tick)),
+                    ..Default::default()
+                },
+                |ui| {
+                    lines(
+                        ui,
+                        &mut state,
+                        ui.max_rect(),
+                        &data,
+                        33.0,
+                        18.0,
+                        false,
+                        true,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!((delay.as_secs_f64() - 7.0).abs() < 0.05, "{delay:?}");
     }
 
     #[test]

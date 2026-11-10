@@ -1,12 +1,15 @@
-//! Load script fallbacks once before the GUI starts, then share them across windows.
-use eframe::egui::{FontData, FontDefinitions};
+//! Find script fallbacks once, off the UI thread, then share them across
+//! windows. Font files are mapped, not read: only the glyphs drawn are ever
+//! paged in, and the pages are shared with other programs using the fonts.
+use eframe::egui::{self, FontData, FontDefinitions};
 use skrifa::MetadataProvider;
 use std::{
     collections::HashSet,
     fs::File,
     io::Read,
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
+    thread::JoinHandle,
 };
 
 const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
@@ -49,19 +52,71 @@ struct Fallback {
     data: Arc<FontData>,
 }
 static FALLBACKS: OnceLock<Vec<Fallback>> = OnceLock::new();
+static LOADER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+/// The window to repaint once the fallbacks are ready.
+static WAKE: Mutex<Option<egui::Context>> = Mutex::new(None);
+/// Set on a context whose fonts include the fallbacks.
+const COMPLETE: &str = "vk-fast-script-fallbacks";
 
+/// Starts finding the fallbacks; the window does not wait for them.
 pub fn preload() {
-    FALLBACKS.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("vk-fonts".into())
-            .spawn(|| {
-                let samples = SCRIPTS.iter().flat_map(|(_, text)| text.chars()).collect();
-                load_candidates(candidates(), samples)
-            })
-            .ok()
-            .and_then(|worker| worker.join().ok())
-            .unwrap_or_default()
-    });
+    let Ok(mut loader) = LOADER.lock() else {
+        return;
+    };
+    if loader.is_some() || FALLBACKS.get().is_some() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("vk-fonts".into())
+        .spawn(|| {
+            let samples = SCRIPTS.iter().flat_map(|(_, text)| text.chars()).collect();
+            let _ = FALLBACKS.set(load_candidates(candidates(), samples));
+            if let Ok(wake) = WAKE.lock()
+                && let Some(ctx) = wake.as_ref()
+            {
+                ctx.request_repaint();
+            }
+        });
+    match spawned {
+        Ok(worker) => *loader = Some(worker),
+        Err(_) => {
+            let _ = FALLBACKS.set(Vec::new());
+        }
+    }
+}
+
+/// Waits for the fallbacks, for checks that need them at once.
+pub fn wait() {
+    preload();
+    let worker = LOADER.lock().ok().and_then(|mut loader| loader.take());
+    if let Some(worker) = worker {
+        let _ = worker.join();
+    }
+}
+
+/// Marks whether `ctx` got the fallbacks with its fonts.
+pub fn mark(ctx: &egui::Context) {
+    let complete = FALLBACKS.get().is_some();
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(COMPLETE), complete));
+}
+
+/// Called every tick: installs the fallbacks once they are ready on a window
+/// that started without them. Only an atomic check until then.
+pub fn refresh(ctx: &egui::Context) {
+    let complete = ctx.data(|data| data.get_temp::<bool>(egui::Id::new(COMPLETE)));
+    if complete != Some(false) {
+        return;
+    }
+    if FALLBACKS.get().is_none() {
+        if let Ok(mut wake) = WAKE.lock() {
+            *wake = Some(ctx.clone());
+        }
+        return;
+    }
+    if let Ok(mut wake) = WAKE.lock() {
+        *wake = None;
+    }
+    crate::theme::install_fonts(ctx);
 }
 
 /// This path only clones cached Arcs: no file or process access during UI frames.
@@ -107,13 +162,10 @@ fn load_candidates(candidates: Vec<Candidate>, mut missing: HashSet<char>) -> Ve
         if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_FONT_BYTES {
             continue;
         }
-        let mut bytes = Vec::new();
-        if file
-            .take(MAX_FONT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.len() as u64 > MAX_FONT_BYTES
-        {
+        let Ok(bytes) = eframe::MappedFile::map(&file) else {
+            continue;
+        };
+        if bytes.len() as u64 > MAX_FONT_BYTES {
             continue;
         }
         read += bytes.len();
@@ -141,7 +193,7 @@ fn load_candidates(candidates: Vec<Candidate>, mut missing: HashSet<char>) -> Ve
             missing.remove(&ch);
         }
         total += bytes.len();
-        let mut data = FontData::from_owned(bytes);
+        let mut data = FontData::from_static(bytes.leak());
         data.index = index;
         fonts.push(Fallback {
             name: format!("VK Fast script fallback {}", fonts.len()),
@@ -306,7 +358,7 @@ fn candidates() -> Vec<Candidate> {
 /// Read-only headless check; neither a music session nor the lyrics service is started.
 pub fn diagnostic() {
     use eframe::egui::{self, FontFamily, FontId};
-    preload();
+    wait();
     println!(
         "Script fallback fonts loaded: {}",
         FALLBACKS.get().map_or(0, Vec::len)

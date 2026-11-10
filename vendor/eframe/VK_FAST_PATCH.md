@@ -25,6 +25,12 @@ Changes:
   the existing DWM cloak. Both immediate WGL and deferred creation use this
   order; a different monitor scale does not multiply the stored desktop origin.
 
+- A safe `MappedFile` maps a file read-only (memmap2, already in the
+  dependency tree). VK Fast maps its script fallback fonts instead of reading
+  them into private memory: a CJK collection is about 19 MB, of which only the
+  glyphs drawn are ever touched. The usual font-file assumption applies: the
+  file is not truncated in place while mapped.
+
 - A safe Windows `windows_small_icon_size()` wrapper reads `SM_CXSMICON`,
   so the application builds its tray image at the notification area's exact
   size instead of letting the shell rescale a larger one.

@@ -57,7 +57,9 @@ struct Reply {
 
 enum State {
     Pending,
-    Ready(TextureHandle, Option<Color32>, Arc<ColorImage>),
+    /// The texture lives on the GPU; its pixels stay in memory only for the
+    /// one cover an effect reads (see `ready_image`).
+    Ready(TextureHandle, Option<Color32>, Option<Arc<ColorImage>>),
     Failed,
 }
 
@@ -76,6 +78,8 @@ pub struct CoverCache {
     pending: usize,
     clock: u64,
     repaint_target: RepaintTarget,
+    /// The one cover whose pixels are kept in memory for `ready_image`.
+    kept: Option<Key>,
 }
 
 impl CoverCache {
@@ -129,6 +133,7 @@ impl CoverCache {
             pending: 0,
             clock: 0,
             repaint_target: RepaintTarget::default(),
+            kept: None,
         }
     }
 
@@ -165,11 +170,11 @@ impl CoverCache {
                     self.evict_oldest(true, 0);
                 }
                 let image = Arc::new(image);
-                State::Ready(
-                    context.load_texture("vk-album-cover", image.clone(), TextureOptions::LINEAR),
-                    reply.color,
-                    image,
-                )
+                let texture =
+                    context.load_texture("vk-album-cover", image.clone(), TextureOptions::LINEAR);
+                // Uploaded: the pixels go unless an effect reads this cover.
+                let kept = (self.kept.as_ref() == Some(&reply.key)).then_some(image);
+                State::Ready(texture, reply.color, kept)
             } else {
                 State::Failed
             };
@@ -179,17 +184,20 @@ impl CoverCache {
         }
     }
 
-    /// Re-upload resident thumbnails after the previous native renderer has
-    /// retired. Pixels share the same bounded lifetime as their cached texture;
-    /// workers, disk entries and pending requests remain untouched.
+    /// After the previous native renderer has retired, re-upload the covers
+    /// whose pixels are kept; the others are dropped and load again from the
+    /// disk cache when next shown. Pending requests remain untouched.
     pub fn rebind_context(&mut self, context: &egui::Context) {
         self.repaint_target.set_context(context);
-        for entry in self.entries.values_mut() {
-            if let State::Ready(texture, _, image) = &mut entry.state {
+        self.entries.retain(|_, entry| match &mut entry.state {
+            State::Ready(texture, _, Some(image)) => {
                 *texture =
                     context.load_texture("vk-album-cover", image.clone(), TextureOptions::LINEAR);
+                true
             }
-        }
+            State::Ready(_, _, None) => false,
+            State::Pending | State::Failed => true,
+        });
         self.receive(context);
     }
 
@@ -447,11 +455,28 @@ impl CoverCache {
             url: url.to_owned(),
             edge: texture_edge(size),
         };
+        if self.kept.as_ref() != Some(&key) {
+            // Only one cover keeps its pixels: the previous one lets go.
+            if let Some(previous) = self.kept.replace(key.clone())
+                && let Some(entry) = self.entries.get_mut(&previous)
+                && let State::Ready(_, _, image) = &mut entry.state
+            {
+                *image = None;
+            }
+            // Already shown without its pixels: load it again to keep them.
+            if self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, State::Ready(_, _, None)))
+            {
+                self.entries.remove(&key);
+            }
+        }
         self.request(context, key.clone());
         let entry = self.entries.get_mut(&key)?;
         entry.touched = self.clock;
         match &entry.state {
-            State::Ready(_, _, image) => Some(image.clone()),
+            State::Ready(_, _, image) => image.clone(),
             _ => None,
         }
     }
@@ -474,7 +499,7 @@ impl CoverCache {
                 edge: texture_edge(size),
             },
             Entry {
-                state: State::Ready(texture, color, image),
+                state: State::Ready(texture, color, Some(image)),
                 touched: self.clock,
             },
         );
@@ -1010,7 +1035,7 @@ mod tests {
             edge: texture_edge(180.0),
         };
         let (old_id, pixels) = match &cache.entries[&resident].state {
-            State::Ready(texture, _, pixels) => (texture.id(), Arc::downgrade(pixels)),
+            State::Ready(texture, _, Some(pixels)) => (texture.id(), Arc::downgrade(pixels)),
             _ => unreachable!(),
         };
         // Mimic a reply completing while the old native renderer is retiring.
@@ -1039,7 +1064,8 @@ mod tests {
         late_job.request_repaint();
         assert_eq!(notifications.load(Ordering::Relaxed), 1);
         assert!(old_context.tex_manager().read().meta(old_id).is_none());
-        let State::Ready(texture, palette, rebound_pixels) = &cache.entries[&resident].state else {
+        let State::Ready(texture, palette, Some(rebound_pixels)) = &cache.entries[&resident].state
+        else {
             panic!("Resident cover disappeared")
         };
         assert_eq!(*palette, Some(color));
@@ -1051,7 +1077,11 @@ mod tests {
                 .meta(texture.id())
                 .is_some()
         );
-        assert!(matches!(cache.entries[&pending].state, State::Ready(..)));
+        // Arrived after the switch: uploaded, its pixels not kept.
+        assert!(matches!(
+            cache.entries[&pending].state,
+            State::Ready(_, _, None)
+        ));
         assert_eq!(cache.pending, 0);
         assert!(!cache.canceled.load(Ordering::Acquire));
         assert!(
@@ -1063,6 +1093,69 @@ mod tests {
         uploaded.clear();
         old_context.tex_manager().write().take_delta().clear();
         drop(cache);
+        new_context.tex_manager().write().take_delta().clear();
+    }
+
+    #[test]
+    fn only_the_cover_an_effect_reads_keeps_its_pixels_in_memory() {
+        let context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let (sender, replies) = mpsc::sync_channel(4);
+        cache.replies = replies;
+        let deliver = |cache: &mut CoverCache, url: &str, edge: u32| {
+            let key = Key {
+                url: url.into(),
+                edge,
+            };
+            cache.entries.insert(
+                key.clone(),
+                Entry {
+                    state: State::Pending,
+                    touched: 0,
+                },
+            );
+            cache.pending += 1;
+            sender
+                .send(Reply {
+                    key: key.clone(),
+                    image: Some(ColorImage::filled([8, 8], Color32::RED)),
+                    color: Some(Color32::RED),
+                })
+                .unwrap();
+            cache.receive(&context);
+            key
+        };
+        // A list cover is only a texture once uploaded.
+        let listed = deliver(&mut cache, "https://images.example.test/list.jpg", 96);
+        assert!(matches!(
+            cache.entries[&listed].state,
+            State::Ready(_, _, None)
+        ));
+
+        // The backdrop's cover keeps its pixels, and it alone.
+        let first = "https://images.example.test/first.jpg";
+        let edge = texture_edge(512.0);
+        assert!(cache.ready_image(&context, Some(first), 512.0).is_none());
+        cache.entries.remove(&Key {
+            url: first.into(),
+            edge,
+        });
+        cache.pending = 0;
+        let first_key = deliver(&mut cache, first, edge);
+        assert!(cache.ready_image(&context, Some(first), 512.0).is_some());
+        let second = "https://images.example.test/second.jpg";
+        let _ = cache.ready_image(&context, Some(second), 512.0);
+        assert!(
+            matches!(cache.entries[&first_key].state, State::Ready(_, _, None)),
+            "the previous cover lets its pixels go"
+        );
+
+        // A new window drops covers without pixels; they load again later.
+        let new_context = egui::Context::default();
+        cache.rebind_context(&new_context);
+        assert!(!cache.entries.contains_key(&listed));
+        assert!(!cache.entries.contains_key(&first_key));
+        context.tex_manager().write().take_delta().clear();
         new_context.tex_manager().write().take_delta().clear();
     }
 

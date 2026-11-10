@@ -405,6 +405,12 @@ pub fn scroll_viewport<R>(
 }
 
 pub fn install(ctx: &egui::Context) {
+    install_fonts(ctx);
+    install_style(ctx);
+}
+
+/// Inter, plus the script fallbacks once they are loaded.
+pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let fallback = fonts.families[&FontFamily::Proportional].clone();
     for (name, weight) in [("Inter", 400.0), ("Inter Semibold", 600.0)] {
@@ -422,6 +428,10 @@ pub fn install(ctx: &egui::Context) {
         .insert(0, "Inter".into());
     crate::ui_fonts::append(&mut fonts);
     ctx.set_fonts(fonts);
+    crate::ui_fonts::mark(ctx);
+}
+
+fn install_style(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
     ctx.global_style_mut(|style| {
         style

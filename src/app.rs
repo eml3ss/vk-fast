@@ -1325,6 +1325,8 @@ pub struct MusicApp {
     volume_keys_enabled: bool,
     volume_keys_save_failed: bool,
     volume_keys: crate::volume_keys::VolumeKeys,
+    /// The seek bar's width in physical pixels when last drawn.
+    seek_pixels: f32,
     autoscroll: crate::autoscroll::Autoscroll,
     /// The page area of the last frame, where a middle click autoscrolls.
     page_rect: egui::Rect,
@@ -1699,6 +1701,7 @@ impl MusicApp {
             volume_keys_enabled: preferences::load_volume_keys(),
             volume_keys_save_failed: false,
             volume_keys: crate::volume_keys::VolumeKeys::default(),
+            seek_pixels: 0.0,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
@@ -9049,6 +9052,7 @@ impl MusicApp {
                     egui::pos2(elapsed_rect.right() + gap, seek_row.top()),
                     egui::pos2(duration_rect.left() - gap, seek_row.bottom()),
                 );
+                self.seek_pixels = control_rect.width() * ui.ctx().pixels_per_point();
                 let response = ui
                     .scope_builder(
                         egui::UiBuilder::new()
@@ -10897,6 +10901,7 @@ impl MusicApp {
             }
         }
         self.save_session_cookies();
+        crate::ui_fonts::refresh(ctx);
         self.poll_volume_keys();
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
@@ -11007,15 +11012,37 @@ impl MusicApp {
         if self.restoring {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
-        if self.playback_pending.is_some()
-            || matches!(
-                self.player.snapshot().state,
-                PlaybackState::Loading | PlaybackState::Playing | PlaybackState::Paused
-            )
-        {
+        let snapshot = self.player.snapshot();
+        if self.playback_pending.is_some() || snapshot.state == PlaybackState::Loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if snapshot.state == PlaybackState::Playing {
+            // Only when something visibly changes or the track ends: paused
+            // music needs no wakes at all.
+            let duration = self
+                .playing
+                .as_ref()
+                .map_or(0.0, |track| f64::from(track.duration));
+            ctx.request_repaint_after(playing_wake(snapshot.position, duration, self.seek_pixels));
         }
     }
+}
+
+/// The next wake while music plays: when the elapsed time ticks to the next
+/// second, the seek bar moves by a physical pixel (at most twice a second),
+/// or the track ends (its end is noticed by polling). Between 50 ms and 1 s.
+fn playing_wake(position: f64, duration: f64, seek_pixels: f32) -> std::time::Duration {
+    let to_second = 1.0 - position.rem_euclid(1.0) + 0.005;
+    let mut wait = to_second;
+    if duration > 0.0 {
+        if seek_pixels >= 1.0 {
+            wait = wait.min((duration / f64::from(seek_pixels)).max(0.5));
+        }
+        wait = wait.min((duration - position).max(0.0) + 0.02);
+    } else {
+        // Without a known length, the end is checked often.
+        wait = wait.min(0.25);
+    }
+    std::time::Duration::from_secs_f64(wait.clamp(0.05, 1.0))
 }
 
 /// Background threads that only read from VK or the compositor, safe to
@@ -11128,6 +11155,24 @@ impl Drop for MusicApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playing_wakes_only_for_visible_changes_and_the_track_end() {
+        let secs = |wait: std::time::Duration| wait.as_secs_f64();
+        // A 3-minute track on a wide bar: the next second, at most twice a
+        // second for the bar, never the old ten times a second.
+        let wait = secs(playing_wake(10.2, 180.0, 750.0));
+        assert!((0.5..=0.81).contains(&wait), "{wait}");
+        assert!(secs(playing_wake(10.0, 180.0, 750.0)) >= 0.5);
+        // A long track on a narrow bar still updates the elapsed seconds.
+        assert!(secs(playing_wake(10.0, 3600.0, 100.0)) <= 1.01);
+        // The end is caught right after it comes.
+        let wait = secs(playing_wake(179.9, 180.0, 750.0));
+        assert!((0.05..=0.13).contains(&wait), "{wait}");
+        assert!((secs(playing_wake(181.0, 180.0, 750.0)) - 0.05).abs() < 1e-9);
+        // An unknown length is checked often.
+        assert!(secs(playing_wake(5.5, 0.0, 750.0)) <= 0.25);
+    }
     use crate::web_audio::MixPage;
 
     struct SeekIntentHarness {
@@ -11572,6 +11617,7 @@ mod tests {
             volume_keys_enabled: false,
             volume_keys_save_failed: false,
             volume_keys: crate::volume_keys::VolumeKeys::default(),
+            seek_pixels: 0.0,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,

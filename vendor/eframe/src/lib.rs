@@ -214,6 +214,12 @@ pub fn windows_small_icon_size() -> Option<u32> {
     native::windows_metrics::small_icon_size()
 }
 
+/// Read-only file mappings behind a safe type (fonts and similar data).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mapped_file;
+#[cfg(not(target_arch = "wasm32"))]
+pub use mapped_file::MappedFile;
+
 pub(crate) mod stopwatch;
 
 // ----------------------------------------------------------------------------
