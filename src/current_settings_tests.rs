@@ -592,3 +592,51 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     assert!(badges(&output).is_empty());
     assert!((content_text(&output, "Rude").left() - polite.left()).abs() < 1.0);
 }
+
+#[test]
+fn track_titles_and_artists_are_centred_on_the_cover() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    app.page = MusicPage::Library;
+    let mut tracks = page(2, &[1, 2]).items;
+    tracks[0].title = "Loud song".into();
+    tracks[0].artist = "Rude".into();
+    tracks[1].title = "Quiet song".into();
+    tracks[1].artist = "Polite".into();
+    app.library.tracks = tracks;
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let title = content_text(&output, "Loud song");
+    let artist = content_text(&output, "Rude");
+    let cover = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if (rect.rect.width() - 40.0).abs() < 0.1
+                    && (rect.rect.height() - 40.0).abs() < 0.1
+                    && rect.rect.right() < title.left()
+                    && rect.rect.bottom() > title.top()
+                    && rect.rect.top() < artist.bottom() =>
+            {
+                Some(rect.rect)
+            }
+            egui::Shape::Mesh(mesh) => {
+                let r = mesh.calc_bounds();
+                ((r.width() - 40.0).abs() < 0.6
+                    && (r.height() - 40.0).abs() < 0.6
+                    && r.right() < title.left()
+                    && r.bottom() > title.top()
+                    && r.top() < artist.bottom())
+                .then_some(r)
+            }
+            _ => None,
+        })
+        .next();
+    // From the title's capitals to the artists' baseline, the same space
+    // above and below inside the cover.
+    let cover = cover.expect("the row's cover");
+    let top = title.top() - cover.top();
+    let bottom = cover.bottom() - artist.bottom();
+    assert!((top - bottom).abs() <= 1.0, "top {top}, bottom {bottom}");
+}

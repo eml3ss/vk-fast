@@ -8363,6 +8363,17 @@ impl MusicApp {
                     |ui| {
                         ui.set_min_width(width);
                         ui.spacing_mut().item_spacing.y = 3.0;
+                        // Title and artists centred on the 40 px cover, not
+                        // pinned to its top.
+                        let title_font = egui::FontId::new(14.0, theme::semibold());
+                        let small = egui::TextStyle::Small.resolve(ui.style());
+                        let (title_height, artist_height) = ui.fonts_mut(|fonts| {
+                            (
+                                fonts.row_height(&title_font),
+                                fonts.row_height(&small).max(16.0),
+                            )
+                        });
+                        ui.add_space(((40.0 - title_height - 3.0 - artist_height) * 0.5).max(0.0));
                         ui.add(
                             egui::Label::new(theme::track_title(
                                 track,
