@@ -3005,6 +3005,33 @@ impl MusicApp {
         });
     }
 
+    /// VK renews its website session cookies as the app talks to it; the
+    /// saved session keeps the new ones, or it would stop working later.
+    fn save_session_cookies(&mut self) {
+        if cfg!(test) || self.demo {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let Some(cookies) = session
+            .music
+            .as_ref()
+            .and_then(WebAudioClient::take_cookie_update)
+        else {
+            return;
+        };
+        let owner = session.profile.id;
+        self.workers.retain(|worker| !worker.is_finished());
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-session-save".into())
+            .spawn(move || {
+                let saved = music_session_store::update_cookies(owner, &cookies).is_ok();
+                crate::diagnostics::event("session", &format!("cookies_saved ok={saved}"));
+            })
+        {
+            self.workers.push(worker);
+        }
+    }
+
     fn logout(&mut self) {
         self.reset();
         if music_session_store::clear().is_err() {
@@ -10736,6 +10763,7 @@ impl MusicApp {
                 ctx.request_repaint_after(delay);
             }
         }
+        self.save_session_cookies();
         self.poll_system_tray(ctx, frame);
         self.poll_instance_activation(ctx);
         self.poll_links(ctx);
@@ -10922,6 +10950,7 @@ impl Drop for MusicApp {
         // is awaited like other account changes.
         self.send_playlist_removal();
         self.save_album_names(true);
+        self.save_session_cookies();
         if self.volume_save_at.is_some() {
             let _ = save_volume_value(self.player.snapshot().volume);
         }

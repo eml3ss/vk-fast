@@ -355,6 +355,31 @@ fn update_profile_at(path: &Path, fresh: &Profile) -> io::Result<()> {
     Ok(())
 }
 
+/// VK renewed the session's cookies: keep them for the same, still signed-in
+/// account. A deleted session is not recreated, another account's is not
+/// touched, and a set without its sign-in cookie is never written.
+fn update_cookies_at(path: &Path, owner_id: i64, cookies: &[SessionCookie]) -> io::Result<()> {
+    validate(owner_id, cookies)?;
+    if !cookies.iter().any(|cookie| {
+        matches!(cookie.name.as_str(), "remixsid" | "remixsid6") && !cookie.value.is_empty()
+    }) {
+        return Err(invalid());
+    }
+    let Some(session) = load_record_at(path)? else {
+        return Ok(());
+    };
+    if session.owner_id != owner_id {
+        return Ok(());
+    }
+    save_record_at(path, owner_id, cookies, session.profile.as_ref())
+}
+
+/// Called off the UI thread.
+pub fn update_cookies(owner_id: i64, cookies: &[SessionCookie]) -> io::Result<()> {
+    let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
+    update_cookies_at(&session_path()?, owner_id, cookies)
+}
+
 /// Update only a still-existing account. Called off the UI thread.
 pub fn update_profile(fresh: &Profile) -> io::Result<()> {
     let _write = WRITE_LOCK.lock().map_err(|_| invalid())?;
@@ -432,6 +457,49 @@ mod tests {
             secure: true,
             expires_unix: Some(2_000_000_000),
         }]
+    }
+
+    #[test]
+    fn renewed_cookies_update_only_the_same_still_saved_account() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("state/music-session.json");
+        let profile = Profile {
+            id: 42,
+            first_name: "Synthetic".into(),
+            last_name: "User".into(),
+            avatar_url: None,
+        };
+        let mut renewed = fixture();
+        renewed[0].value = "renewed-cookie-value".into();
+        renewed.push(SessionCookie {
+            domain: "vk.ru".into(),
+            path: "/".into(),
+            name: "remixnsid".into(),
+            value: "synthetic-new".into(),
+            secure: true,
+            expires_unix: None,
+        });
+        // Signed out meanwhile: the session is not recreated.
+        update_cookies_at(&path, 42, &renewed).unwrap();
+        assert!(load_record_at(&path).unwrap().is_none());
+
+        save_profile_at(&path, &profile, &fixture()).unwrap();
+        // Another account signed in meanwhile: its session is untouched.
+        update_cookies_at(&path, 7, &renewed).unwrap();
+        assert_eq!(
+            load_at(&path, 42).unwrap().unwrap()[0].value,
+            "synthetic-cookie-value"
+        );
+
+        update_cookies_at(&path, 42, &renewed).unwrap();
+        let (restored, cookies) = restore_profile_at(&path).unwrap().unwrap();
+        assert_eq!(restored.first_name, "Synthetic", "the profile is kept");
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].value, "renewed-cookie-value");
+
+        // A set without the sign-in cookie is never written.
+        assert!(update_cookies_at(&path, 42, &renewed[1..]).is_err());
+        assert_eq!(load_at(&path, 42).unwrap().unwrap().len(), 2);
     }
 
     #[test]

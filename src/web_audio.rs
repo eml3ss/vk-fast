@@ -5,8 +5,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Read,
     sync::{
-        Arc, Mutex, TryLockError,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock, TryLockError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -14,7 +14,7 @@ use std::{
 
 use reqwest::{
     blocking::{Client, Response},
-    header::{CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, ORIGIN, REFERER},
+    header::{CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE},
     redirect::Policy,
 };
 use serde_json::Value;
@@ -391,7 +391,12 @@ struct MixSession {
 pub struct WebAudioClient {
     http: Client,
     host: &'static str,
-    cookies: Arc<Vec<SessionCookie>>,
+    /// The website session, kept current with VK's Set-Cookie answers.
+    cookies: Arc<RwLock<Vec<SessionCookie>>>,
+    /// Bumped on every cookie change; `cookie_saved` is the last one handed
+    /// out to be saved.
+    cookie_revision: Arc<AtomicU64>,
+    cookie_saved: Arc<AtomicU64>,
     state: Arc<Mutex<State>>,
     page_gate: Arc<Mutex<()>>,
     mix_gate: Arc<Mutex<()>>,
@@ -499,6 +504,109 @@ fn path_matches(cookie: &str, request: &str) -> bool {
     request == cookie
         || (request.starts_with(cookie)
             && (cookie.ends_with('/') || request.as_bytes().get(cookie.len()) == Some(&b'/')))
+}
+
+/// The cookies that sign the website in; only `/feed` decides they ended.
+const SIGN_IN_COOKIES: [&str; 2] = ["remixsid", "remixsid6"];
+
+/// Applies one Set-Cookie header VK sent to `request_host` to the session.
+/// Only VK's own website domains are kept; a cookie is the same one by name,
+/// path and domain, whether VK scoped it to the domain or to the host. The
+/// sign-in cookies are never dropped by a single answer: the viewer recheck
+/// decides whether the session ended, and they are renewed only by an
+/// answered (2xx) request: a redirect to sign-in may carry a signed-out
+/// value. Returns whether anything changed.
+fn apply_set_cookie(
+    cookies: &mut Vec<SessionCookie>,
+    site: &str,
+    request_host: &str,
+    header: &str,
+    answered: bool,
+    now: i64,
+) -> bool {
+    let Ok(parsed) = cookie::Cookie::parse(header) else {
+        return false;
+    };
+    let domain = match parsed.domain() {
+        Some(domain) => {
+            let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+            let allowed = matches!(
+                domain.as_str(),
+                "vk.ru" | "vk.com" | "www.vk.ru" | "www.vk.com"
+            );
+            let covers = request_host == domain
+                || request_host
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'));
+            if !allowed || !covers {
+                return false;
+            }
+            format!(".{domain}")
+        }
+        // Host-only cookies are kept for the website itself, not login hosts.
+        None if request_host == site => site.to_owned(),
+        None => return false,
+    };
+    let path = parsed
+        .path()
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or("/")
+        .to_owned();
+    let name = parsed.name();
+    let value = parsed.value();
+    if SIGN_IN_COOKIES.contains(&name) && !answered {
+        return false;
+    }
+    let expires = parsed
+        .max_age()
+        .map(|age| now.saturating_add(age.whole_seconds()))
+        .or_else(|| {
+            parsed
+                .expires_datetime()
+                .map(|expires| expires.unix_timestamp())
+        });
+    let removed = expires.is_some_and(|expires| expires <= now)
+        || value.is_empty()
+        || value.eq_ignore_ascii_case("deleted");
+    let base = |domain: &str| domain.trim_start_matches('.').to_owned();
+    let position = cookies.iter().position(|cookie| {
+        cookie.name == name && cookie.path == path && base(&cookie.domain) == base(&domain)
+    });
+    if removed {
+        if SIGN_IN_COOKIES.contains(&name) {
+            return false;
+        }
+        return position.is_some_and(|index| {
+            cookies.remove(index);
+            true
+        });
+    }
+    let fresh = SessionCookie {
+        domain,
+        path,
+        name: name.to_owned(),
+        value: value.to_owned(),
+        secure: true,
+        expires_unix: expires,
+    };
+    if !fresh.is_valid() || !valid_cookie(&fresh) {
+        return false;
+    }
+    match position {
+        Some(index) => {
+            let known = &cookies[index];
+            if known.value == fresh.value
+                && known.expires_unix == fresh.expires_unix
+                && known.domain == fresh.domain
+            {
+                return false;
+            }
+            cookies[index] = fresh;
+        }
+        None if cookies.len() < 256 => cookies.push(fresh),
+        None => return false,
+    }
+    true
 }
 
 fn live(cookie: &SessionCookie) -> bool {
@@ -652,12 +760,60 @@ impl WebAudioClient {
         Ok(Self {
             http,
             host,
-            cookies: Arc::new(cookies),
+            cookies: Arc::new(RwLock::new(cookies)),
+            cookie_revision: Arc::new(AtomicU64::new(0)),
+            cookie_saved: Arc::new(AtomicU64::new(0)),
             state: Arc::new(Mutex::new(State::default())),
             page_gate: Arc::new(Mutex::new(())),
             mix_gate: Arc::new(Mutex::new(())),
             key_gate: Arc::new(Mutex::new(())),
         })
+    }
+
+    fn cookie_header(&self, host: &str, path: &str) -> Result<HeaderValue, WebAudioError> {
+        let cookies = self.cookies.read().map_err(|_| WebAudioError::NoSession)?;
+        cookie_header(&cookies, host, path)
+    }
+
+    /// Keep what VK's Set-Cookie answers change, as a browser does: VK
+    /// renews its session cookies, and old values stop working.
+    fn absorb_set_cookies(&self, response: &Response) {
+        let Some(host) = response.url().host_str() else {
+            return;
+        };
+        let headers: Vec<_> = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        self.renew_cookies(host, response.status().is_success(), &headers);
+    }
+
+    fn renew_cookies(&self, host: &str, answered: bool, headers: &[&str]) {
+        if headers.is_empty() {
+            return;
+        }
+        let Ok(mut cookies) = self.cookies.write() else {
+            return;
+        };
+        let changed = headers.iter().fold(false, |changed, header| {
+            apply_set_cookie(&mut cookies, self.host, host, header, answered, now()) | changed
+        });
+        drop(cookies);
+        if changed {
+            self.cookie_revision.fetch_add(1, Ordering::AcqRel);
+            crate::diagnostics::event("session", "cookies_renewed");
+        }
+    }
+
+    /// The session's cookies when they changed since last asked, to be saved.
+    pub fn take_cookie_update(&self) -> Option<Vec<SessionCookie>> {
+        let revision = self.cookie_revision.load(Ordering::Acquire);
+        if self.cookie_saved.swap(revision, Ordering::AcqRel) == revision {
+            return None;
+        }
+        self.cookies.read().ok().map(|cookies| cookies.clone())
     }
 
     /// Verify the website's current viewer, not the owner of a requested playlist.
@@ -866,9 +1022,10 @@ impl WebAudioClient {
             let response = self
                 .http
                 .get(url.clone())
-                .header(COOKIE, cookie_header(&self.cookies, self.host, url.path())?)
+                .header(COOKIE, self.cookie_header(self.host, url.path())?)
                 .send()
                 .map_err(network)?;
+            self.absorb_set_cookies(&response);
             if response.status().is_redirection() {
                 let location = response
                     .headers()
@@ -1134,15 +1291,13 @@ impl WebAudioClient {
         let response = self
             .http
             .post(format!("https://{}/al_audio.php", self.host))
-            .header(
-                COOKIE,
-                cookie_header(&self.cookies, self.host, "/al_audio.php")?,
-            )
+            .header(COOKIE, self.cookie_header(self.host, "/al_audio.php")?)
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner_id))
             .form(&params)
             .send()
             .map_err(network)?;
+        self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
             return Err(redirect_error(&response, self.host));
         }
@@ -3080,12 +3235,13 @@ impl WebAudioClient {
         let response = self
             .http
             .post(format!("https://{login_host}/?act=web_token"))
-            .header(COOKIE, cookie_header(&self.cookies, login_host, "/")?)
+            .header(COOKIE, self.cookie_header(login_host, "/")?)
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("app_id", "6287487"), ("version", "1")])
             .send()
             .map_err(network)?;
+        self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
             return Err(WebAudioError::TokenExpired);
         }
@@ -3189,15 +3345,13 @@ impl WebAudioClient {
         let response = self
             .http
             .post(format!("https://{}/al_audio.php", self.host))
-            .header(
-                COOKIE,
-                cookie_header(&self.cookies, self.host, "/al_audio.php")?,
-            )
+            .header(COOKIE, self.cookie_header(self.host, "/al_audio.php")?)
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner))
             .form(&params)
             .send()
             .map_err(network)?;
+        self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
             return Err(redirect_error(&response, self.host));
         }
@@ -3331,10 +3485,7 @@ impl WebAudioClient {
         let response = self
             .http
             .post(format!("https://{}/al_audio.php", self.host))
-            .header(
-                COOKIE,
-                cookie_header(&self.cookies, self.host, "/al_audio.php")?,
-            )
+            .header(COOKIE, self.cookie_header(self.host, "/al_audio.php")?)
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner))
             .form(&[
@@ -3344,6 +3495,7 @@ impl WebAudioClient {
             ])
             .send()
             .map_err(network)?;
+        self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
             return Err(redirect_error(&response, self.host));
         }
@@ -3396,15 +3548,13 @@ impl WebAudioClient {
         let response = self
             .http
             .post(format!("https://{}/al_audio.php", self.host))
-            .header(
-                COOKIE,
-                cookie_header(&self.cookies, self.host, "/al_audio.php")?,
-            )
+            .header(COOKIE, self.cookie_header(self.host, "/al_audio.php")?)
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, viewer))
             .form(&[("act", "reload_audio"), ("al", "1"), ("ids", ids.as_str())])
             .send()
             .map_err(network)?;
+        self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
             return Err(redirect_error(&response, self.host));
         }
@@ -6511,6 +6661,153 @@ mod tests {
                 .to_str()
                 .unwrap(),
             ""
+        );
+    }
+
+    #[test]
+    fn set_cookie_answers_renew_the_session_like_a_browser() {
+        const NOW: i64 = 1_800_000_000;
+        let jar = || {
+            vec![
+                cookie("vk.ru", "/", "remixsid", "signed-in"),
+                cookie("vk.ru", "/", "remixnsid", "old"),
+                cookie("vk.ru", "/", "httoken", "old-token"),
+            ]
+        };
+        let value = |cookies: &[SessionCookie], name: &str| {
+            cookies
+                .iter()
+                .find(|cookie| cookie.name == name)
+                .map(|cookie| {
+                    (
+                        cookie.value.clone(),
+                        cookie.domain.clone(),
+                        cookie.expires_unix,
+                    )
+                })
+        };
+        let apply = |cookies: &mut Vec<SessionCookie>, host: &str, answered: bool, header: &str| {
+            apply_set_cookie(cookies, "vk.ru", host, header, answered, NOW)
+        };
+
+        // A renewed value replaces the old one, host-only or domain-wide.
+        let mut cookies = jar();
+        assert!(apply(
+            &mut cookies,
+            "vk.ru",
+            true,
+            "remixnsid=new; Path=/; Secure; HttpOnly"
+        ));
+        assert_eq!(value(&cookies, "remixnsid").unwrap().0, "new");
+        assert!(apply(
+            &mut cookies,
+            "vk.ru",
+            true,
+            "remixsid=renewed; Domain=.vk.ru; Path=/; Max-Age=3600"
+        ));
+        assert_eq!(
+            value(&cookies, "remixsid"),
+            Some(("renewed".into(), ".vk.ru".into(), Some(NOW + 3600)))
+        );
+        assert_eq!(
+            cookies
+                .iter()
+                .filter(|cookie| cookie.name == "remixsid")
+                .count(),
+            1
+        );
+        assert!(
+            !apply(&mut cookies, "vk.ru", true, "remixnsid=new; Path=/"),
+            "unchanged"
+        );
+        assert!(apply(&mut cookies, "vk.ru", true, "remixsts=fresh; Path=/"));
+        assert_eq!(cookies.len(), 4);
+        let header = cookie_header(&cookies, "vk.ru", "/al_audio.php").unwrap();
+        assert!(header.to_str().unwrap().contains("remixsid=renewed"));
+        assert!(!header.to_str().unwrap().contains("signed-in"));
+
+        // VK may drop other cookies, but never signs out by one answer, and
+        // a redirect cannot swap the sign-in cookie for a signed-out one.
+        assert!(apply(
+            &mut cookies,
+            "vk.ru",
+            true,
+            "httoken=DELETED; expires=Thu, 01 Jan 1970 00:00:01 GMT; path=/"
+        ));
+        assert!(value(&cookies, "httoken").is_none());
+        for (answered, header) in [
+            (
+                true,
+                "remixsid=DELETED; expires=Thu, 01 Jan 1970 00:00:01 GMT; path=/",
+            ),
+            (true, "remixsid=; Max-Age=0; path=/"),
+            (false, "remixsid=anonymous; path=/"),
+            (false, "remixsid6=anonymous; Domain=.vk.ru; path=/"),
+        ] {
+            assert!(!apply(&mut cookies, "vk.ru", answered, header), "{header}");
+        }
+        assert_eq!(value(&cookies, "remixsid").unwrap().0, "renewed");
+        // Other cookies follow redirects, as in a browser.
+        assert!(apply(
+            &mut cookies,
+            "vk.ru",
+            false,
+            "remixnsid=after-redirect; path=/"
+        ));
+
+        // Only VK's own website domains are kept.
+        let mut cookies = jar();
+        for (host, header) in [
+            ("vk.ru", "foreign=1; Domain=.example.com; path=/"),
+            ("vk.ru", "sibling=1; Domain=.vk.com; path=/"),
+            ("login.vk.ru", "login_only=1; path=/"),
+            ("vk.ru", "bad=x\u{7f}; path=/"),
+            ("vk.ru", "not a cookie"),
+        ] {
+            assert!(!apply(&mut cookies, host, true, header), "{header}");
+        }
+        assert_eq!(cookies.len(), 3);
+        assert!(apply(
+            &mut cookies,
+            "login.vk.ru",
+            true,
+            "remixnsid=from-login; Domain=.vk.ru; Path=/"
+        ));
+        assert_eq!(value(&cookies, "remixnsid").unwrap().0, "from-login");
+    }
+
+    #[test]
+    fn renewed_cookies_are_handed_out_once_to_be_saved() {
+        let client = catalog_test_client();
+        assert!(client.take_cookie_update().is_none());
+        client.renew_cookies(
+            "vk.ru",
+            true,
+            &["remixnsid=one; path=/", "httoken=two; path=/"],
+        );
+        let saved = client.take_cookie_update().unwrap();
+        assert!(
+            saved
+                .iter()
+                .any(|cookie| cookie.name == "remixnsid" && cookie.value == "one")
+        );
+        assert!(client.take_cookie_update().is_none(), "nothing new since");
+        // A clone shares the session: its renewals reach every request.
+        let clone = client.clone();
+        clone.renew_cookies("vk.ru", true, &["remixnsid=three; path=/"]);
+        assert!(client.take_cookie_update().is_some());
+        assert!(
+            client
+                .cookie_header("vk.ru", "/")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("remixnsid=three")
+        );
+        client.renew_cookies("vk.ru", true, &["remixnsid=three; path=/"]);
+        assert!(
+            client.take_cookie_update().is_none(),
+            "the same value is no change"
         );
     }
 

@@ -4670,6 +4670,7 @@ dependencies = [
  "base64 0.22.1",
  "cbc",
  "chrono",
+ "cookie",
  "cpal",
  "ebur128",
  "eframe",
