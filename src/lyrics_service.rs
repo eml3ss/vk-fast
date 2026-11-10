@@ -1,5 +1,5 @@
 //! One worker with a coalesced latest-track slot; rapid skips do not fan out HTTP.
-use super::{Error, Lyrics, Mode, Provider, Query, Source, Status, store};
+use super::{Error, Lyrics, Provider, Query, Source, Status, store};
 use crate::repaint_target::RepaintTarget;
 use std::{
     collections::VecDeque,
@@ -11,16 +11,14 @@ use std::{
     thread,
     time::Instant,
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 pub enum ConfigAction {
     Reload,
-    Mode(Mode),
     Source(Source),
     Fallback(bool),
     /// Fall back between VK and Musixmatch.
     FallbackOther(bool),
-    ApiKey(Zeroizing<String>),
     Generate,
 }
 pub enum Event {
@@ -355,10 +353,7 @@ fn fetch_source(
     let retry = match source {
         Source::Genius => config.genius_retry_after,
         Source::Vk => config.vk_retry_after,
-        Source::Musixmatch => match config.mode {
-            Mode::Anonymous => config.anonymous_retry_after,
-            Mode::ApiKey => config.api_retry_after,
-        },
+        Source::Musixmatch => config.anonymous_retry_after,
     };
     if retry > now {
         return Err(Error::RateLimited(retry - now));
@@ -384,17 +379,14 @@ fn fetch_source(
             Error::Captcha => 300,
             _ => 0,
         };
-        if source == Source::Musixmatch && config.mode == Mode::Anonymous && error == Error::Auth {
+        if source == Source::Musixmatch && error == Error::Auth {
             config.token_rejected = true;
         }
         if wait > 0 {
             let slot = match source {
                 Source::Genius => &mut config.genius_retry_after,
                 Source::Vk => &mut config.vk_retry_after,
-                Source::Musixmatch => match config.mode {
-                    Mode::Anonymous => &mut config.anonymous_retry_after,
-                    Mode::ApiKey => &mut config.api_retry_after,
-                },
+                Source::Musixmatch => &mut config.anonymous_retry_after,
             };
             *slot = now + wait;
         }
@@ -438,18 +430,16 @@ fn prepare(
     canceled: &impl Fn() -> bool,
 ) -> Result<(), Error> {
     let now = store::now();
-    let retry = match config.mode {
-        Mode::Anonymous => config.anonymous_retry_after,
-        Mode::ApiKey => config.api_retry_after,
-    };
+    let retry = config.anonymous_retry_after;
     if retry > now {
         return Err(Error::RateLimited(retry - now));
     }
-    match config.mode {
-        Mode::ApiKey if config.api_key.is_empty() => Err(Error::MissingKey),
-        Mode::Anonymous if config.token_rejected => Err(Error::Auth),
-        Mode::Anonymous if !config.has_current_token() => generate(provider, config, canceled),
-        _ => Ok(()),
+    if config.token_rejected {
+        Err(Error::Auth)
+    } else if !config.has_current_token() {
+        generate(provider, config, canceled)
+    } else {
+        Ok(())
     }
 }
 
@@ -476,27 +466,6 @@ fn configure(
         ConfigAction::FallbackOther(enabled) => {
             let mut candidate = config.clone();
             candidate.fallback_to_other = enabled;
-            store::save(&candidate)?;
-            *config = candidate;
-        }
-        ConfigAction::Mode(mode) => {
-            let mut candidate = config.clone();
-            candidate.mode = mode;
-            store::save(&candidate)?;
-            *config = candidate;
-        }
-        ConfigAction::ApiKey(key) => {
-            let key = key.trim();
-            if !store::valid_secret(key) {
-                return Err(Error::MissingKey);
-            }
-            let mut candidate = config.clone();
-            if candidate.api_key != key {
-                candidate.api_retry_after = 0;
-            }
-            candidate.api_key.zeroize();
-            candidate.api_key = key.to_owned();
-            candidate.mode = Mode::ApiKey;
             store::save(&candidate)?;
             *config = candidate;
         }
@@ -656,11 +625,11 @@ mod tests {
         assert_eq!(pending.query, query);
         service.fetch(query, None);
         assert!(pending.cancel.load(Ordering::Acquire));
-        service.configure(ConfigAction::Mode(Mode::ApiKey));
+        service.configure(ConfigAction::Source(Source::Genius));
         assert!(jobs.lock().unwrap().fetch.is_none());
         assert!(matches!(
             jobs.lock().unwrap().config,
-            Some(ConfigAction::Mode(Mode::ApiKey))
+            Some(ConfigAction::Source(Source::Genius))
         ));
     }
     #[test]
@@ -684,35 +653,8 @@ mod tests {
         assert_eq!(config.user_token, "synthetic-current-token");
         config.token_rejected = true;
         assert_eq!(prepare(&provider, &mut config, &|| false), Err(Error::Auth));
-        configure(
-            &provider,
-            &mut config,
-            ConfigAction::ApiKey(Zeroizing::new("synthetic-private-key".into())),
-            &|| false,
-        )
-        .unwrap();
-        config.api_retry_after = store::now() + 600;
-        configure(
-            &provider,
-            &mut config,
-            ConfigAction::ApiKey(Zeroizing::new("synthetic-private-key".into())),
-            &|| false,
-        )
-        .unwrap();
-        assert!(matches!(
-            prepare(&provider, &mut config, &|| false),
-            Err(Error::RateLimited(_))
-        ));
         let public = format!("{:?}", config.status());
         assert!(!public.contains("synthetic"));
-        configure(
-            &provider,
-            &mut config,
-            ConfigAction::Mode(Mode::Anonymous),
-            &|| false,
-        )
-        .unwrap();
-        assert_eq!(config.api_key, "synthetic-private-key");
         assert_eq!(config.user_token, "synthetic-current-token");
     }
 }

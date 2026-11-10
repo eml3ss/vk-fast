@@ -85,7 +85,7 @@ impl Query {
                 "воспроизведение транслировать трансляция статус страница моя аудиозаписи музыка друзья playback broadcast status page profile now playing friends"
             }
             Setting::Lyrics => {
-                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный доступ токен ключ playback lyrics musixmatch vk genius source fallback anonymous token api key synced источник резервный"
+                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный токен обновить playback lyrics musixmatch vk genius source fallback anonymous token renew synced источник резервный"
             }
             Setting::MinimizeToTray => {
                 "общие системный трей сворачивать свернуть при закрытии закрытие фон значок general minimize minimise to system tray when close closing background icon"

@@ -155,7 +155,7 @@ fn late_lyrics_replies_never_replace_the_current_track_or_restart_after_close() 
 }
 
 #[test]
-fn lyric_seek_uses_the_shared_player_position_and_key_input_stays_masked() {
+fn lyric_seek_uses_the_shared_player_position_and_musixmatch_offers_only_its_token() {
     let ctx = egui::Context::default();
     let mut app = prepared(&ctx, Language::English);
     app.handle_lyrics_action(&ctx, lyrics_ui::Action::Seek(42.5));
@@ -164,23 +164,43 @@ fn lyric_seek_uses_the_shared_player_position_and_key_input_stays_masked() {
     app.settings_section = SettingsSection::Playback;
     app.settings_query = "musixmatch".into();
     app.lyrics.status = Some(Status {
-        mode: Mode::ApiKey,
+        fallback_to_genius: true,
+        fallback_to_other: true,
         ..Default::default()
     });
-    app.lyrics.settings_error = Some(Error::Storage);
-    *app.lyrics.key_input = "synthetic-private-key".into();
     let mut frame = 0;
     let size = egui::vec2(1040.0, 720.0);
     let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
     for _ in 0..3 {
         output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
     }
-    assert!(account_ui_text_rect(&output, "Personal API key").is_some());
+    assert!(account_ui_text_rect(&output, "Renew Musixmatch token").is_some());
+    for retired in [
+        "Personal API key",
+        "Anonymous access",
+        "Musixmatch API key",
+        "Save key",
+    ] {
+        assert!(
+            account_ui_text_rect(&output, retired).is_none(),
+            "{retired}"
+        );
+    }
     assert!(account_ui_text_rect(&output, "Normalize volume").is_none());
-    for shape in account_ui_shapes(&output) {
-        if let egui::Shape::Text(text) = shape {
-            assert!(!text.galley.text().contains("synthetic-private-key"));
-        }
+    // The fallbacks are the same switches as the rest of Settings: a pill,
+    // not a checkbox, next to each label.
+    let shapes = account_ui_shapes(&output);
+    for label in ["Fallback to VK", "Fallback to Genius"] {
+        let text = account_ui_text_rect(&output, label).unwrap();
+        assert!(
+            shapes
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(rect)
+                if rect.rect.width() == 38.0 && rect.rect.height() == 22.0
+                    && (rect.rect.center().y - text.center().y).abs() < 4.0
+                    && rect.rect.right() < text.left())),
+            "{label} has a switch"
+        );
     }
 }
 

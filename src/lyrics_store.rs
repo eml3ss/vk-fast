@@ -11,14 +11,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode {
-    #[default]
-    Anonymous,
-    ApiKey,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum Source {
     #[default]
     Musixmatch,
@@ -59,10 +51,14 @@ pub(super) struct Config {
     pub genius_retry_after: u64,
     #[serde(default)]
     pub vk_retry_after: u64,
-    #[serde(default)]
-    pub mode: Mode,
-    #[serde(default)]
-    pub api_key: String,
+    /// The retired personal API key option: read so older files still load,
+    /// never kept in memory or written back.
+    #[serde(default, rename = "mode", skip_serializing)]
+    retired_mode: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "api_key", skip_serializing)]
+    retired_key: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "api_retry_after", skip_serializing)]
+    retired_retry: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub user_token: String,
     #[serde(default)]
@@ -73,8 +69,6 @@ pub(super) struct Config {
     pub token_retry_after: u64,
     #[serde(default)]
     pub anonymous_retry_after: u64,
-    #[serde(default)]
-    pub api_retry_after: u64,
     #[serde(default)]
     pub token_rejected: bool,
 }
@@ -90,14 +84,14 @@ impl Default for Config {
             fallback_to_other: genius_fallback_default(),
             genius_retry_after: 0,
             vk_retry_after: 0,
-            mode: Mode::default(),
-            api_key: String::new(),
+            retired_mode: None,
+            retired_key: None,
+            retired_retry: None,
             user_token: String::new(),
             token_app_id: String::new(),
             token_created: 0,
             token_retry_after: 0,
             anonymous_retry_after: 0,
-            api_retry_after: 0,
             token_rejected: false,
         }
     }
@@ -105,7 +99,6 @@ impl Default for Config {
 
 impl Drop for Config {
     fn drop(&mut self) {
-        self.api_key.zeroize();
         self.user_token.zeroize();
     }
 }
@@ -115,8 +108,6 @@ pub struct Status {
     pub source: Source,
     pub fallback_to_genius: bool,
     pub fallback_to_other: bool,
-    pub mode: Mode,
-    pub key_ready: bool,
     pub token_ready: bool,
     pub token_rejected: bool,
     pub token_retry_after: u64,
@@ -128,8 +119,6 @@ impl Config {
             source: self.source,
             fallback_to_genius: self.fallback_to_genius,
             fallback_to_other: self.fallback_to_other,
-            mode: self.mode,
-            key_ready: !self.api_key.is_empty(),
             token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
@@ -156,10 +145,7 @@ impl Config {
         match source {
             Source::Vk => self.vk_retry_after,
             Source::Genius => self.genius_retry_after,
-            Source::Musixmatch => match self.mode {
-                Mode::Anonymous => self.anonymous_retry_after,
-                Mode::ApiKey => self.api_retry_after,
-            },
+            Source::Musixmatch => self.anonymous_retry_after,
         }
     }
 
@@ -239,11 +225,19 @@ fn load_at(path: &Path) -> Result<Config, Error> {
     if bytes.len() > 16384 {
         return Err(Error::Storage);
     }
-    let config: Config = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
-    if (!config.api_key.is_empty() && !valid_secret(&config.api_key))
-        || (!config.user_token.is_empty() && !valid_secret(&config.user_token))
-    {
+    let mut config: Config = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
+    if !config.user_token.is_empty() && !valid_secret(&config.user_token) {
         return Err(Error::Storage);
+    }
+    // A personal API key saved by an older version is erased from the file.
+    if config.retired_mode.is_some()
+        || config.retired_key.is_some()
+        || config.retired_retry.is_some()
+    {
+        config.retired_mode = None;
+        config.retired_key = None;
+        config.retired_retry = None;
+        save_at(path, &config)?;
     }
     Ok(config)
 }
@@ -342,21 +336,35 @@ mod tests {
         let config = Config {
             source: Source::Vk,
             fallback_to_genius: true,
-            api_key: "synthetic-key".into(),
             user_token: "synthetic-token".into(),
             token_app_id: super::super::APP_ID.into(),
             token_retry_after: 123,
-            mode: Mode::ApiKey,
             ..Default::default()
         };
         save_at(&path, &config).unwrap();
         let restored = load_at(&path).unwrap();
-        assert_eq!(restored.api_key, "synthetic-key");
         assert_eq!(restored.user_token, "synthetic-token");
         assert!(restored.has_current_token());
-        assert_eq!(restored.status().mode, Mode::ApiKey);
         assert_eq!(restored.source, Source::Vk);
         assert!(restored.fallback_to_genius);
+        // An older file with a personal API key loads, and the key is erased.
+        let saved = fs::read_to_string(&path).unwrap();
+        let mut older: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        older["mode"] = "api_key".into();
+        older["api_key"] = "synthetic-retired-key".into();
+        older["api_retry_after"] = 9.into();
+        fs::write(&path, older.to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let restored = load_at(&path).unwrap();
+        assert_eq!(restored.user_token, "synthetic-token");
+        assert_eq!(restored.status().request_retry_after, 0);
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("synthetic-retired-key") && !rewritten.contains("api_key"));
+        assert!(!rewritten.contains("\"mode\""));
         fs::write(&path, b"invalid synthetic record").unwrap();
         assert!(load_at(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"invalid synthetic record");

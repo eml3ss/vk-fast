@@ -1,10 +1,9 @@
 //! Lyrics panel selection, background jobs and local provider settings.
 use super::*;
 use crate::{
-    lyrics::{self, ConfigAction, Error, Event, Mode, Query, Service, Source, Status, VkSession},
+    lyrics::{self, ConfigAction, Error, Event, Query, Service, Source, Status, VkSession},
     lyrics_ui,
 };
-use zeroize::Zeroizing;
 
 #[cfg(test)]
 #[path = "lyrics_app_tests.rs"]
@@ -25,7 +24,6 @@ pub(super) struct State {
     status: Option<Status>,
     settings_busy: bool,
     settings_error: Option<Error>,
-    key_input: Zeroizing<String>,
     view: lyrics_ui::State,
 }
 
@@ -103,7 +101,6 @@ impl MusicApp {
                             self.lyrics.status = Some(status);
                             if completed {
                                 self.lyrics.settings_error = None;
-                                self.lyrics.key_input.zeroize();
                                 self.lyrics.error = None;
                                 self.lyrics.data = None;
                                 self.lyrics.view.reset();
@@ -515,10 +512,11 @@ impl MusicApp {
                 _ => t("Искать в VK, если текст недоступен", "Fallback to VK"),
             };
             if ui
-                .add_enabled(
+                .add_enabled_ui(
                     !self.lyrics.settings_busy && self.lyrics.status.is_some(),
-                    egui::Checkbox::new(&mut fallback_other, label),
+                    |ui| theme::switch(ui, &mut fallback_other, label),
                 )
+                .inner
                 .changed()
             {
                 self.configure_lyrics(&ctx, ConfigAction::FallbackOther(fallback_other));
@@ -526,126 +524,66 @@ impl MusicApp {
         }
         let mut fallback = status.fallback_to_genius;
         if ui
-            .add_enabled(
+            .add_enabled_ui(
                 !self.lyrics.settings_busy
                     && self.lyrics.status.is_some()
                     && source != Source::Genius,
-                egui::Checkbox::new(
-                    &mut fallback,
-                    t(
-                        "Искать в Genius, если текст недоступен",
-                        "Fallback to Genius",
-                    ),
-                ),
+                |ui| {
+                    theme::switch(
+                        ui,
+                        &mut fallback,
+                        t(
+                            "Искать в Genius, если текст недоступен",
+                            "Fallback to Genius",
+                        ),
+                    )
+                },
             )
+            .inner
             .changed()
         {
             self.configure_lyrics(&ctx, ConfigAction::Fallback(fallback));
         }
         ui.add_space(8.0);
         if source == Source::Musixmatch {
-            let mut mode = status.mode;
-            ui.add_enabled_ui(
-                !self.lyrics.settings_busy && self.lyrics.status.is_some(),
-                |ui| {
-                    ui.radio_value(
-                        &mut mode,
-                        Mode::Anonymous,
-                        t("Анонимный доступ", "Anonymous access"),
-                    );
-                    ui.radio_value(
-                        &mut mode,
-                        Mode::ApiKey,
-                        t("Свой API-ключ", "Personal API key"),
-                    );
-                },
+            ui.label(
+                RichText::new(if status.token_rejected {
+                    t(
+                        "Токен Musixmatch отклонён. Обновите его.",
+                        "The Musixmatch token was rejected. Renew it.",
+                    )
+                } else if status.token_ready {
+                    t("Токен Musixmatch готов.", "The Musixmatch token is ready.")
+                } else {
+                    t(
+                        "Токен Musixmatch создастся при первом открытии текста.",
+                        "A Musixmatch token will be created when you first open lyrics.",
+                    )
+                })
+                .small()
+                .color(MUTED),
             );
-            if mode != status.mode {
-                self.lyrics.status = Some(Status { mode, ..status });
-                self.configure_lyrics(&ctx, ConfigAction::Mode(mode));
+            if ui
+                .add_enabled(
+                    !self.lyrics.settings_busy
+                        && self.lyrics.pending.is_none()
+                        && self.lyrics.status.is_some()
+                        && status.token_retry_after <= unix_now(),
+                    egui::Button::new(t("Обновить токен Musixmatch", "Renew Musixmatch token")),
+                )
+                .clicked()
+            {
+                self.configure_lyrics(&ctx, ConfigAction::Generate);
             }
-            ui.add_space(10.0);
-            match mode {
-                Mode::Anonymous => {
-                    ui.label(
-                        RichText::new(if status.token_rejected {
-                            t(
-                                "Токен отклонён. Создайте новый или используйте API-ключ.",
-                                "The token was rejected. Generate another one or use an API key.",
-                            )
-                        } else if status.token_ready {
-                            t("Анонимный токен готов.", "Anonymous token is ready.")
-                        } else {
-                            t(
-                                "Токен создастся при первом открытии текста.",
-                                "A token will be created when you first open lyrics.",
-                            )
-                        })
-                        .small()
-                        .color(MUTED),
-                    );
-                    if ui
-                        .add_enabled(
-                            !self.lyrics.settings_busy
-                                && self.lyrics.pending.is_none()
-                                && self.lyrics.status.is_some()
-                                && status.token_retry_after <= unix_now(),
-                            egui::Button::new(if status.token_ready {
-                                t("Обновить токен", "Renew token")
-                            } else {
-                                t("Создать анонимный токен", "Generate anonymous token")
-                            }),
-                        )
-                        .clicked()
-                    {
-                        self.configure_lyrics(&ctx, ConfigAction::Generate);
-                    }
-                    if status.token_retry_after > unix_now() {
-                        ui.label(
-                            RichText::new(t(
-                                "Повторная генерация будет доступна позже.",
-                                "Token generation will be available again later.",
-                            ))
-                            .small()
-                            .color(MUTED),
-                        );
-                    }
-                }
-                Mode::ApiKey => {
-                    if status.key_ready {
-                        ui.label(
-                            RichText::new(t("API-ключ задан.", "API key is configured."))
-                                .small()
-                                .color(MUTED),
-                        );
-                    }
-                    let field = ui.add_enabled(
-                        !self.lyrics.settings_busy,
-                        egui::TextEdit::singleline(&mut *self.lyrics.key_input)
-                            .password(true)
-                            .char_limit(4096)
-                            .desired_width(ui.available_width())
-                            .hint_text(t("API-ключ Musixmatch", "Musixmatch API key")),
-                    );
-                    if let Some(mut state) = egui::TextEdit::load_state(&ctx, field.id) {
-                        state.clear_undoer();
-                        egui::TextEdit::store_state(&ctx, field.id, state);
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.lyrics.settings_busy && !self.lyrics.key_input.trim().is_empty(),
-                            egui::Button::new(t("Сохранить ключ", "Save key")),
-                        )
-                        .clicked()
-                    {
-                        self.configure_lyrics(
-                            &ctx,
-                            ConfigAction::ApiKey(Zeroizing::new(
-                                self.lyrics.key_input.trim().to_owned(),
-                            )),
-                        );
-                    }
-                }
+            if status.token_retry_after > unix_now() {
+                ui.label(
+                    RichText::new(t(
+                        "Повторное обновление будет доступно позже.",
+                        "The token can be renewed again later.",
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
             }
         }
         if self.lyrics.settings_busy {

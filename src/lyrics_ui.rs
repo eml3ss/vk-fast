@@ -374,7 +374,7 @@ pub fn show(
                 theme::MUTED,
             ),
         );
-        if !matches!(error, Error::MissingKey | Error::Auth | Error::Storage)
+        if !matches!(error, Error::Auth | Error::Storage)
             && ui
                 .add_enabled_ui(view.retry_allowed, |ui| {
                     ui.put(

@@ -14,9 +14,8 @@ mod store;
 #[path = "lyrics_vk.rs"]
 mod vk;
 pub use service::{ConfigAction, Event, Service, VkSession};
-pub use store::{Mode, Source, Status};
+pub use store::{Source, Status};
 
-const API: &str = "https://api.musixmatch.com/ws/1.1/";
 const ANONYMOUS_API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
 const APP_ID: &str = "mac-ios-v2.0";
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
@@ -93,7 +92,6 @@ impl Lyrics {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    MissingKey,
     NoSession,
     Auth,
     Restricted,
@@ -109,10 +107,6 @@ impl Error {
     pub fn message(self, language: Language) -> &'static str {
         let t = |ru, en| language.text(ru, en);
         match self {
-            Self::MissingKey => t(
-                "Добавьте API-ключ или выберите анонимный режим в настройках текстов.",
-                "Add an API key or choose anonymous mode in lyrics settings.",
-            ),
             Self::NoSession => t(
                 "Войдите в VK для загрузки текста.",
                 "Sign in to VK to load lyrics.",
@@ -289,87 +283,20 @@ impl Provider {
         if !query.album.is_empty() {
             params.push(("q_album", query.album.as_str()));
         }
-        match config.mode {
-            Mode::Anonymous => {
-                params.extend([
-                    ("app_id", APP_ID),
-                    ("usertoken", config.user_token.as_str()),
-                    ("subtitle_format", "mxm"),
-                ]);
-                if query.duration > 0 {
-                    params.extend([
-                        ("q_duration", duration.as_str()),
-                        ("f_subtitle_length", duration.as_str()),
-                        ("f_subtitle_length_max_deviation", deviation.as_str()),
-                    ]);
-                }
-                let value =
-                    self.request(ANONYMOUS_API, "macro.subtitles.get", &params, canceled)?;
-                parse_macro(&value, query).map(Arc::new)
-            }
-            Mode::ApiKey => {
-                if config.api_key.is_empty() {
-                    return Err(Error::MissingKey);
-                }
-                params.push(("apikey", config.api_key.as_str()));
-                let matched = self.request(API, "matcher.track.get", &params, canceled)?;
-                let track = matched.get("track").ok_or(Error::NotFound)?;
-                validate_match(track, query)?;
-                if flag(track.get("instrumental")) {
-                    let mut lyrics = Lyrics {
-                        lines: Vec::new(),
-                        synced: false,
-                        instrumental: true,
-                        _copyright: String::new(),
-                        source_url: None,
-                        tracking_url: None,
-                    };
-                    complete_metadata(&mut lyrics, Some(track), query);
-                    return Ok(Arc::new(lyrics));
-                }
-                let id = track
-                    .get("track_id")
-                    .and_then(number)
-                    .filter(|id| *id > 0)
-                    .ok_or(Error::NotFound)?
-                    .to_string();
-                let auth = [
-                    ("apikey", config.api_key.as_str()),
-                    ("track_id", id.as_str()),
-                    ("format", "json"),
-                ];
-                let mut subtitle_params = auth.to_vec();
-                subtitle_params.push(("subtitle_format", "lrc"));
-                if query.duration > 0 {
-                    subtitle_params.extend([
-                        ("f_subtitle_length", duration.as_str()),
-                        ("f_subtitle_length_max_deviation", deviation.as_str()),
-                    ]);
-                }
-                let subtitle = self.request(API, "track.subtitle.get", &subtitle_params, canceled);
-                if let Err(
-                    error @ (Error::Auth
-                    | Error::Captcha
-                    | Error::RateLimited(_)
-                    | Error::Canceled
-                    | Error::Network),
-                ) = subtitle
-                {
-                    return Err(error);
-                }
-                if let Ok(data) = subtitle
-                    && let Some(subtitle) = data.get("subtitle")
-                    && let Ok(mut lyrics) = parse_subtitle(subtitle)
-                {
-                    complete_metadata(&mut lyrics, Some(track), query);
-                    return Ok(Arc::new(lyrics));
-                }
-                let data = self.request(API, "track.lyrics.get", &auth, canceled)?;
-                let mut lyrics = parse_plain(data.get("lyrics").ok_or(Error::NotFound)?)?;
-                complete_metadata(&mut lyrics, Some(track), query);
-                Ok(Arc::new(lyrics))
-            }
+        params.extend([
+            ("app_id", APP_ID),
+            ("usertoken", config.user_token.as_str()),
+            ("subtitle_format", "mxm"),
+        ]);
+        if query.duration > 0 {
+            params.extend([
+                ("q_duration", duration.as_str()),
+                ("f_subtitle_length", duration.as_str()),
+                ("f_subtitle_length_max_deviation", deviation.as_str()),
+            ]);
         }
+        let value = self.request(ANONYMOUS_API, "macro.subtitles.get", &params, canceled)?;
+        parse_macro(&value, query).map(Arc::new)
     }
 }
 
