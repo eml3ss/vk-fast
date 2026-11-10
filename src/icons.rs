@@ -1043,9 +1043,8 @@ pub fn track_button(
                 label,
             )
         });
-        response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(label)
+        // Like, dislike and track mix are buttons, not links: the arrow.
+        response.on_hover_text(label)
     })
     .inner
 }
@@ -1700,6 +1699,11 @@ mod tests {
             let _ = frame(event(true));
             let (output, response) = frame(event(false));
             assert_eq!(response.clicked(), !pending);
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                egui::CursorIcon::Default,
+                "a button, not a link"
+            );
             if !pending {
                 assert!(output.platform_output.events.iter().any(|event| matches!(event,egui::output::OutputEvent::Clicked(info) if info.typ == egui::WidgetType::Checkbox && info.selected == Some(liked))));
             }
