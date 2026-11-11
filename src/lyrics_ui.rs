@@ -539,14 +539,27 @@ fn lines(
         state.followed = None;
     }
     state.last_position = Some(position);
+    // Only the wheel over the lines, or a press that began on them (a drag
+    // of the lines or their scrollbar), leaves the current line. A button
+    // held down elsewhere, such as on the seek bar, may pass over the lines.
     let manually_scrolling = ui.input(|input| {
-        input
+        let over = input
             .pointer
             .hover_pos()
-            .is_some_and(|point| rect.contains(point))
-            && (input.events.iter().any(|event|matches!(event,egui::Event::MouseWheel{delta,..} if *delta!=egui::Vec2::ZERO))
-                || (input.pointer.primary_down() && input.pointer.interact_pos().is_some_and(|point|point.x>rect.right()-16.0
-                    || input.pointer.press_origin().is_some_and(|start|point.distance(start)>4.0))))
+            .is_some_and(|point| rect.contains(point));
+        let wheel = input.events.iter().any(|event| {
+            matches!(event, egui::Event::MouseWheel { delta, .. } if *delta != egui::Vec2::ZERO)
+        });
+        let dragged_here = input.pointer.primary_down()
+            && input
+                .pointer
+                .press_origin()
+                .filter(|start| rect.contains(*start))
+                .zip(input.pointer.interact_pos())
+                .is_some_and(|(start, point)| {
+                    start.x > rect.right() - 16.0 || point.distance(start) > 4.0
+                });
+        (over && wheel) || dragged_here
     });
     if manually_scrolling {
         state.follow = false;
@@ -928,6 +941,57 @@ mod tests {
         assert!(
             (current_rect.left() - other_rect.left()).abs() < 1.0,
             "grows from the left"
+        );
+    }
+
+    #[test]
+    fn a_button_held_down_elsewhere_passes_over_the_lines_without_leaving_the_current_line() {
+        let data = crate::lyrics::test_data(80, true);
+        let size = egui::vec2(600.0, 400.0);
+        // The lines take the top 300 points; below them is, say, the seek bar.
+        let area = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let follows_after = |press: egui::Pos2| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut state = State::default();
+            let mut tick = 0;
+            let mut frame = |state: &mut State, events: Vec<egui::Event>| {
+                tick += 1;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        time: Some(f64::from(tick) * 0.1),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        lines(ui, state, area, &data, 35.0, 18.0, false, true);
+                    },
+                );
+                output.textures_delta.clear();
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(&mut state, vec![egui::Event::PointerMoved(press)]);
+            frame(&mut state, vec![button(press, true)]);
+            for y in [250.0, 200.0, 150.0, 100.0] {
+                let point = egui::pos2(press.x, y);
+                frame(&mut state, vec![egui::Event::PointerMoved(point)]);
+            }
+            frame(&mut state, vec![button(egui::pos2(press.x, 100.0), false)]);
+            state.follow
+        };
+        assert!(
+            follows_after(egui::pos2(300.0, 350.0)),
+            "a press below the lines that drifts over them"
+        );
+        assert!(
+            !follows_after(egui::pos2(300.0, 280.0)),
+            "dragging the lines themselves"
         );
     }
 
