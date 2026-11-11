@@ -2768,6 +2768,18 @@ impl MusicApp {
         }
     }
 
+    /// Whether Next has somewhere to go: a next track, more of the library
+    /// or the mix to load, or the mix that starts when the queue ends.
+    fn next_available(&self) -> bool {
+        self.adjacent_track(true).is_some()
+            || (self.library_queue_active() && !self.library.exhausted)
+            || (self.mix_active && self.mix_has_more)
+            || (self.mix_after_queue
+                && !self.mix_active
+                && self.playing.is_some()
+                && self.search_ready())
+    }
+
     fn next_track(&mut self, ctx: &egui::Context) {
         self.unavailable_playback.clear();
         if self.restart_repeated_track(ctx) {
@@ -9007,10 +9019,7 @@ impl MusicApp {
                     ui,
                     Icon::Next,
                     t("Следующий трек", "Next track"),
-                    ready
-                        && (self.adjacent_track(true).is_some()
-                            || (self.library_queue_active() && !self.library.exhausted)
-                            || (self.mix_active && self.mix_has_more)),
+                    ready && self.next_available(),
                     false,
                 );
                 release_pointer_focus(&next);

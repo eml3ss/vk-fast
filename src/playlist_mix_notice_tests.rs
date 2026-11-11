@@ -281,3 +281,42 @@ fn a_track_mix_stops_once_every_queued_track_was_a_source() {
     assert_eq!(app.mix_seed, Some(MixSeed::Track((-8, 91))));
     assert_eq!(app.mix_error, Some(WebAudioError::Pagination));
 }
+
+#[test]
+fn next_on_the_last_queued_track_starts_the_mix_when_the_setting_is_on() {
+    let ctx = egui::Context::default();
+    let mut app = search_test_app(&ctx);
+    app.demo = false;
+    // A synthetic client: nothing here asks VK, the check only reads state.
+    app.session.as_mut().unwrap().music = Some(
+        WebAudioClient::new(vec![crate::web_session::SessionCookie {
+            domain: ".vk.ru".into(),
+            path: "/".into(),
+            name: "remixsid".into(),
+            value: "synthetic-next-test".into(),
+            secure: true,
+            expires_unix: None,
+        }])
+        .unwrap(),
+    );
+    app.library.exhausted = true;
+    let queue = page(2, &[91, 92]).items;
+    app.playing = Some(queue[1].clone());
+    app.selected = app.playing.as_ref().map(Track::key);
+    app.play_queue = Some(queue);
+    app.queue_origin = Some("playlist:42_9".into());
+    app.synchronize_order();
+    assert_eq!(
+        app.adjacent_track(true),
+        None,
+        "the last track of the queue"
+    );
+    app.mix_after_queue = false;
+    assert!(!app.next_available());
+    app.mix_after_queue = true;
+    assert!(
+        app.next_available(),
+        "Next starts the mix of the last track"
+    );
+    assert!(app.workers.is_empty());
+}
