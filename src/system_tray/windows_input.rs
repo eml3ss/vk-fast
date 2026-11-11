@@ -1,5 +1,5 @@
-//! Shell double-click notifications arrive on button-down. Never restore an
-//! application from that phase or dispatch the following release twice.
+//! Shell double-click notifications arrive on button-down. Only dispatch the
+//! tray action on release, once per click or double-click.
 use super::Command;
 
 #[derive(Clone, Copy, Debug)]
@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn a_double_click_never_activates_while_pressed_or_repeats_the_first_show() {
+    fn a_double_click_never_dispatches_a_second_action() {
         let mut gate = ActivationGate::default();
         let actions: Vec<_> = [
             LeftClick::Press,

@@ -6,7 +6,6 @@ use skrifa::MetadataProvider;
 use std::{
     collections::HashSet,
     fs::File,
-    io::Read,
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     thread::JoinHandle,
@@ -264,6 +263,7 @@ fn candidates() -> Vec<Candidate> {
 #[cfg(not(windows))]
 fn fontconfig() -> Vec<Candidate> {
     use std::{
+        io::Read,
         process::{Command, Stdio},
         time::{Duration, Instant},
     };

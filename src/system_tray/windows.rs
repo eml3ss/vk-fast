@@ -79,8 +79,8 @@ fn register_handlers() {
                     .and_then(|route| route.activation.input(input).then(|| route.relay.clone()))
             });
             if let Some(relay) = relay {
-                crate::diagnostics::event("tray.windows", "left_button_released_show");
-                relay.emit(Command::Show);
+                crate::diagnostics::event("tray.windows", "left_button_released_toggle_window");
+                relay.emit(Command::ToggleWindow);
             }
         }));
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
@@ -95,6 +95,7 @@ fn register_handlers() {
                     "tray.windows",
                     match command {
                         Command::Show => "menu_show",
+                        Command::ToggleWindow => "menu_toggle_window",
                         Command::TogglePlayback => "menu_toggle_playback",
                         Command::Next => "menu_next",
                         Command::Previous => "menu_previous",

@@ -1,4 +1,4 @@
-//! Closing may hide the native window only while a working tray can restore it.
+//! The native window may be hidden only while a working tray can restore it.
 use super::*;
 use crate::system_tray::{Command, SystemTray};
 
@@ -119,7 +119,18 @@ impl MusicApp {
             return;
         }
         match command {
-            Command::Show => self.show_application(ctx),
+            Command::ToggleWindow
+                if !self.tray.hidden
+                    && !self.window_reopen
+                    && ctx.input(|input| {
+                        let window = input.viewport();
+                        window.focused == Some(true) && window.minimized != Some(true)
+                    }) =>
+            {
+                self.hide_native_window(ctx);
+                crate::diagnostics::event("tray", "click: hide_native_window");
+            }
+            Command::Show | Command::ToggleWindow => self.show_application(ctx),
             Command::TogglePlayback => {
                 self.handle_system_media_command(ctx, crate::system_media::Command::Toggle)
             }
@@ -139,6 +150,11 @@ impl MusicApp {
         }
     }
 
+    fn hide_native_window(&mut self, ctx: &egui::Context) {
+        self.tray.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
     fn intercept_tray_close(&mut self, ctx: &egui::Context, available: bool) {
         if self.minimize_to_tray
             && available
@@ -146,14 +162,14 @@ impl MusicApp {
             && !self.window_reopen
             && ctx.input(|input| input.viewport().close_requested())
         {
-            self.tray.hidden = true;
             if self.tray.wayland {
+                self.tray.hidden = true;
                 self.tray.native_hidden = true;
                 crate::diagnostics::event("tray", "close: park_resident_app");
                 return;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hide_native_window(ctx);
             crate::diagnostics::event("tray", "close: hide_native_window");
         }
     }
@@ -239,6 +255,73 @@ mod tests {
             .events
             .push(egui::ViewportEvent::Close);
         ctx.run_logic(&raw, |ctx| app.intercept_tray_close(ctx, available))
+    }
+
+    fn window_action(
+        ctx: &egui::Context,
+        app: &mut MusicApp,
+        command: Command,
+        focused: Option<bool>,
+        minimized: bool,
+    ) -> Vec<egui::ViewportCommand> {
+        let mut raw = egui::RawInput {
+            focused: focused.unwrap_or(false),
+            ..Default::default()
+        };
+        let viewport = raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        viewport.focused = focused;
+        viewport.minimized = Some(minimized);
+        ctx.run_logic(&raw, |ctx| app.handle_tray_command(ctx, command))
+            .viewport_commands
+            .remove(&egui::ViewportId::ROOT)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn focused_tray_click_hides_and_the_next_click_restores_without_changing_playback() {
+        use egui::ViewportCommand::{Focus, Minimized, Visible};
+
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let track = page(1, &[1]).items.remove(0);
+        app.playing = Some(track.clone());
+        app.play_queue = Some(vec![track.clone()]);
+        app.resume_position = Some(42.0);
+        app.minimize_to_tray = true;
+
+        assert_eq!(
+            window_action(&ctx, &mut app, Command::ToggleWindow, Some(true), false),
+            [Visible(false)]
+        );
+        assert!(app.tray.hidden && !app.tray.quitting);
+        assert_eq!(
+            window_action(&ctx, &mut app, Command::ToggleWindow, Some(false), false),
+            [Visible(true), Minimized(false), Focus]
+        );
+        assert!(!app.tray.hidden && !app.window_reopen);
+        assert_eq!(app.playing.as_ref().unwrap().key(), track.key());
+        assert_eq!(app.play_queue.as_ref().unwrap().len(), 1);
+        assert_eq!(app.resume_position, Some(42.0));
+    }
+
+    #[test]
+    fn inactive_or_minimized_tray_click_and_explicit_open_all_show_the_window() {
+        use egui::ViewportCommand::{Focus, Minimized, Visible};
+
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        for (command, focused, minimized) in [
+            (Command::ToggleWindow, Some(false), false),
+            (Command::ToggleWindow, Some(true), true),
+            (Command::ToggleWindow, None, false),
+            (Command::Show, Some(true), false),
+        ] {
+            assert_eq!(
+                window_action(&ctx, &mut app, command, focused, minimized),
+                [Visible(true), Minimized(false), Focus]
+            );
+            assert!(!app.tray.hidden);
+        }
     }
 
     #[test]

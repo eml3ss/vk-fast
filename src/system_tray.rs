@@ -25,6 +25,7 @@ mod platform;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Show,
+    ToggleWindow,
     TogglePlayback,
     Previous,
     Next,
@@ -44,6 +45,7 @@ impl std::error::Error for Error {}
 const URGENT_SHOW: u8 = 1;
 const URGENT_QUIT: u8 = 2;
 const URGENT_UNAVAILABLE: u8 = 4;
+const URGENT_TOGGLE_WINDOW: u8 = 8;
 
 #[derive(Clone)]
 struct Relay {
@@ -59,6 +61,10 @@ impl Relay {
             // media-button events in the bounded ordinary command channel.
             Command::Show => {
                 self.urgent.fetch_or(URGENT_SHOW, Ordering::Release);
+            }
+            Command::ToggleWindow => {
+                self.urgent
+                    .fetch_or(URGENT_TOGGLE_WINDOW, Ordering::Release);
             }
             Command::Quit => {
                 self.urgent.fetch_or(URGENT_QUIT, Ordering::Release);
@@ -131,17 +137,7 @@ impl SystemTray {
     }
 
     pub fn drain_commands(&mut self) -> Vec<Command> {
-        let urgent = self.urgent.swap(0, Ordering::AcqRel);
-        let mut commands: Vec<_> = self.receiver.try_iter().collect();
-        if urgent & URGENT_QUIT != 0 {
-            return vec![Command::Quit];
-        }
-        if urgent & URGENT_UNAVAILABLE != 0 {
-            commands.insert(0, Command::Unavailable);
-        } else if urgent & URGENT_SHOW != 0 {
-            commands.insert(0, Command::Show);
-        }
-        commands
+        drain_commands(&self.receiver, &self.urgent)
     }
 
     pub fn set_state(&mut self, language: Language, playing: bool) {
@@ -152,6 +148,22 @@ impl SystemTray {
         self.playing = playing;
         self.backend.set_state(language, playing);
     }
+}
+
+fn drain_commands(receiver: &Receiver<Command>, urgent: &AtomicU8) -> Vec<Command> {
+    let urgent = urgent.swap(0, Ordering::AcqRel);
+    let mut commands: Vec<_> = receiver.try_iter().collect();
+    if urgent & URGENT_QUIT != 0 {
+        return vec![Command::Quit];
+    }
+    if urgent & URGENT_UNAVAILABLE != 0 {
+        commands.insert(0, Command::Unavailable);
+    } else if urgent & URGENT_SHOW != 0 {
+        commands.insert(0, Command::Show);
+    } else if urgent & URGENT_TOGGLE_WINDOW != 0 {
+        commands.insert(0, Command::ToggleWindow);
+    }
+    commands
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -174,7 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exit_and_restore_are_not_lost_when_media_commands_fill_the_channel() {
+    fn window_commands_survive_media_backlog_and_explicit_actions_override_toggling() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let urgent = Arc::new(AtomicU8::new(0));
         let relay = Relay {
@@ -184,14 +196,16 @@ mod tests {
         };
         relay.emit(Command::Next);
         relay.emit(Command::TogglePlayback);
-        relay.emit(Command::Show);
-        relay.emit(Command::Unavailable);
-        relay.emit(Command::Quit);
-        assert_eq!(receiver.try_recv().unwrap(), Command::Next);
+        relay.emit(Command::ToggleWindow);
         assert_eq!(
-            urgent.load(Ordering::Acquire),
-            URGENT_SHOW | URGENT_UNAVAILABLE | URGENT_QUIT
+            drain_commands(&receiver, &urgent),
+            [Command::ToggleWindow, Command::Next]
         );
+        for command in [Command::Show, Command::Unavailable, Command::Quit] {
+            relay.emit(Command::ToggleWindow);
+            relay.emit(command);
+            assert_eq!(drain_commands(&receiver, &urgent), [command]);
+        }
     }
 
     #[test]
