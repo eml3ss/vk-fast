@@ -442,7 +442,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Palette => {
             // A painter's palette: a round board with a notch for the thumb
-            // at the lower right, and three paint dabs.
+            // at the lower right, and four paint dabs.
             let (from, to) = (55.0_f32, 345.0_f32);
             let mut outline: Vec<egui::Pos2> = (0..=40)
                 .map(|i| {
@@ -469,8 +469,15 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 ));
             }
             painter.add(egui::Shape::closed_line(outline, stroke));
-            for (x, y) in [(7.5, 11.5), (10.0, 7.0), (15.0, 6.5)] {
-                painter.circle_filled(point(x, y), 1.6 * scale, color);
+            // Four dabs on an arc between the middle and the rim, across
+            // from the thumb's bite.
+            for angle in [140.0_f32, 195.0, 250.0, 305.0] {
+                let angle = angle.to_radians();
+                painter.circle_filled(
+                    point(12.0 + 4.8 * angle.cos(), 12.0 + 4.8 * angle.sin()),
+                    1.5 * scale,
+                    color,
+                );
             }
         }
         Icon::Storage => {
