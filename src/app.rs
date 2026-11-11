@@ -1635,7 +1635,7 @@ impl MusicApp {
         // Before the first frame, so the window never shows another theme.
         // Tests keep the default theme: it is one global for all of them.
         let (appearance, accent) = if cfg!(test) {
-            (theme::Theme::default(), theme::Accent::default().color())
+            (theme::Theme::default(), crate::palette::THEME_ACCENT)
         } else {
             (preferences::load_theme(), preferences::load_accent())
         };
@@ -10906,8 +10906,12 @@ impl MusicApp {
                 if query.matches(Setting::Accent) {
                     ui.label(t("Цвет акцента", "Accent colour"));
                     ui.add_space(4.0);
-                    let outcome =
-                        crate::appearance_ui::accent_picker(ui, &mut self.accent, language);
+                    let outcome = crate::appearance_ui::accent_picker(
+                        ui,
+                        &mut self.accent,
+                        self.theme.palette().own_accent(),
+                        language,
+                    );
                     if outcome.changed {
                         theme::apply(ui.ctx(), self.theme, self.accent);
                         // A drag in the picker writes the file once, after it.

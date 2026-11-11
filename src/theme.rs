@@ -1,6 +1,8 @@
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
-pub use crate::palette::{Accent, Theme};
+#[cfg(test)]
+pub use crate::palette::Accent;
+pub use crate::palette::Theme;
 
 // The colours of the active theme (`crate::palette`), read on every paint so
 // a theme switch shows at once.

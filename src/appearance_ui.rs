@@ -221,15 +221,24 @@ pub struct AccentOutcome {
     pub dragging: bool,
 }
 
-/// Ready accents as round swatches, then egui's own colour button for any
-/// other colour.
-pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language) -> AccentOutcome {
+/// Ready accents as round swatches, then the custom colour. `own` is the
+/// active theme's own accent when it is not blue: with no accent picked it
+/// shows, ringed, as the custom colour; with none, blue stands for the
+/// theme's own accent.
+pub fn accent_picker(
+    ui: &mut egui::Ui,
+    accent: &mut Color32,
+    own: Option<Color32>,
+    language: Language,
+) -> AccentOutcome {
     let mut outcome = AccentOutcome::default();
+    let theme_accent = *accent == crate::palette::THEME_ACCENT;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
         for choice in Accent::ALL {
             let title = choice.title(language);
-            let selected = *accent == choice.color();
+            let selected = *accent == choice.color()
+                || (theme_accent && own.is_none() && choice == Accent::Blue);
             let (rect, response) =
                 ui.allocate_exact_size(egui::Vec2::splat(SWATCH), Sense::click());
             response.widget_info(|| {
@@ -256,12 +265,23 @@ pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language
                 }
             }
             if response.clicked() && !selected {
-                *accent = choice.color();
+                // Blue in a blue theme is the theme's own accent, as before.
+                *accent = if choice == Accent::Blue && own.is_none() {
+                    crate::palette::THEME_ACCENT
+                } else {
+                    choice.color()
+                };
                 outcome.changed = true;
             }
         }
         ui.add_space(6.0);
-        let custom = Accent::of(*accent).is_none();
+        // The theme's own accent counts as a custom colour of its own.
+        let shown = if theme_accent {
+            own.unwrap_or(Accent::Blue.color())
+        } else {
+            *accent
+        };
+        let custom = Accent::of(*accent).is_none() && (!theme_accent || own.is_some());
         // The picked colour as a rounded plate drawn like the swatches
         // (egui's own colour button keeps its corners nearly square); it
         // opens egui's colour picker.
@@ -272,8 +292,7 @@ pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language
         if ui.is_rect_visible(rect) {
             let hovered = response.hovered() || egui::Popup::is_id_open(ui.ctx(), popup);
             let plate = rect.shrink(if hovered { 3.0 } else { 4.0 });
-            ui.painter()
-                .rect_filled(plate, plate.height() * 0.5, *accent);
+            ui.painter().rect_filled(plate, plate.height() * 0.5, shown);
             if custom {
                 // The picked colour is ringed like a chosen swatch.
                 let ring = rect.shrink(1.0);
@@ -289,7 +308,9 @@ pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language
             .id(popup)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                if color_picker(ui, accent) {
+                let mut picked = shown;
+                if color_picker(ui, &mut picked) {
+                    *accent = picked;
                     outcome.changed = true;
                 }
             });
@@ -707,7 +728,7 @@ mod tests {
                 },
                 |ui| {
                     theme_cards(ui, &mut self.theme, self.accent, Language::English);
-                    accent_picker(ui, &mut self.accent, Language::English);
+                    accent_picker(ui, &mut self.accent, None, Language::English);
                 },
             );
             output.textures_delta.clear();
@@ -933,6 +954,77 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_with_its_own_accent_shows_it_ringed_as_the_custom_colour() {
+        let green = Color32::from_rgb(0x67, 0xe4, 0x95);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut accent = crate::palette::THEME_ACCENT;
+        let run = |accent: &mut Color32, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 200.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    accent_picker(ui, accent, Some(green), Language::English);
+                },
+            );
+            output.textures_delta.clear();
+            let mut shapes = Vec::new();
+            for shape in output.shapes {
+                let mut stack = vec![shape.shape];
+                while let Some(shape) = stack.pop() {
+                    match shape {
+                        egui::Shape::Vec(inner) => stack.extend(inner),
+                        other => shapes.push(other),
+                    }
+                }
+            }
+            shapes
+        };
+        let shapes = run(&mut accent, Vec::new());
+        let plate = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Rect(rect) if rect.fill == green => Some(rect.rect),
+                _ => None,
+            })
+            .expect("the theme's green as the custom colour");
+        assert!(
+            shapes.iter().any(|shape| matches!(shape,
+                egui::Shape::Rect(rect) if rect.stroke.width == 2.0 && rect.rect.contains_rect(plate))),
+            "ringed as chosen"
+        );
+        assert!(
+            !shapes.iter().any(
+                |shape| matches!(shape, egui::Shape::Circle(circle) if circle.stroke.width == 2.0)
+            ),
+            "no ready swatch is ringed, blue included"
+        );
+        // Blue is a real choice here: it turns the theme blue.
+        let blue = egui::pos2(SWATCH * 0.5, SWATCH * 0.5);
+        for pressed in [true, false] {
+            run(
+                &mut accent,
+                vec![
+                    egui::Event::PointerMoved(blue),
+                    egui::Event::PointerButton {
+                        pos: blue,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(accent, Accent::Blue.color());
+    }
+
+    #[test]
     fn a_swatch_click_picks_its_accent_and_any_colour_counts_as_custom() {
         let mut page = Page::new();
         page.frame(Vec::new());
@@ -944,6 +1036,9 @@ mod tests {
         assert_eq!(Accent::of(page.accent), Some(Accent::Violet));
         page.accent = Color32::from_rgb(1, 2, 3);
         assert_eq!(Accent::of(page.accent), None);
-        assert_eq!(crate::palette::active_accent(), Accent::Blue.color());
+        assert_eq!(
+            crate::palette::active_accent(),
+            crate::palette::THEME_ACCENT
+        );
     }
 }

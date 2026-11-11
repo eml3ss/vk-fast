@@ -325,8 +325,12 @@ impl MusicApp {
                     self.language,
                     self.theme.diagnostic_code(),
                     // A picked colour is logged only as custom.
-                    crate::palette::Accent::of(self.accent)
-                        .map_or("custom", crate::palette::Accent::code),
+                    if self.accent == crate::palette::THEME_ACCENT {
+                        "theme"
+                    } else {
+                        crate::palette::Accent::of(self.accent)
+                            .map_or("custom", crate::palette::Accent::code)
+                    },
                     self.minimize_to_tray,
                     self.discord_rpc_enabled,
                     self.broadcast,

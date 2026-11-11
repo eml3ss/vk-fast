@@ -146,9 +146,12 @@ pub fn parse_accent(code: &str) -> Option<Color32> {
     Some(Color32::from_rgb(channel(0)?, channel(2)?, channel(4)?))
 }
 
-/// How `accent` is saved: a ready accent by name, any other colour as
-/// `#rrggbb`.
+/// How `accent` is saved: the theme's own as nothing, a ready accent by
+/// name, any other colour as `#rrggbb`.
 pub fn accent_code(accent: Color32) -> String {
+    if accent == THEME_ACCENT {
+        return String::new();
+    }
     Accent::of(accent).map_or_else(
         || format!("#{:02x}{:02x}{:02x}", accent.r(), accent.g(), accent.b()),
         |accent| accent.code().to_owned(),
@@ -257,8 +260,12 @@ fn deserialize_optional_color<'de, D: Deserializer<'de>>(
 }
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-/// The accent as `0x00rrggbb`.
-static ACCENT: AtomicU32 = AtomicU32::new(0x0036_70c4);
+/// The accent as `0xaarrggbb`; [`THEME_ACCENT`] (all zero) by default.
+static ACCENT: AtomicU32 = AtomicU32::new(0);
+
+/// No accent of its own picked: every theme keeps its own accent colour
+/// (blue for the built-in ones). Saved as an empty `accent`.
+pub const THEME_ACCENT: Color32 = Color32::TRANSPARENT;
 
 thread_local! {
     /// Scenes over covers can use the original dark palette regardless of the
@@ -294,16 +301,22 @@ pub fn set_active(theme: Theme) {
 
 /// The accent the app is drawn with now.
 pub fn active_accent() -> Color32 {
-    let [_, r, g, b] = ACCENT.load(Ordering::Relaxed).to_be_bytes();
-    Color32::from_rgb(r, g, b)
+    let [a, r, g, b] = ACCENT.load(Ordering::Relaxed).to_be_bytes();
+    if a == 0 {
+        THEME_ACCENT
+    } else {
+        Color32::from_rgb(r, g, b)
+    }
 }
 
 /// Draw with `accent` instead of the theme's blue from the next paint on.
 pub fn set_accent(accent: Color32) {
-    ACCENT.store(
-        u32::from_be_bytes([0, accent.r(), accent.g(), accent.b()]),
-        Ordering::Relaxed,
-    );
+    let packed = if accent == THEME_ACCENT {
+        0
+    } else {
+        u32::from_be_bytes([255, accent.r(), accent.g(), accent.b()])
+    };
+    ACCENT.store(packed, Ordering::Relaxed);
 }
 
 /// The colours of the active theme with the active accent.
@@ -355,6 +368,33 @@ fn luma(color: [f32; 3]) -> f32 {
     color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114
 }
 
+/// `color`, a shade of the `from` accent's family, in the same place of the
+/// `to` accent's family: its hue turned by as much as the accents', its
+/// saturation scaled alike, and `from`'s lightness becoming `to`'s.
+fn shift(color: Color32, from: Color32, to: Color32) -> Color32 {
+    if from == to {
+        return color;
+    }
+    let [from_hue, from_saturation, from_lightness] = hsl(from);
+    let from_lightness = from_lightness.clamp(0.05, 0.95);
+    let [hue, saturation, accent_lightness] = hsl(to);
+    // Any colour can be picked: very dark or light ones are brought to a
+    // brightness that still reads on the page and under white text.
+    let accent_lightness = accent_lightness.clamp(0.3, 0.66);
+    let [own_hue, own_saturation, lightness] = hsl(color);
+    let saturation =
+        (own_saturation * saturation / from_saturation.max(f32::EPSILON)).clamp(0.0, 1.0);
+    // The old accent's lightness becomes the new accent's; darker and lighter
+    // shades keep their place between it and black or white.
+    let lightness = if lightness <= from_lightness {
+        lightness * accent_lightness / from_lightness
+    } else {
+        accent_lightness
+            + (lightness - from_lightness) * (1.0 - accent_lightness) / (1.0 - from_lightness)
+    };
+    from_hsl([own_hue + hue - from_hue, saturation, lightness], color.a())
+}
+
 impl Palette {
     pub fn valid_tones(&self) -> bool {
         (0.0..=4.0).contains(&self.chroma)
@@ -364,18 +404,35 @@ impl Palette {
                 .all(|value| (-255.0..=255.0).contains(value))
     }
 
-    /// This theme with `accent` in place of its blue. Blue keeps the theme's
-    /// own colours exactly.
+    /// The theme's own accent when it is not of the original blue family (a
+    /// theme file with, say, a green accent); `None` for blue themes.
+    pub fn own_accent(&self) -> Option<Color32> {
+        let [hue, saturation, _] = hsl(self.accent);
+        let [blue, _, _] = hsl(BLUE);
+        let turn = (hue - blue).abs();
+        let blue_family = saturation < 0.15 || turn.min(1.0 - turn) < 0.04;
+        (!blue_family).then_some(self.accent)
+    }
+
+    /// This theme with `accent` in place of its own. [`THEME_ACCENT`] keeps
+    /// the theme's colours exactly, and so does blue in a blue theme; a
+    /// theme with an accent of its own is turned to any picked one, blue too.
     pub fn with_accent(&self, accent: Color32) -> Self {
-        if accent == BLUE {
-            return *self;
-        }
+        let own = self.own_accent();
         let mut palette = *self;
-        palette.accent = palette.hue(self.accent, accent);
-        palette.primary = palette.hue(self.primary, accent);
-        palette.link = palette.hue(self.link, accent);
-        palette.selected = palette.hue(self.selected, accent);
-        palette.control_hovered_stroke = palette.hue(self.control_hovered_stroke, accent);
+        if accent == THEME_ACCENT || (accent == BLUE && own.is_none()) {
+            // Shades of blue drawn by widgets follow the theme's own accent.
+            if let Some(own) = own {
+                palette.accent_color = own;
+            }
+            return palette;
+        }
+        let from = own.unwrap_or(BLUE);
+        palette.accent = shift(self.accent, from, accent);
+        palette.primary = shift(self.primary, from, accent);
+        palette.link = shift(self.link, from, accent);
+        palette.selected = shift(self.selected, from, accent);
+        palette.control_hovered_stroke = shift(self.control_hovered_stroke, from, accent);
         palette.accent_color = accent;
         palette
     }
@@ -384,30 +441,7 @@ impl Palette {
     /// blue backdrop), in the same place of the active accent's family: its
     /// hue turned by as much as the accent's, its saturation scaled alike.
     pub fn accent_tone(&self, color: Color32) -> Color32 {
-        self.hue(color, self.accent_color)
-    }
-
-    fn hue(&self, color: Color32, accent: Color32) -> Color32 {
-        if accent == BLUE {
-            return color;
-        }
-        let [blue_hue, blue_saturation, blue_lightness] = hsl(BLUE);
-        let [hue, saturation, accent_lightness] = hsl(accent);
-        // Any colour can be picked: very dark or light ones are brought to a
-        // brightness that still reads on the page and under white text.
-        let accent_lightness = accent_lightness.clamp(0.3, 0.66);
-        let [own_hue, own_saturation, lightness] = hsl(color);
-        let saturation =
-            (own_saturation * saturation / blue_saturation.max(f32::EPSILON)).clamp(0.0, 1.0);
-        // The blue accent's lightness becomes the new accent's; darker and
-        // lighter shades keep their place between it and black or white.
-        let lightness = if lightness <= blue_lightness {
-            lightness * accent_lightness / blue_lightness
-        } else {
-            accent_lightness
-                + (lightness - blue_lightness) * (1.0 - accent_lightness) / (1.0 - blue_lightness)
-        };
-        from_hsl([own_hue + hue - blue_hue, saturation, lightness], color.a())
+        shift(color, BLUE, self.accent_color)
     }
 
     /// The colour that takes the place of `color`, a grey of the dark theme,
@@ -562,6 +596,33 @@ mod tests {
         assert!(lift(oled.surface) >= 45);
         assert!(lift(oled.control) > lift(oled.surface));
         assert!(lift(oled.selected) > lift(oled.surface));
+    }
+
+    #[test]
+    fn a_theme_with_an_accent_of_its_own_keeps_it_until_another_is_picked() {
+        for theme in Theme::all() {
+            let palette = theme.palette();
+            assert_eq!(palette.own_accent(), None, "{theme:?}");
+            assert_eq!(palette.with_accent(THEME_ACCENT), *palette);
+            assert_eq!(palette.with_accent(BLUE), *palette);
+        }
+        let mut green = *original_dark();
+        green.accent = rgb(0x67, 0xe4, 0x95);
+        assert_eq!(green.own_accent(), Some(green.accent));
+        let kept = green.with_accent(THEME_ACCENT);
+        assert_eq!(kept.accent, green.accent);
+        // Shades of blue drawn by widgets follow the theme's green.
+        let hue = |color| hsl(color)[0];
+        assert!((hue(kept.accent_tone(BLUE)) - hue(green.accent)).abs() < 0.01);
+        // Picking blue turns the green theme blue.
+        assert!((hue(green.with_accent(BLUE).accent) - hue(BLUE)).abs() < 0.01);
+        assert!(
+            (hue(green.with_accent(Accent::Red.color()).accent) - hue(Accent::Red.color())).abs()
+                < 0.01
+        );
+        assert_eq!(accent_code(THEME_ACCENT), "");
+        assert_eq!(accent_code(BLUE), "blue");
+        assert_eq!(parse_accent(""), None, "nothing saved: the theme's own");
     }
 
     #[test]

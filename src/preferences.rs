@@ -11,7 +11,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::Language;
-use crate::palette::{Accent, Theme};
+#[cfg(test)]
+use crate::palette::Accent;
+use crate::palette::Theme;
 use crate::play_order::RepeatMode;
 
 const MAX_BYTES: u64 = 4096;
@@ -772,13 +774,13 @@ pub fn save_theme(theme: Theme) -> io::Result<()> {
     })
 }
 
-/// The accent colour; the original blue unless another was chosen.
+/// The accent colour; the theme's own unless one was chosen.
 pub fn load_accent() -> eframe::egui::Color32 {
     preferences_path()
         .ok()
         .and_then(|path| load_preferences_at(&path).ok().flatten())
         .and_then(|preferences| crate::palette::parse_accent(&preferences.accent))
-        .unwrap_or_else(|| Accent::default().color())
+        .unwrap_or(crate::palette::THEME_ACCENT)
 }
 
 pub fn save_accent(accent: eframe::egui::Color32) -> io::Result<()> {
