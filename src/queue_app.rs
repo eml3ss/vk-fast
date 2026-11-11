@@ -15,6 +15,24 @@ pub(super) struct PanelState {
     source_indices: HashMap<TrackKey, usize>,
     /// The queue's share of the height when lyrics are open below it.
     pub(super) split: f32,
+    /// A track carried in from a list: already queued, dragged on here.
+    adopted: Option<Adopted>,
+}
+
+struct Adopted {
+    /// Its entry among the added tracks.
+    id: u64,
+    track: Track,
+    /// The queue's own drag has taken it over.
+    started: bool,
+}
+
+/// What becomes of a carried-in track this frame.
+enum Adoption {
+    /// Escape, or let go away from the queue: it leaves the queue again.
+    Remove(u64),
+    /// Carried back out: it leaves the queue and is a card again.
+    Revert(u64, Box<Track>, egui::Rect),
 }
 
 enum Action {
@@ -68,6 +86,21 @@ impl MusicApp {
             Instant::now() + Duration::from_secs(3),
         ));
         ctx.request_repaint();
+    }
+
+    /// Queues a track carried in from a list, without a notice: it shows up
+    /// right under the pointer. Returns its entry.
+    fn enqueue_carried(&mut self, track: &Track) -> Option<u64> {
+        if self.session.is_none() || self.demo || track.unavailable == Some(true) {
+            return None;
+        }
+        self.synchronize_order();
+        if !self.play_order.enqueue(track.key()) {
+            return None;
+        }
+        self.queued_tracks.insert(track.key(), track.clone());
+        self.prune_queued_tracks();
+        self.play_order.queued().back().map(|entry| entry.id)
     }
 
     fn prune_queued_tracks(&mut self) {
@@ -124,20 +157,34 @@ impl MusicApp {
     /// The queue itself, in its own panel or above the lyrics. Returns
     /// whether its close button was clicked.
     pub(super) fn queue_contents(&mut self, ui: &mut egui::Ui) -> bool {
-        // A track carried from a list joins the queue when let go over it.
+        // A track carried from a list joins the queue as soon as it is over
+        // it, and the queue's own drag carries it on to its place.
         let area = ui.max_rect().expand(6.0);
-        match crate::track_drag::target(ui, area) {
-            crate::track_drag::Target::Hovered => {
+        if self.queue_ui.adopted.is_some() && !ui.input(|input| input.pointer.primary_down()) {
+            self.queue_ui.adopted = None;
+        }
+        let target = crate::track_drag::target(ui, area);
+        if target != crate::track_drag::Target::None
+            && let Some(carried) = crate::track_drag::carried(ui.ctx())
+        {
+            if let Some(id) = self.enqueue_carried(&carried.track) {
+                crate::track_drag::hand_over(ui.ctx());
+                if target == crate::track_drag::Target::Hovered {
+                    self.queue_ui.adopted = Some(Adopted {
+                        id,
+                        track: carried.track,
+                        started: false,
+                    });
+                }
+            } else if target == crate::track_drag::Target::Dropped {
+                // Refused: say why, as the menu does.
+                crate::track_drag::clear(ui.ctx());
+                self.add_to_queue(ui.ctx(), carried.track);
+            } else {
                 crate::track_drag::paint_target(ui.ctx(), area, 10.0);
             }
-            crate::track_drag::Target::Dropped => {
-                if let Some(carried) = crate::track_drag::carried(ui.ctx()) {
-                    crate::track_drag::clear(ui.ctx());
-                    self.add_to_queue(ui.ctx(), carried.track);
-                }
-            }
-            crate::track_drag::Target::None => {}
         }
+        let mut adoption = None;
         let mut panel = std::mem::take(&mut self.queue_ui);
         let source = self.play_queue.as_deref().unwrap_or(&self.library.tracks);
         let source_stamp = (
@@ -328,6 +375,41 @@ impl MusicApp {
                                 )),
                                 |key| (0..len).find(|index| row_key(*index) == key),
                             );
+                            // A carried-in track: picked up here, or done.
+                            if let Some(adopted) = &mut panel.adopted {
+                                if !adopted.started {
+                                    if let Some(index) = panel
+                                        .upcoming
+                                        .iter()
+                                        .position(|entry| entry.queued_id == Some(adopted.id))
+                                    {
+                                        let slots = group(index).unwrap_or(index..=index);
+                                        lane.adopt(index, row_key(index), slots);
+                                        adopted.started = true;
+                                    }
+                                } else if let Some(ended) = lane.ended() {
+                                    if ended == row_drag::Ended::Canceled {
+                                        adoption = Some(Adoption::Remove(adopted.id));
+                                    }
+                                    panel.adopted = None;
+                                } else if lane.away() {
+                                    let pointer = ui
+                                        .input(|input| input.pointer.interact_pos())
+                                        .unwrap_or_default();
+                                    adoption = Some(Adoption::Revert(
+                                        adopted.id,
+                                        Box::new(adopted.track.clone()),
+                                        egui::Rect::from_center_size(
+                                            pointer,
+                                            egui::vec2(lane.clip().width(), 50.0),
+                                        ),
+                                    ));
+                                    lane.cancel();
+                                    panel.adopted = None;
+                                } else if !lane.dragging() {
+                                    panel.adopted = None;
+                                }
+                            }
                             let lifted = lane.dragging() || lane.suppressing();
                             let rows = range.start.saturating_sub(1)..(range.end + 1).min(len);
                             for index in rows {
@@ -418,6 +500,26 @@ impl MusicApp {
         }
         self.queue_ui = panel;
         let ctx = ui.ctx();
+        match adoption {
+            Some(Adoption::Remove(id)) => {
+                self.play_order.remove_queued(id);
+                self.prune_queued_tracks();
+            }
+            Some(Adoption::Revert(id, track, row)) => {
+                self.play_order.remove_queued(id);
+                self.prune_queued_tracks();
+                crate::track_drag::carry(
+                    ctx,
+                    crate::track_drag::Carried {
+                        track: *track,
+                        list: row,
+                        row,
+                        reorder: false,
+                    },
+                );
+            }
+            None => {}
+        }
         match action {
             Some(Action::Play(index))
                 if self.queue_ui.stamp == Some(stamp) && self.play_order.revision() == stamp.0 =>

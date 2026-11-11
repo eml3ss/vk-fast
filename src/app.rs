@@ -4961,6 +4961,10 @@ impl MusicApp {
         if let Some(moved) = lane.moved {
             action = Some(TrackAction::Reorder(moved));
         }
+        // The queue took the dragged row over: this list lets go of it.
+        if crate::track_drag::handed_over(ui.ctx()) {
+            lane.cancel();
+        }
         let dragged = lane
             .dragged()
             .and_then(|row| self.view_tracks().get(source(row)).cloned());

@@ -32,6 +32,14 @@ struct Memory {
     scope: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Ended {
+    /// Let go over the list.
+    Dropped,
+    /// Let go away from the list, or Escape.
+    Canceled,
+}
+
 /// A finished drag: the row at `from` goes to `to`, both in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Move {
@@ -121,6 +129,8 @@ pub(super) struct Lane {
     /// The dragged row is carried away from the list, to a playlist or the
     /// queue: it waits in its own place meanwhile.
     away: bool,
+    /// How a drag ended this frame.
+    ended: Option<Ended>,
     settled: Option<Drag>,
     pub(super) moved: Option<Move>,
     previous: HashSet<u64>,
@@ -177,6 +187,7 @@ impl Lane {
             held,
             escape,
             away: false,
+            ended: None,
             settled: None,
             moved: None,
             previous: HashSet::new(),
@@ -218,16 +229,20 @@ impl Lane {
         }
         if (escape || !held)
             && let Some(drag) = memory.active.take()
-            && released
-            && !escape
-            && inside
-            && drag.from != drag.to
         {
-            lane.moved = Some(Move {
-                from: drag.from,
-                to: drag.to,
+            let dropped = released && !escape && inside;
+            lane.ended = Some(if dropped {
+                Ended::Dropped
+            } else {
+                Ended::Canceled
             });
-            lane.settled = Some(drag);
+            if dropped && drag.from != drag.to {
+                lane.moved = Some(Move {
+                    from: drag.from,
+                    to: drag.to,
+                });
+                lane.settled = Some(drag);
+            }
         }
         lane.memory = memory;
         lane
@@ -248,6 +263,42 @@ impl Lane {
 
     pub(super) fn dragging(&self) -> bool {
         self.memory.active.is_some()
+    }
+
+    /// The dragged row is carried away from the list.
+    pub(super) fn away(&self) -> bool {
+        self.away
+    }
+
+    /// How a drag ended this frame: let go over the list, or not.
+    pub(super) fn ended(&self) -> Option<Ended> {
+        self.ended
+    }
+
+    /// Ends the drag without a move, as when another list takes the row
+    /// over; the press still held starts nothing new.
+    pub(super) fn cancel(&mut self) {
+        self.memory.active = None;
+        self.away = false;
+    }
+
+    /// Takes over a row that just joined the list under a press begun
+    /// elsewhere: it is dragged from here on, among `slots`.
+    pub(super) fn adopt(&mut self, index: usize, key: u64, slots: std::ops::RangeInclusive<usize>) {
+        if self.memory.active.is_some() || !slots.contains(&index) {
+            return;
+        }
+        let mut drag = Drag {
+            key,
+            from: index,
+            to: index,
+            slots,
+            grab_y: self.height * 0.5,
+            pointer: self.pointer.unwrap_or_default(),
+        };
+        self.target(&mut drag);
+        self.memory.active = Some(drag);
+        self.memory.suppress_release = true;
     }
 
     /// The display row being dragged, if any.

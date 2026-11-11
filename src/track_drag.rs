@@ -40,6 +40,19 @@ pub fn clear(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<Carried>(id()));
 }
 
+/// Another list took the track over and drags it from now on: the list it
+/// came from lets go of it this frame.
+pub fn hand_over(ctx: &egui::Context) {
+    clear(ctx);
+    ctx.data_mut(|data| data.insert_temp(id().with("handed-over"), true));
+}
+
+/// Whether another list took the track over this frame.
+pub fn handed_over(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(id().with("handed-over")))
+        .unwrap_or(false)
+}
+
 /// Away from the list it came from, or anywhere for a list that cannot be
 /// reordered: shown as the small card.
 fn away(ctx: &egui::Context, carried: &Carried) -> Option<egui::Pos2> {
@@ -106,6 +119,7 @@ pub fn begin_frame(ctx: &egui::Context) {
 /// Paints the card at the pointer and ends the drag once the button is
 /// let go, after the drop targets had their turn. Call it after the lists.
 pub fn end_frame(ctx: &egui::Context, covers: &mut CoverCache) {
+    ctx.data_mut(|data| data.remove::<bool>(id().with("handed-over")));
     let Some(carried) = carried(ctx) else {
         return;
     };

@@ -358,65 +358,149 @@ mod drag_tests {
                 })
                 .unwrap_or_else(|| panic!("missing {title} in the list"))
         };
-        // Carries the row from its title to `to` in small steps.
-        let carry = |app: &mut MusicApp, frame: &mut u32, from: egui::Rect, to: egui::Pos2| {
+        // Carries the row from its title along `path` in small steps, then
+        // lets go; returns the frame at each stop and the settled frame.
+        let carry = |app: &mut MusicApp, frame: &mut u32, from: egui::Rect, path: &[egui::Pos2]| {
             let start = egui::pos2(from.right() + 40.0, from.center().y);
             account_ui_frame(&ctx, app, size, frame, press(start, true));
-            let mut last = egui::FullOutput::default();
-            for step in 1..=12 {
-                let at = start + (to - start) * (step as f32 / 12.0);
-                last =
-                    account_ui_frame(&ctx, app, size, frame, vec![egui::Event::PointerMoved(at)]);
+            let mut stops = Vec::new();
+            let mut at = start;
+            for &to in path {
+                let begin = at;
+                let mut last = egui::FullOutput::default();
+                for step in 1..=12 {
+                    at = begin + (to - begin) * (step as f32 / 12.0);
+                    last = account_ui_frame(
+                        &ctx,
+                        app,
+                        size,
+                        frame,
+                        vec![egui::Event::PointerMoved(at)],
+                    );
+                }
+                for _ in 0..3 {
+                    last = account_ui_frame(
+                        &ctx,
+                        app,
+                        size,
+                        frame,
+                        vec![egui::Event::PointerMoved(to)],
+                    );
+                }
+                stops.push(last);
             }
-            for _ in 0..3 {
-                last =
-                    account_ui_frame(&ctx, app, size, frame, vec![egui::Event::PointerMoved(to)]);
-            }
-            account_ui_frame(&ctx, app, size, frame, press(to, false));
+            account_ui_frame(&ctx, app, size, frame, press(at, false));
             let mut settled = egui::FullOutput::default();
-            for _ in 0..2 {
+            for _ in 0..3 {
                 settled = account_ui_frame(&ctx, app, size, frame, Vec::new());
             }
-            (last, settled)
+            (stops, settled)
         };
-
-        let queue = egui::pos2(size.x - 120.0, size.y * 0.4);
-        let from = in_list(&output, "Carried 0");
-        let (carrying, settled) = carry(&mut app, &mut frame, from, queue);
-        output = settled;
-        // Away from the list: a small card with the title at the pointer,
-        // while the row waits in its place.
-        let titles: Vec<_> = crate::app::tests::account_ui_shapes(&carrying)
-            .into_iter()
-            .filter_map(|shape| match shape {
-                egui::Shape::Text(text) if text.galley.text() == "Carried 0" => {
-                    Some(text.visual_bounding_rect())
-                }
-                _ => None,
-            })
-            .collect();
-        assert!(
-            titles
-                .iter()
-                .any(|rect| rect.left() > page.right() && (rect.center().y - queue.y).abs() < 24.0),
-            "the card follows the pointer: {titles:?}"
-        );
-        assert!(
-            titles.iter().any(|rect| page.contains(rect.center())),
-            "the row stays in the list: {titles:?}"
-        );
-        let first = app.library.tracks[0].key();
-        assert!(
+        let texts = |output: &egui::FullOutput, title: &str| -> Vec<egui::Rect> {
+            crate::app::tests::account_ui_shapes(output)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == title => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let keys: Vec<_> = app.library.tracks.iter().map(Track::key).collect();
+        let queued = |app: &MusicApp| -> Vec<_> {
             app.play_order
                 .queued()
                 .iter()
-                .any(|entry| entry.key == first)
+                .map(|entry| entry.key)
+                .collect()
+        };
+
+        // Two tracks already added; a third is carried in above them.
+        app.add_to_queue(&ctx, app.library.tracks[3].clone());
+        app.add_to_queue(&ctx, app.library.tracks[2].clone());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let first_added = texts(&output, "Carried 3")
+            .into_iter()
+            .filter(|rect| rect.left() > page.right())
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .expect("the added track in the queue");
+        let sidebar = egui::pos2(page.left() - 120.0, size.y * 0.6);
+        let into_queue = egui::pos2(size.x - 120.0, first_added.center().y);
+        let from = in_list(&output, "Carried 0");
+        let (stops, settled) = carry(&mut app, &mut frame, from, &[sidebar, into_queue]);
+        output = settled;
+        // Away from the list: a small card with the title at the pointer,
+        // while the row waits in its place.
+        let away = texts(&stops[0], "Carried 0");
+        assert!(
+            away.iter().any(
+                |rect| rect.right() < page.left() && (rect.center().y - sidebar.y).abs() < 24.0
+            ),
+            "the card follows the pointer: {away:?}"
         );
+        assert!(
+            away.iter().any(|rect| page.contains(rect.center())),
+            "the row stays in the list: {away:?}"
+        );
+        // In the queue it is queued at once and dragged on there, to the top
+        // of the added tracks.
+        assert_eq!(queued(&app), [keys[0], keys[3], keys[2]]);
         assert!(crate::track_drag::carried(&ctx).is_none());
+
+        // Carried in and back out again, it leaves the queue.
+        let back = egui::pos2(page.center().x, page.center().y);
+        let from = in_list(&output, "Carried 1");
+        let (stops, settled) = carry(&mut app, &mut frame, from, &[into_queue, back]);
+        output = settled;
+        assert!(
+            texts(&stops[1], "Carried 1")
+                .iter()
+                .any(|rect| (rect.center().y - back.y).abs() < 24.0),
+            "a card again once out of the queue"
+        );
+        assert_eq!(queued(&app), [keys[0], keys[3], keys[2]]);
+        // Escape while it is in the queue takes it out again.
+        let from = in_list(&output, "Carried 1");
+        let start = egui::pos2(from.right() + 40.0, from.center().y);
+        account_ui_frame(&ctx, &mut app, size, &mut frame, press(start, true));
+        for step in 1..=12 {
+            let at = start + (into_queue - start) * (step as f32 / 12.0);
+            account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![egui::Event::PointerMoved(at)],
+            );
+        }
+        assert_eq!(queued(&app).len(), 4, "queued while over the queue");
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        account_ui_frame(&ctx, &mut app, size, &mut frame, press(into_queue, false));
+        for _ in 0..2 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert_eq!(queued(&app), [keys[0], keys[3], keys[2]]);
+        app.play_order.clear_queued();
+        let queue = into_queue;
 
         let list = account_ui_text_rect(&output, "Drop list").unwrap();
         let from = in_list(&output, "Carried 1");
-        let (_, settled) = carry(&mut app, &mut frame, from, list.center());
+        let (_, settled) = carry(&mut app, &mut frame, from, &[list.center()]);
         output = settled;
         assert_eq!(app.track_menu_error, Some(WebAudioError::Rejected));
 
@@ -428,7 +512,7 @@ mod drag_tests {
         }
         let third = app.library.tracks[2].key();
         let from = in_list(&output, "Carried 2");
-        carry(&mut app, &mut frame, from, queue);
+        carry(&mut app, &mut frame, from, &[queue]);
         assert!(
             app.play_order
                 .queued()
