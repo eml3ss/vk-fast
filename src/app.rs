@@ -1255,6 +1255,8 @@ pub struct MusicApp {
     mix_request: Option<MixRequest>,
     mix_active: bool,
     mix_seed: Option<MixSeed>,
+    /// Tracks a track mix already went on from, so it never loops back.
+    mix_track_seeds: HashSet<(i64, i64)>,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1634,6 +1636,7 @@ impl MusicApp {
             mix_request: None,
             mix_active: false,
             mix_seed: None,
+            mix_track_seeds: HashSet::new(),
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -3524,6 +3527,7 @@ impl MusicApp {
         self.mix_request = None;
         self.mix_active = false;
         self.mix_seed = None;
+        self.mix_track_seeds.clear();
         self.mix_has_more = false;
         self.mix_advance = false;
         self.mix_error = None;
@@ -3841,6 +3845,10 @@ impl MusicApp {
                         self.mix_has_more = page.has_more;
                         self.mix_active = true;
                         self.mix_seed = seed;
+                        self.mix_track_seeds.clear();
+                        if let Some(MixSeed::Track(key)) = seed {
+                            self.mix_track_seeds.insert(key);
+                        }
                         self.mix_advance = false;
                         let origin = seed.map_or_else(
                             || "mix".into(),
@@ -3875,7 +3883,18 @@ impl MusicApp {
                             .into_iter()
                             .filter(|track| known.insert(track.key())),
                     );
-                    if queue.len() == before && self.mix_has_more {
+                    let added = queue.len() - before;
+                    crate::diagnostics::event(
+                        "mix",
+                        &format!(
+                            "continuation track_mix={} new={added}",
+                            matches!(seed, Some(MixSeed::Track(_)))
+                        ),
+                    );
+                    if added == 0 && self.mix_has_more {
+                        if self.reseed_track_mix(ctx) {
+                            return;
+                        }
                         self.mix_load_failed(ctx, false, seed, WebAudioError::Pagination);
                         return;
                     }
@@ -3899,8 +3918,37 @@ impl MusicApp {
                 self.auth_error = Some(UiError::Music(error));
             }
             Err(WebAudioError::Canceled) => {}
+            // VK gave the same batch again: a track mix goes on from another track.
+            Err(WebAudioError::Pagination) if !start && self.reseed_track_mix(ctx) => {}
             Err(error) => self.mix_load_failed(ctx, start, seed, error),
         }
+    }
+
+    /// A track mix whose source has nothing new left goes on from the newest
+    /// track in the queue that has not been a source yet, as a radio does.
+    /// A Next pressed meanwhile plays once the new tracks arrive.
+    fn reseed_track_mix(&mut self, ctx: &egui::Context) -> bool {
+        const MAX_SOURCES: usize = 32;
+        if !matches!(self.mix_seed, Some(MixSeed::Track(_)))
+            || self.mix_track_seeds.len() >= MAX_SOURCES
+        {
+            return false;
+        }
+        let Some(next) = self.play_queue.as_ref().and_then(|queue| {
+            queue
+                .iter()
+                .rev()
+                .filter(|track| track.unavailable != Some(true))
+                .map(Track::key)
+                .find(|key| key.0 != 0 && key.1 > 0 && !self.mix_track_seeds.contains(key))
+        }) else {
+            return false;
+        };
+        crate::diagnostics::event("mix", "continuation track_mix=true reseed");
+        self.mix_track_seeds.insert(next);
+        self.mix_seed = Some(MixSeed::Track(next));
+        self.load_mix(ctx, false);
+        true
     }
 
     fn view_tracks(&self) -> &[Track] {
@@ -11635,6 +11683,7 @@ mod tests {
             mix_request: None,
             mix_active: false,
             mix_seed: None,
+            mix_track_seeds: HashSet::new(),
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,

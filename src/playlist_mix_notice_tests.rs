@@ -222,3 +222,62 @@ fn stale_or_canceled_mix_replies_are_silent_and_track_mix_failures_keep_their_ex
     assert_eq!(app.track_menu_error, Some(WebAudioError::Network));
     assert_eq!(app.mix_error, Some(WebAudioError::Network));
 }
+
+#[test]
+fn a_track_mix_with_nothing_new_goes_on_from_the_newest_track_and_keeps_a_pressed_next() {
+    for result in [
+        // The same tracks again, or VK's very same batch.
+        Ok(MixPage {
+            tracks: page(3, &[91, 92, 93]).items,
+            has_more: true,
+        }),
+        Err(WebAudioError::Pagination),
+    ] {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let queue = page(3, &[91, 92, 93]).items;
+        let keys: Vec<_> = queue.iter().map(Track::key).collect();
+        app.playing = Some(queue[2].clone());
+        app.play_queue = Some(queue);
+        app.queue_origin = Some("track-mix:-8_91".into());
+        app.mix_active = true;
+        app.mix_seed = Some(MixSeed::Track((-8, 91)));
+        app.mix_track_seeds = [(-8, 91), keys[2]].into_iter().collect();
+        app.mix_has_more = true;
+        // Next was pressed on the last track while the batch was loading.
+        app.mix_advance = true;
+        app.mix_request = Some(reply(42, false, app.mix_seed, result));
+        app.poll_mix(&ctx);
+        // The newest track not yet a source: the playing one already was.
+        assert_eq!(app.mix_seed, Some(MixSeed::Track(keys[1])));
+        assert!(app.mix_track_seeds.contains(&keys[1]));
+        assert!(app.mix_advance, "the pressed Next waits for the new tracks");
+        assert!(app.mix_active && app.mix_has_more);
+        assert_eq!(app.queue_origin.as_deref(), Some("track-mix:-8_91"));
+        // This test session has no VK client: the request stops there.
+        assert_eq!(app.mix_error, Some(WebAudioError::NoSession));
+        assert!(app.mix_request.is_none() && app.workers.is_empty());
+    }
+}
+
+#[test]
+fn a_track_mix_stops_once_every_queued_track_was_a_source() {
+    let ctx = egui::Context::default();
+    let mut app = search_test_app(&ctx);
+    let queue = page(2, &[91, 92]).items;
+    app.mix_track_seeds = queue.iter().map(Track::key).collect();
+    app.playing = Some(queue[1].clone());
+    app.play_queue = Some(queue);
+    app.mix_active = true;
+    app.mix_seed = Some(MixSeed::Track((-8, 91)));
+    app.mix_has_more = true;
+    app.mix_request = Some(reply(
+        42,
+        false,
+        app.mix_seed,
+        Err(WebAudioError::Pagination),
+    ));
+    app.poll_mix(&ctx);
+    assert_eq!(app.mix_seed, Some(MixSeed::Track((-8, 91))));
+    assert_eq!(app.mix_error, Some(WebAudioError::Pagination));
+}
