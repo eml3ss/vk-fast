@@ -650,6 +650,118 @@ mod drag_tests {
     }
 
     #[test]
+    fn middle_click_autoscroll_keeps_scrolling_its_list_wherever_the_pointer_goes() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.middle_autoscroll = true;
+        let ids: Vec<i64> = (1..=60).collect();
+        let mut tracks = page(60, &ids).items;
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.title = format!("Auto {index}");
+            track.subtitle = Some(String::new());
+            track.library_liked = Some(true);
+        }
+        app.library.tracks = tracks;
+        app.library.exhausted = true;
+        app.page = MusicPage::Library;
+        let size = egui::vec2(1100.0, 760.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let top_of = |output: &egui::FullOutput| {
+            account_ui_text_rect(output, "Auto 2").map_or(f32::NEG_INFINITY, |rect| rect.top())
+        };
+        let middle = |pos, pressed| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Middle,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        let escape = || {
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        // A middle click right on a row, then the pointer goes down onto the
+        // sidebar, out of the list: the list goes on scrolling.
+        let row = account_ui_text_rect(&output, "Auto 3").unwrap();
+        let anchor = egui::pos2(row.right() + 40.0, row.center().y);
+        let before = top_of(&output);
+        account_ui_frame(&ctx, &mut app, size, &mut frame, middle(anchor, true));
+        account_ui_frame(&ctx, &mut app, size, &mut frame, middle(anchor, false));
+        assert!(app.autoscroll.active());
+        let sidebar = egui::pos2(app.page_rect.left() - 100.0, anchor.y + 150.0);
+        for _ in 0..10 {
+            output = account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![egui::Event::PointerMoved(sidebar)],
+            );
+        }
+        assert!(app.autoscroll.active(), "leaving the list does not stop it");
+        assert!(
+            top_of(&output) < before - 50.0,
+            "the list scrolled down: {before} -> {}",
+            top_of(&output)
+        );
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::ResizeSouth,
+            "only the system cursor shows it"
+        );
+        account_ui_frame(&ctx, &mut app, size, &mut frame, escape());
+        assert!(!app.autoscroll.active());
+
+        // Held down on a row and dragged: it scrolls, and ends on release.
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let row = account_ui_text_rect(&output, "Auto 20").unwrap();
+        let anchor = egui::pos2(row.right() + 40.0, row.center().y);
+        let held_top = |output: &egui::FullOutput| {
+            account_ui_text_rect(output, "Auto 20").map_or(f32::NEG_INFINITY, |rect| rect.top())
+        };
+        let before = held_top(&output);
+        account_ui_frame(&ctx, &mut app, size, &mut frame, middle(anchor, true));
+        let below = anchor + egui::vec2(0.0, 150.0);
+        for step in 1..=10 {
+            output = account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![egui::Event::PointerMoved(
+                    anchor + (below - anchor) * (step as f32 / 10.0).min(1.0),
+                )],
+            );
+        }
+        assert!(
+            held_top(&output) < before - 20.0,
+            "held, it scrolls too: {before} -> {}",
+            held_top(&output)
+        );
+        account_ui_frame(&ctx, &mut app, size, &mut frame, middle(below, false));
+        assert!(
+            !app.autoscroll.active(),
+            "releasing the dragged button ends it"
+        );
+        assert!(app.workers.is_empty());
+    }
+
+    #[test]
     fn my_music_rows_lift_and_slide_and_escape_cancels_without_vk() {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, Language::English);

@@ -1,8 +1,10 @@
 //! Middle-click autoscroll, as in browsers: a middle click on the page sets
-//! an anchor, and the page under it scrolls toward the pointer, faster the
-//! farther the pointer is. Any click, Esc, or releasing the middle button
-//! after dragging stops it. Off unless enabled in Settings.
-use eframe::egui::{self, Color32, Context, PointerButton, Pos2, Stroke};
+//! an anchor, and the list under the anchor scrolls toward the pointer,
+//! faster the farther the pointer is, wherever the pointer goes meanwhile.
+//! Holding the middle button and dragging works the same and ends on
+//! release. Any other click, a second middle click or Esc stops it. Only the
+//! system cursor shows it is on. Off unless enabled in Settings.
+use eframe::egui::{self, Context, PointerButton, Pos2};
 
 /// Pointer distance around the anchor that does not scroll, in points.
 const DEAD_ZONE: f32 = 10.0;
@@ -15,6 +17,34 @@ const DRAG: f32 = 12.0;
 pub struct Autoscroll {
     anchor: Option<Pos2>,
     dragged: bool,
+    /// The pointer's last place, kept while it is outside the window.
+    pointer: Option<Pos2>,
+    cursor: Option<egui::CursorIcon>,
+}
+
+/// This frame's scroll for the list under the anchor.
+#[derive(Clone, Copy)]
+struct Pending {
+    anchor: Pos2,
+    delta: f32,
+}
+
+fn pending_id() -> egui::Id {
+    egui::Id::new("middle-autoscroll-pending")
+}
+
+/// This frame's autoscroll, for the innermost list that shows the anchor:
+/// call it after the list's contents. Other lists get nothing.
+pub fn take_for(ui: &egui::Ui) -> Option<f32> {
+    let pending = ui
+        .ctx()
+        .data(|data| data.get_temp::<Pending>(pending_id()))?;
+    if !ui.clip_rect().contains(pending.anchor) {
+        return None;
+    }
+    ui.ctx()
+        .data_mut(|data| data.remove::<Pending>(pending_id()));
+    Some(pending.delta)
 }
 
 impl Autoscroll {
@@ -23,83 +53,71 @@ impl Autoscroll {
         self.anchor.is_some()
     }
 
-    /// Call first in the frame, after wheel handling and before any scroll
-    /// area reads the input. `area` is where a middle click may start it.
+    /// Call first in the frame, before any list is laid out. `area` is
+    /// where a middle click may start it.
     pub fn apply(&mut self, ctx: &Context, enabled: bool, area: egui::Rect) {
+        ctx.data_mut(|data| data.remove::<Pending>(pending_id()));
+        self.cursor = None;
         if !enabled {
             self.anchor = None;
             return;
         }
-        let (pointer, middle_pressed, other_pressed, middle_released, escape, dt) =
-            ctx.input(|input| {
+        let (hover, middle_pressed, other_pressed, middle_released, middle_down, escape, dt) = ctx
+            .input(|input| {
                 (
                     input.pointer.hover_pos(),
                     input.pointer.button_pressed(PointerButton::Middle),
                     input.pointer.button_pressed(PointerButton::Primary)
                         || input.pointer.button_pressed(PointerButton::Secondary),
                     input.pointer.button_released(PointerButton::Middle),
+                    input.pointer.button_down(PointerButton::Middle),
                     input.key_pressed(egui::Key::Escape),
                     input.stable_dt.min(0.1),
                 )
             });
+        if hover.is_some() {
+            self.pointer = hover;
+        }
         let Some(anchor) = self.anchor else {
-            if middle_pressed && let Some(point) = pointer.filter(|point| area.contains(*point)) {
+            if middle_pressed && let Some(point) = hover.filter(|point| area.contains(*point)) {
                 self.anchor = Some(point);
                 self.dragged = false;
+                self.cursor = Some(egui::CursorIcon::AllScroll);
                 ctx.request_repaint();
             }
             return;
         };
-        let stop = escape
-            || other_pressed
-            || middle_pressed
-            || (middle_released && self.dragged)
-            || pointer.is_none();
-        if stop {
+        let stop = escape || other_pressed || middle_pressed || (middle_released && self.dragged);
+        let Some(pointer) = self.pointer.filter(|_| !stop) else {
             self.anchor = None;
             return;
-        }
-        let Some(pointer) = pointer else { return };
+        };
         let offset = pointer.y - anchor.y;
-        if offset.abs() > DRAG {
-            self.dragged |= ctx.input(|input| input.pointer.button_down(PointerButton::Middle));
+        if offset.abs() > DRAG && middle_down {
+            self.dragged = true;
         }
         let distance = (offset.abs() - DEAD_ZONE).max(0.0);
         if distance > 0.0 {
             // Below the anchor scrolls down, like a wheel pulled toward you.
             let delta = -offset.signum() * distance * SPEED * dt;
-            ctx.input_mut(|input| input.smooth_scroll_delta.y += delta);
+            ctx.data_mut(|data| data.insert_temp(pending_id(), Pending { anchor, delta }));
         }
-        ctx.set_cursor_icon(if distance == 0.0 {
+        self.cursor = Some(if distance == 0.0 {
             egui::CursorIcon::AllScroll
         } else if offset > 0.0 {
             egui::CursorIcon::ResizeSouth
         } else {
             egui::CursorIcon::ResizeNorth
         });
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Tooltip,
-            egui::Id::new("middle-autoscroll"),
-        ));
-        painter.circle(
-            anchor,
-            11.0,
-            Color32::from_black_alpha(170),
-            Stroke::new(1.5, Color32::from_white_alpha(200)),
-        );
-        for direction in [-1.0_f32, 1.0] {
-            let tip = anchor + egui::vec2(0.0, 6.5 * direction);
-            let base = anchor + egui::vec2(0.0, 2.5 * direction);
-            painter.line_segment(
-                [base + egui::vec2(-3.0, 0.0), tip],
-                Stroke::new(1.5, Color32::WHITE),
-            );
-            painter.line_segment(
-                [base + egui::vec2(3.0, 0.0), tip],
-                Stroke::new(1.5, Color32::WHITE),
-            );
-        }
         ctx.request_repaint();
+    }
+
+    /// Call last in the frame: the system cursor shows the autoscroll over
+    /// whatever widget the pointer is on.
+    pub fn show_cursor(&self, ctx: &Context) {
+        if let Some(cursor) = self.cursor {
+            ctx.set_cursor_icon(cursor);
+        }
     }
 }
 
@@ -126,7 +144,7 @@ mod tests {
             },
             |ui| {
                 autoscroll.apply(ui.ctx(), true, ui.ctx().content_rect());
-                delta = ui.input(|input| input.smooth_scroll_delta.y);
+                delta = take_for(ui).unwrap_or(0.0);
             },
         );
         output.textures_delta.clear();

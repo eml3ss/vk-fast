@@ -379,6 +379,18 @@ fn wheel_while_dragging(ui: &mut egui::Ui) {
     ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
 }
 
+/// After a list's contents: the wheel during a drag, and the middle-click
+/// autoscroll of a list that shows its anchor, wherever the pointer is.
+fn after_contents(ui: &mut egui::Ui) {
+    wheel_while_dragging(ui);
+    if let Some(delta) = crate::autoscroll::take_for(ui) {
+        ui.scroll_with_delta_animation(
+            egui::vec2(0.0, delta),
+            egui::style::ScrollAnimation::none(),
+        );
+    }
+}
+
 pub fn scroll_area<R>(
     ui: &mut egui::Ui,
     area: egui::ScrollArea,
@@ -389,7 +401,7 @@ pub fn scroll_area<R>(
             .show(ui, |ui| {
                 ui.set_style(content_style);
                 let inner = contents(ui);
-                wheel_while_dragging(ui);
+                after_contents(ui);
                 inner
             })
     })
@@ -407,7 +419,7 @@ pub fn scroll_rows<R>(
             .show_rows(ui, row_height, rows, |ui, range| {
                 ui.set_style(content_style);
                 let inner = contents(ui, range);
-                wheel_while_dragging(ui);
+                after_contents(ui);
                 inner
             })
     })
@@ -423,7 +435,7 @@ pub fn scroll_viewport<R>(
             .show_viewport(ui, |ui, viewport| {
                 ui.set_style(content_style);
                 let inner = contents(ui, viewport);
-                wheel_while_dragging(ui);
+                after_contents(ui);
                 inner
             })
     })

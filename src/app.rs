@@ -10634,6 +10634,7 @@ impl MusicApp {
     fn render(&mut self, ui: &mut egui::Ui) {
         theme::set_explicit_badges(ui.ctx(), self.explicit_badge);
         self.render_frame(ui);
+        self.autoscroll.show_cursor(ui.ctx());
         // Rows drawn this frame that still miss their album's name.
         self.request_album_titles(ui.ctx());
     }
