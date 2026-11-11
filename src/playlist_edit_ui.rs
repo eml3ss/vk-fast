@@ -267,13 +267,9 @@ fn label(ui: &mut egui::Ui, text: &str) {
 }
 fn error_label(ui: &mut egui::Ui, error: &str) {
     ui.add(
-        egui::Label::new(
-            RichText::new(error)
-                .small()
-                .color(Color32::from_rgb(255, 158, 153)),
-        )
-        .wrap()
-        .selectable(false),
+        egui::Label::new(RichText::new(error).small().color(theme::error()))
+            .wrap()
+            .selectable(false),
     );
 }
 fn status(ui: &mut egui::Ui, text: &str) {

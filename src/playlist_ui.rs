@@ -251,13 +251,9 @@ pub fn show_sidebar(
     };
     if let Some(error) = error {
         ui.add(
-            egui::Label::new(
-                RichText::new(error)
-                    .small()
-                    .color(Color32::from_rgb(255, 158, 153)),
-            )
-            .wrap()
-            .selectable(false),
+            egui::Label::new(RichText::new(error).small().color(theme::error()))
+                .wrap()
+                .selectable(false),
         );
         ui.add_space(4.0);
     }

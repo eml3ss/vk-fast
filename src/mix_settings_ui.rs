@@ -161,7 +161,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                             "VK offered no settings for this mix.",
                         )))
                         .color(if view.error.is_some() {
-                            Color32::from_rgb(255, 158, 153)
+                            theme::error()
                         } else {
                             theme::muted()
                         }),

@@ -833,6 +833,7 @@ enum SettingsSection {
     #[default]
     General,
     Interface,
+    Appearance,
     Playback,
     Equalizer,
     Cache,
@@ -840,9 +841,10 @@ enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Interface,
+        Self::Appearance,
         Self::Playback,
         Self::Equalizer,
         Self::Cache,
@@ -853,6 +855,7 @@ impl SettingsSection {
         match self {
             Self::General => Icon::Settings,
             Self::Interface => Icon::Interface,
+            Self::Appearance => Icon::Palette,
             Self::Playback => Icon::Play,
             Self::Equalizer => Icon::Equalizer,
             Self::Cache => Icon::Storage,
@@ -863,6 +866,7 @@ impl SettingsSection {
         match self {
             Self::General => language.text("Общие", "General"),
             Self::Interface => language.text("Интерфейс", "Interface"),
+            Self::Appearance => language.text("Оформление", "Appearance"),
             Self::Playback => language.text("Воспроизведение", "Playback"),
             Self::Equalizer => language.text("Эквалайзер", "Equalizer"),
             Self::Cache => language.text("Кэш", "Cache"),
@@ -1393,7 +1397,8 @@ pub struct MusicApp {
     /// The fullscreen player's animated blurred backdrop.
     animated_backdrop: bool,
     theme: theme::Theme,
-    accent: theme::Accent,
+    accent: Color32,
+    accent_save_at: Option<Instant>,
     theme_save_failed: bool,
     animated_backdrop_save_failed: bool,
     /// Ctrl + the keyboard's volume keys change VK Fast's own volume.
@@ -1630,7 +1635,7 @@ impl MusicApp {
         // Before the first frame, so the window never shows another theme.
         // Tests keep the default theme: it is one global for all of them.
         let (appearance, accent) = if cfg!(test) {
-            Default::default()
+            (theme::Theme::default(), theme::Accent::default().color())
         } else {
             (preferences::load_theme(), preferences::load_accent())
         };
@@ -1816,6 +1821,7 @@ impl MusicApp {
             animated_backdrop: preferences::load_animated_backdrop(),
             theme: appearance,
             accent,
+            accent_save_at: None,
             theme_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: preferences::load_volume_keys(),
@@ -1963,6 +1969,9 @@ impl MusicApp {
         if has("--interface") {
             self.settings_section = SettingsSection::Interface;
         }
+        if has("--appearance") {
+            self.settings_section = SettingsSection::Appearance;
+        }
         if has("--equalizer") {
             self.settings_section = SettingsSection::Equalizer;
         }
@@ -1977,6 +1986,9 @@ impl MusicApp {
         }
         if has("--fullscreen") {
             self.set_lyrics_fullscreen(ctx, true);
+        }
+        if has("--accent-picker") {
+            egui::Popup::open_id(ctx, egui::Id::new(crate::appearance_ui::PICKER));
         }
         if has("--account-menu") {
             egui::Popup::open_id(ctx, egui::Id::new("account-popup"));
@@ -3847,7 +3859,7 @@ impl MusicApp {
             }
         }
         if let Some(error) = &self.auth_error {
-            ui.colored_label(Color32::from_rgb(255, 158, 153), error.message(language));
+            ui.colored_label(theme::error(), error.message(language));
         }
     }
 
@@ -3863,7 +3875,7 @@ impl MusicApp {
             );
             if session.cache_warning {
                 ui.colored_label(
-                    Color32::from_rgb(255, 178, 120),
+                    theme::warning(),
                     t(
                         "Вход выполнен, но сохранить сессию не удалось.",
                         "Signed in, but the session could not be saved.",
@@ -5126,10 +5138,7 @@ impl MusicApp {
                 } else {
                     if let Some(error) = &self.search.results_error {
                         theme::inset_heading(ui, |ui| {
-                            ui.colored_label(
-                                Color32::from_rgb(255, 158, 153),
-                                error.localized(language),
-                            )
+                            ui.colored_label(theme::error(), error.localized(language))
                         });
                     }
                     if let Some(results) = &results {
@@ -7332,7 +7341,7 @@ impl MusicApp {
         let loading = self.detail_request.is_some();
         if let Some(error) = &self.detail_error {
             theme::inset_heading(ui, |ui| {
-                ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language))
+                ui.colored_label(theme::error(), error.localized(language))
             });
         }
         if let MusicPage::Owner(creator) = &page {
@@ -8490,7 +8499,7 @@ impl MusicApp {
             && let Some(error) = &self.home_error
         {
             theme::inset_heading(ui, |ui| {
-                ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language))
+                ui.colored_label(theme::error(), error.localized(language))
             });
         }
         if self.view_tracks().is_empty() && !is_library {
@@ -9085,7 +9094,7 @@ impl MusicApp {
                         } else if playing {
                             theme::accent()
                         } else {
-                            Color32::WHITE
+                            theme::strong()
                         },
                     );
                 } else {
@@ -9836,10 +9845,10 @@ impl MusicApp {
             },
         );
         if let Some(error) = &self.playback_error {
-            ui.colored_label(Color32::from_rgb(255, 158, 153), error.message(language));
+            ui.colored_label(theme::error(), error.message(language));
         } else if let PlaybackState::Failed(error) = &snapshot.state {
             ui.colored_label(
-                Color32::from_rgb(255, 158, 153),
+                theme::error(),
                 UiError::Playback(error.clone()).message(language),
             );
         } else if self.demo {
@@ -10166,7 +10175,7 @@ impl MusicApp {
         }
         if let Some(error) = &self.link_handler_error {
             ui.colored_label(
-                Color32::from_rgb(255, 158, 153),
+                theme::error(),
                 match error {
                     RouterError::NoBrowser => t(
                         "Не найден браузер по умолчанию, которому VK Fast передавал бы остальные ссылки.",
@@ -10605,7 +10614,7 @@ impl MusicApp {
         }
         if self.crossfade_save_failed {
             ui.colored_label(
-                Color32::from_rgb(255, 158, 153),
+                theme::error(),
                 t(
                     "Не удалось сохранить настройку.",
                     "Could not save the setting.",
@@ -10626,6 +10635,10 @@ impl MusicApp {
             self.equalizer_save_at = Some(deadline);
             ctx.request_repaint_after(Duration::from_millis(600));
         }
+    }
+
+    fn save_accent_now(&mut self) {
+        self.theme_save_failed = !cfg!(test) && preferences::save_accent(self.accent).is_err();
     }
 
     fn save_equalizer_now(&mut self) {
@@ -10664,9 +10677,8 @@ impl MusicApp {
                 Setting::DiscordRpc,
                 Setting::Logging,
             ],
+            SettingsSection::Appearance => &[Setting::Theme, Setting::Accent],
             SettingsSection::Interface => &[
-                Setting::Theme,
-                Setting::Accent,
                 Setting::SystemTitlebar,
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
@@ -10736,7 +10748,7 @@ impl MusicApp {
                     );
                     if self.language_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t("Не удалось сохранить язык.", "Could not save the language."),
                         );
                     }
@@ -10775,7 +10787,7 @@ impl MusicApp {
                     }
                     if self.tray_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку трея.",
                                 "Could not save the tray preference.",
@@ -10810,7 +10822,7 @@ impl MusicApp {
                     );
                     if self.discord_rpc_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку Discord.",
                                 "Could not save the Discord preference.",
@@ -10853,7 +10865,7 @@ impl MusicApp {
                     }
                     if self.logging_runtime_failed || self.logging_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось включить логи или сохранить настройку.",
                                 "Could not enable logging or save the preference.",
@@ -10862,112 +10874,67 @@ impl MusicApp {
                     }
                 }
             }
-            SettingsSection::Interface => {
+            SettingsSection::Appearance => {
                 if query.matches(Setting::Theme) {
                     ui.label(t("Тема оформления", "Theme"));
-                    let previous = self.theme;
-                    egui::ComboBox::from_id_salt("settings-theme")
-                        .width(200.0)
-                        .selected_text(self.theme.title(language))
-                        .show_ui(ui, |ui| {
-                            for choice in theme::Theme::ALL {
-                                ui.selectable_value(
-                                    &mut self.theme,
-                                    choice,
-                                    choice.title(language),
-                                );
-                            }
-                        });
-                    if self.theme != previous {
+                    ui.add_space(4.0);
+                    if crate::appearance_ui::theme_cards(ui, &mut self.theme, self.accent, language)
+                    {
                         theme::apply(ui.ctx(), self.theme, self.accent);
                         self.theme_save_failed =
                             !cfg!(test) && preferences::save_theme(self.theme).is_err();
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new(t(
-                            "Чёрная тема выключает пиксели фона на OLED-экранах.",
-                            "The black theme switches background pixels off on OLED screens.",
+                            "Чёрная тема выключает пиксели фона на OLED-экранах. Полноэкранный текст и карточка VK Микса остаются тёмными в любой теме.",
+                            "The black theme switches background pixels off on OLED screens. Fullscreen lyrics and the VK Mix card stay dark in every theme.",
                         ))
                         .small()
                         .color(theme::muted()),
                     );
                     if self.theme_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t("Не удалось сохранить тему.", "Could not save the theme."),
                         );
                     }
-                    if query.matches(Setting::Accent)
-                        || query.matches(Setting::SystemTitlebar)
-                        || query.matches(Setting::CompactSeek)
-                        || query.matches(Setting::DoubleClickPlay)
-                        || query.matches(Setting::SearchOnEnter)
-                        || query.matches(Setting::MiddleAutoscroll)
-                        || query.matches(Setting::ExplicitBadge)
-                        || query.matches(Setting::AnimatedBackdrop)
-                    {
+                    if query.matches(Setting::Accent) {
                         ui.add_space(16.0);
                     }
                 }
                 if query.matches(Setting::Accent) {
                     ui.label(t("Цвет акцента", "Accent colour"));
-                    let previous = self.accent;
-                    // Each colour's name after a dot in that colour.
-                    let swatch = |ui: &egui::Ui, accent: theme::Accent| {
-                        let font = egui::TextStyle::Button.resolve(ui.style());
-                        let mut job = egui::text::LayoutJob::default();
-                        job.append(
-                            "● ",
-                            0.0,
-                            egui::TextFormat::simple(font.clone(), accent.color()),
-                        );
-                        job.append(
-                            accent.title(language),
-                            0.0,
-                            egui::TextFormat::simple(font, ui.visuals().text_color()),
-                        );
-                        job
-                    };
-                    egui::ComboBox::from_id_salt("settings-accent")
-                        .width(200.0)
-                        .selected_text(swatch(ui, self.accent))
-                        .show_ui(ui, |ui| {
-                            for choice in theme::Accent::ALL {
-                                ui.selectable_value(&mut self.accent, choice, swatch(ui, choice));
-                            }
-                        });
-                    if self.accent != previous {
+                    ui.add_space(4.0);
+                    let outcome =
+                        crate::appearance_ui::accent_picker(ui, &mut self.accent, language);
+                    if outcome.changed {
                         theme::apply(ui.ctx(), self.theme, self.accent);
-                        self.theme_save_failed =
-                            !cfg!(test) && preferences::save_accent(self.accent).is_err();
+                        // A drag in the picker writes the file once, after it.
+                        let deadline = Instant::now() + Duration::from_millis(600);
+                        self.accent_save_at = Some(deadline);
+                        ui.ctx().request_repaint_after(Duration::from_millis(600));
+                    } else if outcome.dragging && self.accent_save_at.is_some() {
+                        self.accent_save_at = Some(Instant::now() + Duration::from_millis(600));
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new(t(
-                            "Цвет кнопок, ссылок, выделения и играющего трека.",
-                            "The colour of buttons, links, highlights and the playing track.",
+                            "Цвет кнопок, ссылок, выделения и играющего трека. Слишком тёмные и светлые цвета приводятся к читаемой яркости.",
+                            "The colour of buttons, links, highlights and the playing track. Very dark and light colours are brought to a readable brightness.",
                         ))
                         .small()
                         .color(theme::muted()),
                     );
                     if self.theme_save_failed && !query.matches(Setting::Theme) {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t("Не удалось сохранить тему.", "Could not save the theme."),
                         );
                     }
-                    if query.matches(Setting::SystemTitlebar)
-                        || query.matches(Setting::CompactSeek)
-                        || query.matches(Setting::DoubleClickPlay)
-                        || query.matches(Setting::SearchOnEnter)
-                        || query.matches(Setting::MiddleAutoscroll)
-                        || query.matches(Setting::ExplicitBadge)
-                        || query.matches(Setting::AnimatedBackdrop)
-                    {
-                        ui.add_space(16.0);
-                    }
                 }
+            }
+            SettingsSection::Interface => {
                 if query.matches(Setting::SystemTitlebar) {
                     let label = t("Системный заголовок окна", "System title bar");
                     if theme::switch(ui, &mut self.system_titlebar, label).changed() {
@@ -10985,7 +10952,7 @@ impl MusicApp {
                     );
                     if self.titlebar_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить оформление окна.",
                                 "Could not save the window decoration preference.",
@@ -11017,7 +10984,7 @@ impl MusicApp {
                     );
                     if self.seek_layout_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить вид полоски.",
                                 "Could not save the seek bar layout.",
@@ -11048,7 +11015,7 @@ impl MusicApp {
                     )).small().color(theme::muted()));
                     if self.click_behavior_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить способ запуска треков.",
                                 "Could not save the track click preference.",
@@ -11075,7 +11042,7 @@ impl MusicApp {
                     );
                     if self.search_on_enter_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку поиска.",
                                 "Could not save the search preference.",
@@ -11108,7 +11075,7 @@ impl MusicApp {
                     );
                     if self.middle_autoscroll_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11135,7 +11102,7 @@ impl MusicApp {
                     );
                     if self.explicit_badge_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11165,7 +11132,7 @@ impl MusicApp {
                     );
                     if self.animated_backdrop_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11208,7 +11175,7 @@ impl MusicApp {
                     ui.label(RichText::new(hint).small().color(theme::muted()));
                     if self.volume_keys_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11216,7 +11183,7 @@ impl MusicApp {
                         );
                     } else if let Some(error) = self.volume_keys.error().filter(|_| enabled) {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             match error {
                                 crate::volume_keys::Error::Taken => t(
                                     "Эти сочетания уже заняты другой программой.",
@@ -11252,7 +11219,7 @@ impl MusicApp {
                     );
                     if self.mix_after_queue_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11299,7 +11266,7 @@ impl MusicApp {
                     );
                     if self.broadcast_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить настройку.",
                                 "Could not save the setting.",
@@ -11355,7 +11322,7 @@ impl MusicApp {
                 }
                 if self.audio_cache.is_none() || self.cache_error || self.cache_save_failed {
                     ui.colored_label(
-                        Color32::from_rgb(255, 158, 153),
+                        theme::error(),
                         t(
                             "Не удалось обновить кэш или сохранить настройки.",
                             "Could not update the cache or save settings.",
@@ -11374,7 +11341,7 @@ impl MusicApp {
                     self.equalizer_changed(&ctx, outcome);
                     if self.equalizer_save_failed {
                         ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
+                            theme::error(),
                             t(
                                 "Не удалось сохранить эквалайзер.",
                                 "Could not save the equalizer.",
@@ -11549,18 +11516,37 @@ impl MusicApp {
                 self.go_forward(ui.ctx());
             }
         }
-        egui::Panel::bottom("player")
-            .show_separator_line(true)
-            .frame(
-                Frame::new()
-                    .fill(theme::panel())
-                    .inner_margin(egui::Margin::symmetric(16, PLAYER_PADDING_Y)),
-            )
-            .show(ui, |ui| self.player_bar(ui));
+        // Under fullscreen lyrics, a light theme's player bar turns dark with
+        // the scene above it.
+        let dark_bar = self.lyrics.fullscreen && theme::is_light();
+        let mut player = |ui: &mut egui::Ui| {
+            egui::Panel::bottom("player")
+                // The page's light separator would glare over the dark scene.
+                .show_separator_line(!dark_bar)
+                .frame(
+                    Frame::new()
+                        .fill(theme::panel())
+                        .inner_margin(egui::Margin::symmetric(16, PLAYER_PADDING_Y)),
+                )
+                .show(ui, |ui| {
+                    if dark_bar {
+                        *ui.visuals_mut() = theme::visuals(&crate::palette::current());
+                    }
+                    self.player_bar(ui);
+                });
+        };
+        if dark_bar {
+            crate::palette::scene(theme::Theme::Dark, || player(ui));
+        } else {
+            player(ui);
+        }
         if self.lyrics.fullscreen {
             egui::CentralPanel::default()
                 .frame(Frame::NONE)
-                .show(ui, |ui| self.lyrics_fullscreen(ui));
+                // Over the cover: a dark scene in a light theme too.
+                .show(ui, |ui| {
+                    theme::dark_scene(ui, |ui| self.lyrics_fullscreen(ui))
+                });
             self.render_overlays_and_shortcuts(ui);
             return;
         }
@@ -11706,7 +11692,7 @@ impl MusicApp {
                                             "Could not update My music",
                                         )
                                     })
-                                    .color(Color32::WHITE),
+                                    .color(theme::strong()),
                                 );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let (rect, _) = ui.allocate_exact_size(
@@ -11967,6 +11953,14 @@ impl MusicApp {
                 ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
             }
         }
+        if let Some(deadline) = self.accent_save_at {
+            if Instant::now() >= deadline {
+                self.accent_save_at = None;
+                self.save_accent_now();
+            } else {
+                ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+            }
+        }
         if let Some(deadline) = self.volume_save_at {
             if Instant::now() >= deadline {
                 self.volume_save_at = None;
@@ -12098,6 +12092,9 @@ impl Drop for MusicApp {
         }
         if self.equalizer_save_at.take().is_some() {
             self.save_equalizer_now();
+        }
+        if self.accent_save_at.take().is_some() {
+            self.save_accent_now();
         }
         if self.cache_save_at.is_some() {
             let _ = preferences::save_cache_limit_mb(self.cache_limit_mb);
@@ -12606,7 +12603,8 @@ mod tests {
             explicit_badge_save_failed: false,
             animated_backdrop: true,
             theme: theme::Theme::default(),
-            accent: theme::Accent::default(),
+            accent: theme::Accent::default().color(),
+            accent_save_at: None,
             theme_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: false,

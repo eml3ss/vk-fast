@@ -619,9 +619,7 @@ impl MusicApp {
             ui.add(egui::Spinner::new().size(16.0));
         }
         if let Some(error) = self.lyrics.settings_error {
-            ui.label(
-                RichText::new(error.message(language)).color(Color32::from_rgb(255, 158, 153)),
-            );
+            ui.label(RichText::new(error.message(language)).color(theme::error()));
             if ui.button(t("Повторить", "Retry")).clicked() {
                 self.lyrics.settings_error = None;
                 self.configure_lyrics(&ctx, ConfigAction::Reload);

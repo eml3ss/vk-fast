@@ -115,7 +115,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
             }
             if let Some(error) = view.error {
                 ui.add(
-                    egui::Label::new(RichText::new(error).color(Color32::from_rgb(255, 158, 153)))
+                    egui::Label::new(RichText::new(error).color(theme::error()))
                         .wrap()
                         .selectable(false),
                 );

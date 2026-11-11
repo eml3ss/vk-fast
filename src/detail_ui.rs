@@ -990,14 +990,14 @@ fn kicker(ui: &mut egui::Ui, text: &str) {
         egui::Label::new(
             RichText::new(text)
                 .small()
-                .color(theme::accent_tone(Color32::from_rgb(151, 181, 220))),
+                .color(theme::accent_light(Color32::from_rgb(151, 181, 220))),
         )
         .selectable(false),
     );
 }
 
 fn backdrop(color: Option<Color32>) -> (Color32, Color32) {
-    let Some(color) = color else {
+    let Some(color) = color.or_else(|| theme::is_light().then(theme::accent)) else {
         return (
             theme::accent_tone(Color32::from_rgb(26, 49, 79)),
             theme::accent_tone(Color32::from_rgb(20, 29, 43)),

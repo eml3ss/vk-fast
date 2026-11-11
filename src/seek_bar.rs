@@ -211,6 +211,10 @@ fn control(
         if show_knob {
             let center = egui::pos2(track.left() + track.width() * fraction, track.center().y);
             painter.circle_filled(center, KNOB_RADIUS, Color32::WHITE.gamma_multiply(opacity));
+            let outline = theme::handle_stroke();
+            if outline != egui::Stroke::NONE {
+                painter.circle_stroke(center, KNOB_RADIUS - 0.5, outline);
+            }
         }
     }
     response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), *value, label));

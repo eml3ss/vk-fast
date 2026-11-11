@@ -108,7 +108,7 @@ fn step(ui: &mut egui::Ui, rect: Rect, number: &str, title: &str, detail: &str) 
         Align2::CENTER_CENTER,
         number,
         FontId::new(13.0, theme::semibold()),
-        theme::accent_tone(SOFT_BLUE),
+        theme::accent_light(SOFT_BLUE),
     );
     let left = rect.left() + 38.0;
     label(
@@ -139,13 +139,13 @@ fn phone(ui: &egui::Ui, center: egui::Pos2) {
     ui.painter().rect_stroke(
         body,
         6,
-        Stroke::new(2.0, theme::accent_tone(SOFT_BLUE)),
+        Stroke::new(2.0, theme::accent_light(SOFT_BLUE)),
         egui::StrokeKind::Inside,
     );
     ui.painter().rect_filled(
         Rect::from_center_size(center + egui::vec2(0.0, 14.0), egui::vec2(8.0, 2.0)),
         1,
-        theme::accent_tone(SOFT_BLUE),
+        theme::accent_light(SOFT_BLUE),
     );
 }
 
@@ -221,7 +221,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     title,
                     FontId::proportional(12.0),
                     if active {
-                        theme::accent_tone(SOFT_BLUE)
+                        theme::accent_light(SOFT_BLUE)
                     } else {
                         theme::muted()
                     },
@@ -322,13 +322,9 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     );
                     ui.put(
                         rect,
-                        egui::Label::new(
-                            RichText::new(error)
-                                .size(12.0)
-                                .color(Color32::from_rgb(255, 158, 153)),
-                        )
-                        .halign(Align::Center)
-                        .truncate(),
+                        egui::Label::new(RichText::new(error).size(12.0).color(theme::error()))
+                            .halign(Align::Center)
+                            .truncate(),
                     )
                     .on_hover_text(error);
                 }
@@ -368,12 +364,12 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                 for edge in points.windows(2) {
                     ui.painter().line_segment(
                         [edge[0], edge[1]],
-                        Stroke::new(3.0, theme::accent_tone(SOFT_BLUE)),
+                        Stroke::new(3.0, theme::accent_light(SOFT_BLUE)),
                     );
                 }
                 for point in points {
                     ui.painter()
-                        .circle_filled(point, 1.5, theme::accent_tone(SOFT_BLUE));
+                        .circle_filled(point, 1.5, theme::accent_light(SOFT_BLUE));
                 }
                 label(
                     ui,
@@ -395,7 +391,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     Rect::from_center_size(center + egui::vec2(0.0, 72.0), Vec2::splat(18.0)),
                     egui::Spinner::new()
                         .size(18.0)
-                        .color(theme::accent_tone(SOFT_BLUE)),
+                        .color(theme::accent_light(SOFT_BLUE)),
                 );
                 let cancel = cancel_button(
                     ui,
@@ -436,7 +432,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                         Rect::from_center_size(qr_rect.center(), Vec2::splat(28.0)),
                         egui::Spinner::new()
                             .size(28.0)
-                            .color(theme::accent_tone(SOFT_BLUE)),
+                            .color(theme::accent_light(SOFT_BLUE)),
                     );
                 } else {
                     icons::paint(

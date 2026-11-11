@@ -351,7 +351,7 @@ impl State {
         }
         if self.save_failed {
             ui.colored_label(
-                Color32::from_rgb(255, 158, 153),
+                theme::error(),
                 language.text(
                     "Не удалось сохранить настройку.",
                     "Could not save the setting.",
@@ -418,7 +418,7 @@ impl State {
                 });
             }
             Phase::Failed(error) => {
-                ui.colored_label(Color32::from_rgb(255, 158, 153), error.message(language));
+                ui.colored_label(theme::error(), error.message(language));
             }
             Phase::Idle => {}
         }

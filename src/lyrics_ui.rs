@@ -711,9 +711,9 @@ fn lines(
                         0.25,
                     );
                     let resting = if !data.synced || response.hovered() {
-                        Color32::from_rgb(238, 241, 247)
+                        theme::tone(Color32::from_rgb(238, 241, 247))
                     } else {
-                        Color32::from_gray(124)
+                        theme::tone(Color32::from_gray(124))
                     };
                     let color = resting.lerp_to_gamma(theme::accent(), current);
                     let scale = 1.0 + (ACTIVE_SCALE - 1.0) * current;

@@ -21,6 +21,7 @@ pub enum Icon {
     VolumeMuted,
     Settings,
     Interface,
+    Palette,
     Storage,
     Info,
     Shuffle,
@@ -438,6 +439,39 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             line(&[(12.0, 17.0), (12.0, 21.0)]);
             line(&[(8.0, 21.0), (16.0, 21.0)]);
+        }
+        Icon::Palette => {
+            // A painter's palette: a round board with a notch for the thumb
+            // at the lower right, and three paint dabs.
+            let (from, to) = (55.0_f32, 345.0_f32);
+            let mut outline: Vec<egui::Pos2> = (0..=40)
+                .map(|i| {
+                    let angle = (from + (to - from) * i as f32 / 40.0).to_radians();
+                    point(12.0 + 9.0 * angle.cos(), 12.0 + 9.0 * angle.sin())
+                })
+                .collect();
+            // The notch curves inwards from the arc's end back to its start.
+            let end = (
+                12.0 + 9.0 * to.to_radians().cos(),
+                12.0 + 9.0 * to.to_radians().sin(),
+            );
+            let start = (
+                12.0 + 9.0 * from.to_radians().cos(),
+                12.0 + 9.0 * from.to_radians().sin(),
+            );
+            let control = (14.5, 13.0);
+            for i in 1..10 {
+                let t = i as f32 / 10.0;
+                let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * (1.0 - t) * t, t * t);
+                outline.push(point(
+                    a * end.0 + b * control.0 + c * start.0,
+                    a * end.1 + b * control.1 + c * start.1,
+                ));
+            }
+            painter.add(egui::Shape::closed_line(outline, stroke));
+            for (x, y) in [(7.5, 11.5), (10.0, 7.0), (15.0, 6.5)] {
+                painter.circle_filled(point(x, y), 1.6 * scale, color);
+            }
         }
         Icon::Storage => {
             let top = (0..=32)
@@ -1007,7 +1041,7 @@ pub fn panel_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, label: &str) -> R
         rect.shrink(6.0),
         icon,
         if response.hovered() {
-            Color32::WHITE
+            crate::theme::strong()
         } else {
             crate::theme::muted()
         },
@@ -1059,7 +1093,7 @@ pub fn track_button(
         // A clear step towards white on hover: the muted gray turns nearly
         // white, the accent of a selected action lightens.
         let color = if response.hovered() || response.has_focus() {
-            base.lerp_to_gamma(Color32::WHITE, if selected { 0.35 } else { 0.75 })
+            base.lerp_to_gamma(crate::theme::strong(), if selected { 0.35 } else { 0.75 })
         } else {
             base
         };
@@ -1179,6 +1213,7 @@ mod tests {
             Icon::VolumeMuted,
             Icon::Settings,
             Icon::Interface,
+            Icon::Palette,
             Icon::Storage,
             Icon::Info,
             Icon::Shuffle,

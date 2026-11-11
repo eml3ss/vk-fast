@@ -151,7 +151,7 @@ fn deserialize_accent<'de, D: serde::Deserializer<'de>>(
 ) -> Result<String, D::Error> {
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_str()
-        .filter(|code| Accent::from_code(code).is_some())
+        .filter(|code| crate::palette::parse_accent(code).is_some())
         .unwrap_or_default()
         .to_owned())
 }
@@ -795,17 +795,17 @@ pub fn save_theme(theme: Theme) -> io::Result<()> {
 }
 
 /// The accent colour; the original blue unless another was chosen.
-pub fn load_accent() -> Accent {
+pub fn load_accent() -> eframe::egui::Color32 {
     preferences_path()
         .ok()
         .and_then(|path| load_preferences_at(&path).ok().flatten())
-        .and_then(|preferences| Accent::from_code(&preferences.accent))
-        .unwrap_or_default()
+        .and_then(|preferences| crate::palette::parse_accent(&preferences.accent))
+        .unwrap_or_else(|| Accent::default().color())
 }
 
-pub fn save_accent(accent: Accent) -> io::Result<()> {
+pub fn save_accent(accent: eframe::egui::Color32) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
-        preferences.accent = accent.code().to_owned()
+        preferences.accent = crate::palette::accent_code(accent)
     })
 }
 
@@ -1200,7 +1200,7 @@ mod tests {
         let path = directory.0.join("preferences.json");
         for json in [
             r#"{}"#,
-            r#"{"theme":"light"}"#,
+            r#"{"theme":"white"}"#,
             r#"{"theme":7}"#,
             r#"{"theme":null}"#,
         ] {
@@ -1231,10 +1231,20 @@ mod tests {
     fn accent_defaults_to_blue_and_a_chosen_accent_survives_theme_and_other_settings() {
         let directory = TestDirectory::new();
         let path = directory.0.join("preferences.json");
-        for json in [r#"{}"#, r#"{"accent":"gold"}"#, r#"{"accent":3}"#] {
+        for json in [
+            r#"{}"#,
+            r#"{"accent":"gold"}"#,
+            r#"{"accent":3}"#,
+            r##"{"accent":"#12345"}"##,
+        ] {
             let preferences: Preferences = serde_json::from_str(json).unwrap();
-            assert_eq!(Accent::from_code(&preferences.accent), None);
+            assert_eq!(crate::palette::parse_accent(&preferences.accent), None);
         }
+        let custom: Preferences = serde_json::from_str(r##"{"accent":"#e01f7a"}"##).unwrap();
+        assert_eq!(
+            crate::palette::parse_accent(&custom.accent),
+            Some(eframe::egui::Color32::from_rgb(0xe0, 0x1f, 0x7a))
+        );
         assert!(
             !serde_json::to_string(&Preferences::default())
                 .unwrap()

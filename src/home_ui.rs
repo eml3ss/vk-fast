@@ -83,7 +83,8 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         scroll
     };
     theme::scroll_area(ui, scroll, |ui| {
-        action = hero(ui, &view).or(action.take());
+        // VK Mix's colours keep their white text in a light theme too.
+        action = theme::dark_scene(ui, |ui| hero(ui, &view)).or(action.take());
         ui.add_space(SECTION_GAP);
         action = shortcuts(ui, covers, &view).or(action.take());
         if let Some(error) = view.error {
@@ -94,11 +95,9 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                 .inner_margin(14)
                 .show(ui, |ui| {
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(error).color(Color32::from_rgb(255, 174, 169)),
-                        )
-                        .wrap()
-                        .selectable(false),
+                        egui::Label::new(RichText::new(error).color(theme::error()))
+                            .wrap()
+                            .selectable(false),
                     );
                 });
         }
@@ -786,7 +785,7 @@ fn collage(
             ui.painter(),
             rect.shrink(rect.width() * 0.27),
             fallback,
-            theme::accent_tone(Color32::from_rgb(119, 159, 214)),
+            theme::accent_light(Color32::from_rgb(119, 159, 214)),
         );
         return;
     }

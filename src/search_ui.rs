@@ -145,7 +145,7 @@ pub fn queries(
     }
     if let Some(error) = error {
         ui.add(
-            egui::Label::new(RichText::new(error).color(Color32::from_rgb(255, 158, 153)))
+            egui::Label::new(RichText::new(error).color(theme::error()))
                 .wrap()
                 .selectable(false),
         );

@@ -22,6 +22,21 @@ pub fn surface() -> Color32 {
 pub fn panel() -> Color32 {
     crate::palette::current().panel
 }
+/// The brightest text and icons (white in dark themes), for hovered icons
+/// and titles drawn on the page. White on the accent or a cover stays white.
+pub fn strong() -> Color32 {
+    crate::palette::current().strong
+}
+pub fn error() -> Color32 {
+    crate::palette::current().error
+}
+pub fn warning() -> Color32 {
+    crate::palette::current().warning
+}
+/// Light themes draw dark text on light surfaces.
+pub fn is_light() -> bool {
+    crate::palette::current().light
+}
 pub fn primary() -> Color32 {
     crate::palette::current().primary
 }
@@ -48,6 +63,42 @@ pub fn accent_tone(color: Color32) -> Color32 {
     crate::palette::current().accent_tone(color)
 }
 
+/// `color`, a light shade of the original blue for dark backgrounds, in the
+/// active accent; light themes use the accent itself, which reads on them.
+pub fn accent_light(color: Color32) -> Color32 {
+    if is_light() {
+        accent()
+    } else {
+        accent_tone(color)
+    }
+}
+
+/// Draw `contents` as a dark scene in a light theme: views over a cover or
+/// VK Mix's colours keep white text on dark shades. Other themes draw it as
+/// usual.
+pub fn dark_scene<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if !is_light() {
+        return contents(ui);
+    }
+    crate::palette::scene(Theme::Dark, || {
+        ui.scope(|ui| {
+            *ui.visuals_mut() = visuals(&crate::palette::current());
+            contents(ui)
+        })
+        .inner
+    })
+}
+
+/// The outline of a white handle in light themes, where white alone is lost
+/// on white cards.
+pub fn handle_stroke() -> egui::Stroke {
+    if is_light() {
+        egui::Stroke::new(1.0, crate::palette::current().control_hovered_stroke)
+    } else {
+        egui::Stroke::NONE
+    }
+}
+
 /// The line between a panel and the page, in themes whose panels are as dark
 /// as the page.
 pub fn panel_line() -> Option<egui::Stroke> {
@@ -58,7 +109,7 @@ pub fn panel_line() -> Option<egui::Stroke> {
 
 /// Draw the app in `theme` with `accent` from this frame on, with egui's own
 /// widgets.
-pub fn apply(ctx: &egui::Context, theme: Theme, accent: Accent) {
+pub fn apply(ctx: &egui::Context, theme: Theme, accent: Color32) {
     crate::palette::set_active(theme);
     crate::palette::set_accent(accent);
     install_style(ctx);
@@ -327,12 +378,16 @@ pub fn slider<N: egui::emath::Numeric>(
         let x = egui::lerp(track.min..=track.max, fraction);
         let grow = ui.style().interact(&response).expansion;
         let half = egui::vec2(radius * aspect, radius) + egui::Vec2::splat(grow);
-        ui.painter().rect_filled(
-            egui::Rect::from_center_size(egui::pos2(x, response.rect.center().y), half * 2.0),
-            // Exactly over egui's own handle: its rect and rounding.
-            ui.style().interact(&response).corner_radius,
-            Color32::WHITE,
-        );
+        let handle =
+            egui::Rect::from_center_size(egui::pos2(x, response.rect.center().y), half * 2.0);
+        // Exactly over egui's own handle: its rect and rounding.
+        let rounding = ui.style().interact(&response).corner_radius;
+        ui.painter().rect_filled(handle, rounding, Color32::WHITE);
+        let outline = handle_stroke();
+        if outline != egui::Stroke::NONE {
+            ui.painter()
+                .rect_stroke(handle, rounding, outline, egui::StrokeKind::Inside);
+        }
         response
     })
     .inner
@@ -610,6 +665,15 @@ fn install_style(ctx: &egui::Context) {
 /// colours, and every other grey toned to the theme.
 pub fn visuals(palette: &crate::palette::Palette) -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
+    if palette.light {
+        let light = egui::Visuals::light();
+        visuals.dark_mode = false;
+        visuals.window_shadow = light.window_shadow;
+        visuals.popup_shadow = light.popup_shadow;
+        visuals.warn_fg_color = palette.warning;
+        visuals.error_fg_color = palette.error;
+        visuals.text_cursor.stroke.color = palette.text;
+    }
     let tone = |color: &mut Color32| *color = palette.tone(*color);
     for widget in [
         &mut visuals.widgets.noninteractive,

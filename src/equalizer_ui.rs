@@ -261,7 +261,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         painter.galley(
             bubble.center() - galley.size() * 0.5,
             galley,
-            Color32::WHITE,
+            theme::strong(),
         );
     }
     // Frequencies and their gains under the graph.
@@ -447,7 +447,7 @@ fn presets(
     }
     if state.full {
         ui.colored_label(
-            Color32::from_rgb(255, 158, 153),
+            theme::error(),
             t(
                 "Больше пресетов не сохранить: удалите ненужные.",
                 "No room for more presets: delete some first.",

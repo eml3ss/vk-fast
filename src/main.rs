@@ -6,6 +6,7 @@
 mod app;
 mod app_icon;
 mod app_paths;
+mod appearance_ui;
 mod artist_catalog;
 mod artist_releases;
 mod audio_cache;
