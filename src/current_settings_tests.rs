@@ -753,8 +753,24 @@ fn the_equalizer_is_shaped_on_its_graph_and_keeps_presets_of_its_own() {
     assert!(
         !app.equalizer.enabled && app.equalizer.builtin() == Some(crate::equalizer::Builtin::Flat)
     );
-    let top = account_ui_text_rect(&output, "+12").unwrap().center().y;
-    let bottom = account_ui_text_rect(&output, "−12").unwrap().center().y;
+    // The graph's panel; its ±12 dB lines sit 16 points inside it.
+    let graph = account_ui_shapes(&output)
+        .into_iter()
+        .find_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == crate::theme::BACKGROUND
+                    && (rect.rect.height() - 190.0).abs() < 0.5 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .expect("the graph");
+    let (top, bottom) = (graph.top() + 16.0, graph.bottom() - 16.0);
+    assert!(
+        account_ui_text_rect(&output, "+12").is_none(),
+        "no scale labels"
+    );
     let x = account_ui_text_rect(&output, "1k").unwrap().center().x;
     let zero = (top + bottom) * 0.5;
     let button = |pos, pressed| egui::Event::PointerButton {

@@ -852,7 +852,7 @@ impl SettingsSection {
             Self::General => Icon::Settings,
             Self::Interface => Icon::Interface,
             Self::Playback => Icon::Play,
-            Self::Equalizer => Icon::Sliders,
+            Self::Equalizer => Icon::Equalizer,
             Self::Cache => Icon::Storage,
             Self::About => Icon::Info,
         }

@@ -21,6 +21,8 @@ pub struct State {
     naming: Option<String>,
     /// Saving failed because the preset list is full.
     full: bool,
+    /// The name field takes focus once, when its row opens.
+    focus_name: bool,
 }
 
 /// What changed this frame.
@@ -105,15 +107,14 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, GRAPH_HEIGHT), Sense::hover());
     let plot = egui::Rect::from_min_max(
-        rect.min + egui::vec2(34.0, 16.0),
+        rect.min + egui::vec2(14.0, 16.0),
         rect.max - egui::vec2(14.0, 16.0),
     );
     let x_of = |freq: f32| plot.left() + plot.width() * (freq / LOW).ln() / (HIGH / LOW).ln();
     let y_of = |gain: f32| {
         plot.center().y - gain.clamp(-MAX_DB - 3.0, MAX_DB + 3.0) / MAX_DB * plot.height() * 0.5
     };
-    let gain_at =
-        |y: f32| equalizer::clean_gain((plot.center().y - y) / (plot.height() * 0.5) * MAX_DB);
+    let db_at = |y: f32| (plot.center().y - y) / (plot.height() * 0.5) * MAX_DB;
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 10.0, BACKGROUND);
     let small = egui::FontId::proportional(11.0);
@@ -124,16 +125,10 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         } else {
             Color32::from_rgb(36, 42, 51)
         };
+        // No scale labels: every band's value is written under the graph.
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
             Stroke::new(1.0, color),
-        );
-        painter.text(
-            egui::pos2(rect.left() + 26.0, y),
-            egui::Align2::RIGHT_CENTER,
-            gain_label(gain),
-            small.clone(),
-            MUTED,
         );
     }
     let enabled = settings.enabled;
@@ -161,7 +156,10 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         } else if (response.dragged() || response.clicked())
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            next = gain_at(pointer.y);
+            // The knob sits on the curve, which its neighbours lift or lower
+            // by a fixed amount here: take that off so it follows the cursor.
+            let neighbours = equalizer::response_db(&settings.gains, freq) - gain;
+            next = equalizer::clean_gain(db_at(pointer.y) - neighbours);
         }
         if response.has_focus() {
             ui.input(|input| {
@@ -184,9 +182,23 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     }
     // The curve as it sounds, with a soft fill toward 0 dB.
     let zero = y_of(0.0);
-    let points: Vec<egui::Pos2> = (0..=160)
-        .map(|step| {
-            let x = plot.left() + plot.width() * step as f32 / 160.0;
+    let knob = |band: usize| {
+        egui::pos2(
+            x_of(BANDS[band]),
+            y_of(equalizer::response_db(&settings.gains, BANDS[band])),
+        )
+    };
+    // The line passes exactly through every knob's centre.
+    let bands = BANDS.map(x_of);
+    let mut xs: Vec<f32> = (0..=160)
+        .map(|step| plot.left() + plot.width() * step as f32 / 160.0)
+        .filter(|x| bands.iter().all(|band| (band - x).abs() >= 0.5))
+        .chain(bands)
+        .collect();
+    xs.sort_by(f32::total_cmp);
+    let points: Vec<egui::Pos2> = xs
+        .into_iter()
+        .map(|x| {
             let freq = LOW * (HIGH / LOW).powf((x - plot.left()) / plot.width());
             egui::pos2(x, y_of(equalizer::response_db(&settings.gains, freq)))
         })
@@ -208,8 +220,8 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     }
     painter.add(fill);
     painter.add(egui::Shape::line(points, Stroke::new(2.0, line)));
-    for (band, freq) in BANDS.into_iter().enumerate() {
-        let center = egui::pos2(x_of(freq), y_of(settings.gains[band]));
+    for band in 0..BANDS.len() {
+        let center = knob(band);
         let lit = active == Some(band);
         painter.line_segment(
             [egui::pos2(center.x, zero), center],
@@ -227,7 +239,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         );
     }
     if let Some(band) = active {
-        let center = egui::pos2(x_of(BANDS[band]), y_of(settings.gains[band]));
+        let center = knob(band);
         let text = format!(
             "{} {} · {} {}",
             gain_label(settings.gains[band]),
@@ -361,20 +373,37 @@ fn presets(
         {
             state.naming = Some(String::new());
             state.full = false;
+            state.focus_name = true;
         }
     });
+    let focus = std::mem::take(&mut state.focus_name);
     if let Some(name) = &mut state.naming {
         ui.add_space(8.0);
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            let field = ui.add(
+            // Drawn like the music search field: a frameless edit in a
+            // rounded fill (here the page's colour, so it shows on the card),
+            // exactly as tall as the buttons beside it.
+            let row = ui.text_style_height(&egui::TextStyle::Body);
+            let height = (ui.text_style_height(&egui::TextStyle::Button)
+                + 2.0 * ui.spacing().button_padding.y)
+                .max(ui.spacing().interact_size.y);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(244.0, height), Sense::hover());
+            ui.painter().rect_filled(rect, 8.0, BACKGROUND);
+            let inner =
+                egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 24.0, row));
+            let field = ui.put(
+                inner,
                 egui::TextEdit::singleline(name)
+                    .id_salt("equalizer-preset-name")
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
                     .hint_text(t("Название пресета", "Preset name"))
                     .char_limit(equalizer::MAX_NAME)
-                    .desired_width(220.0),
+                    .desired_width(inner.width()),
             );
-            if !field.has_focus() && !field.lost_focus() && name.is_empty() {
+            if focus {
                 field.request_focus();
             }
             if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
@@ -426,6 +455,79 @@ fn presets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knobs_sit_on_the_drawn_curve_and_a_drag_lands_where_the_cursor_is() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings {
+            enabled: true,
+            gains: [5.0, 4.5, 2.0, 0.0, -1.5, -1.0, 1.0, 3.0, 4.0, 4.5],
+            presets: Vec::new(),
+        };
+        let frame = |events: Vec<egui::Event>, settings: &mut Settings| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    graph(ui, Language::English, settings);
+                },
+            );
+            output.textures_delta.clear();
+            let mut circles = Vec::new();
+            let mut line = Vec::new();
+            for shape in output.shapes {
+                let mut stack = vec![shape.shape];
+                while let Some(shape) = stack.pop() {
+                    match shape {
+                        egui::Shape::Vec(shapes) => stack.extend(shapes),
+                        egui::Shape::Circle(circle) => circles.push(circle.center),
+                        egui::Shape::Path(path) if path.points.len() > 100 => line = path.points,
+                        _ => {}
+                    }
+                }
+            }
+            (circles, line)
+        };
+        let (circles, line) = frame(Vec::new(), &mut settings);
+        assert_eq!(circles.len(), BANDS.len());
+        for center in &circles {
+            assert!(
+                line.iter().any(|point| point.distance(*center) < 0.01),
+                "knob {center:?} is on the line"
+            );
+        }
+        // Dragging the 8 kHz knob 30 points up moves it 30 points up.
+        let mut knobs = circles.clone();
+        knobs.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let start = knobs[8];
+        let to = start - egui::vec2(0.0, 30.0);
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+            &mut settings,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut settings);
+        frame(vec![press(to, false)], &mut settings);
+        let (circles, _) = frame(Vec::new(), &mut settings);
+        let moved = circles
+            .into_iter()
+            .min_by(|a, b| a.distance(to).total_cmp(&b.distance(to)))
+            .unwrap();
+        // Within half a decibel step of the cursor.
+        assert!((moved.y - to.y).abs() < 4.0, "{moved:?} vs {to:?}");
+        assert!((moved.x - to.x).abs() < 0.01);
+    }
 
     #[test]
     fn labels_use_a_real_minus_and_short_frequencies() {

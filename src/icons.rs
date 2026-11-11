@@ -38,6 +38,8 @@ pub enum Icon {
     Copy,
     /// Two horizontal sliders with knobs: tune something.
     Sliders,
+    /// Three upright faders set at different heights: the equalizer.
+    Equalizer,
     QueueAdd,
     Queue,
     Lyrics,
@@ -812,6 +814,13 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(10.5, 16.0), (20.5, 16.0)]);
             line(&[(8.0, 13.0), (8.0, 19.0)]);
         }
+        Icon::Equalizer => {
+            // Solid knobs on full tracks stay readable at sidebar sizes.
+            for (x, knob) in [(5.0, 15.0), (12.0, 8.0), (19.0, 13.0)] {
+                line(&[(x, 3.5), (x, 20.5)]);
+                painter.circle_filled(point(x, knob), 3.0 * scale, color);
+            }
+        }
         Icon::Copy => {
             line(&[
                 (9.0, 9.0),
@@ -1193,6 +1202,7 @@ mod tests {
             Icon::CopyLink,
             Icon::Copy,
             Icon::Sliders,
+            Icon::Equalizer,
             Icon::Edit,
             Icon::Trash,
             Icon::RemoveFromLibrary,
