@@ -344,3 +344,48 @@ fn player_bar_shows_a_hand_only_on_its_cover_title_and_artists() {
         egui::CursorIcon::Default
     );
 }
+
+#[test]
+fn richer_metadata_for_the_same_track_keeps_its_lyrics_and_their_search() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx, Language::English);
+    app.lyrics.open = true;
+    app.lyrics.active = true;
+    // Opening fullscreen fills in the album: the lyrics found stay.
+    if let Some(track) = &mut app.playing {
+        track.album = Some(crate::model::AlbumRef {
+            owner_id: -1,
+            id: 5,
+            title: "Filled in later".into(),
+            access_key: None,
+            cover_url: None,
+        });
+    }
+    app.poll_lyrics(&ctx);
+    assert_eq!(app.lyrics.data.as_ref().unwrap().lines.len(), 18);
+    assert!(app.lyrics.pending.is_none());
+    assert_eq!(app.lyrics.query.as_ref().unwrap().album, "Filled in later");
+    // A search under way is not restarted either, and its reply lands.
+    let asked = app.lyrics.query.clone().unwrap();
+    app.lyrics.data = None;
+    app.lyrics.pending = Some(3);
+    if let Some(track) = &mut app.playing {
+        track.artist = "Synthetic artist, credited".into();
+    }
+    app.poll_lyrics(&ctx);
+    assert_eq!(app.lyrics.pending, Some(3));
+    app.apply_lyrics_event(Event::Lyrics {
+        id: 3,
+        query: asked,
+        result: Ok(Arc::new(lyrics::test_data(4, true))),
+    });
+    assert_eq!(app.lyrics.data.as_ref().unwrap().lines.len(), 4);
+    // Another track still starts over (no search is started here: tests
+    // never run the lyrics service).
+    app.lyrics.settings_busy = true;
+    if let Some(track) = &mut app.playing {
+        track.id += 1;
+    }
+    app.poll_lyrics(&ctx);
+    assert!(app.lyrics.data.is_none() && app.lyrics.service.is_none());
+}

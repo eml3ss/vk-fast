@@ -11336,7 +11336,10 @@ impl MusicApp {
         {
             self.set_lyrics_fullscreen(ui.ctx(), false);
         }
-        if !self.system_titlebar && !self.lyrics.fullscreen {
+        // Fullscreen lyrics included: on Windows they fill a maximized
+        // window that is dragged by its top like any other; in a real
+        // fullscreen window the region itself does nothing.
+        if !self.system_titlebar {
             let window = ui.ctx().viewport_rect();
             let caption = egui::Rect::from_min_max(
                 window.min,
@@ -16429,6 +16432,27 @@ mod tests {
             chrome_commands(&pressed),
             [egui::ViewportCommand::StartDrag]
         );
+    }
+
+    #[test]
+    fn fullscreen_lyrics_keep_the_window_draggable_by_its_top() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.system_titlebar = false;
+        app.lyrics.fullscreen = true;
+        app.lyrics.open = true;
+        app.lyrics.active = true;
+        let size = egui::vec2(1120.0, 850.0);
+        let mut tick = 0;
+        account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
+        account_ui_frame(&ctx, &mut app, size, &mut tick, Vec::new());
+        let blank = egui::pos2(120.0, 12.0);
+        let pressed = account_ui_frame(&ctx, &mut app, size, &mut tick, seek_pointer(blank, true));
+        assert_eq!(
+            chrome_commands(&pressed),
+            [egui::ViewportCommand::StartDrag]
+        );
+        assert!(app.lyrics.fullscreen, "dragging leaves the lyrics open");
     }
 
     #[test]

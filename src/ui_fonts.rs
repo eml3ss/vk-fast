@@ -15,7 +15,7 @@ use std::{
 const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_READ_BYTES: usize = 128 * 1024 * 1024;
-const MAX_FONTS: usize = 32;
+const MAX_FONTS: usize = 40;
 const SCRIPTS: &[(&str, &str)] = &[
     ("Japanese", "日本語あいうえおアイウエオ"),
     ("Chinese", "汉语简体漢語繁體"),
@@ -41,6 +41,12 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("Mongolian", "ᠮᠣᠩᠭᠣᠯ"),
     ("Odia", "ଓଡ଼ିଆ"),
     ("Gurmukhi", "ਪੰਜਾਬੀ"),
+    ("Javanese", "꧁꧂ꦗꦮ"),
+    // Decorative letters and signs common in VK titles and names.
+    ("Math letters", "𝐀𝐚𝐴𝑎𝑨𝒂𝒜𝓐𝓪𝔄𝔞𝔸𝕒𝕬𝖆𝖠𝗮𝘈𝘢𝘼𝙖𝙰𝚊𝟎𝟘𝟙"),
+    ("Small capitals", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢᵃᵇᶜᵈᵉⁿʰⁱ₊˚ʚɞ"),
+    ("Enclosed", "ⒶⓐⓏⓩ①⑳ＡａＺｚ🅰🄰🅐"),
+    ("Symbols", "★☆♡♥✦✧⋆✿❀☾☽⚡♪♫☯✞⛧ꕤ⸝⊹⋆｡°✩₊⁺⌁⚘☁︎"),
 ];
 
 struct Candidate {
@@ -217,7 +223,9 @@ fn candidates() -> Vec<Candidate> {
         index: 0,
     })
     .collect::<Vec<_>>();
-    result.extend(fontconfig());
+    // Fonts made for one script come before fontconfig's general list: its
+    // first general font (often DejaVu Sans) would otherwise take Arabic
+    // and Hebrew with oversized, unjoined letters.
     for root in [
         "/usr/share/fonts/noto",
         "/usr/share/fonts/truetype/noto",
@@ -228,6 +236,7 @@ fn candidates() -> Vec<Candidate> {
         for name in [
             "NotoSansCJKjp-Regular.otf",
             "NotoSansJP-Regular.ttf",
+            "NotoSansArabicUI-Regular.ttf",
             "NotoSansArabic-Regular.ttf",
             "NotoSansHebrew-Regular.ttf",
             "NotoSansDevanagari-Regular.ttf",
@@ -237,7 +246,10 @@ fn candidates() -> Vec<Candidate> {
             "NotoSansTelugu-Regular.ttf",
             "NotoSansGeorgian-Regular.ttf",
             "NotoSansArmenian-Regular.ttf",
-            "DejaVuSans.ttf",
+            "NotoSansJavanese-Regular.ttf",
+            "NotoSansMath-Regular.ttf",
+            "NotoSansSymbols-Regular.ttf",
+            "NotoSansSymbols2-Regular.ttf",
         ] {
             result.push(Candidate {
                 path: PathBuf::from(root).join(name),
@@ -245,6 +257,7 @@ fn candidates() -> Vec<Candidate> {
             });
         }
     }
+    result.extend(fontconfig());
     result
 }
 
@@ -339,6 +352,11 @@ fn candidates() -> Vec<Candidate> {
                 "simsun.ttc",
                 "malgun.ttf",
                 "segoeui.ttf",
+                // Decorative letters and signs: math alphabets, enclosed
+                // letters, stars, notes; Javanese.
+                "seguisym.ttf",
+                "cambria.ttc",
+                "javatext.ttf",
                 "Nirmala.ttf",
                 "LeelawUI.ttf",
                 "ebrima.ttf",

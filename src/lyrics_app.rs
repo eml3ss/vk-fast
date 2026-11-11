@@ -164,8 +164,19 @@ impl MusicApp {
         }
         let query = self.playing.as_ref().map(Query::from_track);
         if query != self.lyrics.query {
-            self.lyrics.clear_track();
-            self.lyrics.query = query;
+            let same_track = query.as_ref().map(|query| query.key)
+                == self.lyrics.query.as_ref().map(|query| query.key);
+            if same_track && self.lyrics.data.is_some() {
+                // Richer metadata for the same recording (opening fullscreen
+                // asks for it) keeps the lyrics already found.
+                self.lyrics.query = query;
+            } else if same_track && self.lyrics.pending.is_some() {
+                // The search under way answers for this recording too; its
+                // reply is matched against the query it was asked with.
+            } else {
+                self.lyrics.clear_track();
+                self.lyrics.query = query;
+            }
         }
         if self.lyrics.open
             && self.lyrics.active
