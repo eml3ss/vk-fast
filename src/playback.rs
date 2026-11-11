@@ -500,7 +500,8 @@ struct Pcm {
     equalizer: Arc<crate::equalizer::Shared>,
     /// Frames this stream fades in over from its first frame (0: none).
     /// Frames count from where the stream started, not from the track's start.
-    fade_in_len: u64,
+    /// A seek or pause sets it to 0: the crossfade is over at once.
+    fade_in_len: AtomicU64,
     /// Frame where a crossfade out starts (`NO_FADE`: none) and its length.
     fade_out_from: AtomicU64,
     fade_out_len: AtomicU64,
@@ -542,10 +543,14 @@ impl Pcm {
             started: AtomicBool::new(false),
             volume,
             equalizer: Arc::default(),
-            fade_in_len: 0,
+            fade_in_len: AtomicU64::new(0),
             fade_out_from: AtomicU64::new(NO_FADE),
             fade_out_len: AtomicU64::new(0),
         }
+    }
+    /// Plays at full level from now on, whatever fade-in was under way.
+    fn end_fade_in(&self) {
+        self.fade_in_len.store(0, Ordering::Release);
     }
     fn is_primed(&self) -> bool {
         let epoch = self.cursor.load(Ordering::Acquire) & !PCM_FRAME_MASK;
@@ -649,6 +654,7 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
     let requested = output.len() / pcm.channels;
     let frames = requested.min(available);
     let volume = f32::from_bits(pcm.volume.load(Ordering::Relaxed));
+    let fade_in_len = pcm.fade_in_len.load(Ordering::Acquire);
     let fade_out_from = pcm.fade_out_from.load(Ordering::Acquire);
     let fade_out_len = pcm.fade_out_len.load(Ordering::Relaxed).max(1);
     let capacity_frames = pcm.capacity / pcm.channels;
@@ -660,8 +666,8 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
         let slot = (at % capacity_frames as u64) as usize * pcm.channels;
         // Equal-power crossfade: the tracks' sum keeps its loudness.
         let mut gain = volume;
-        if at < pcm.fade_in_len {
-            let t = at as f32 / pcm.fade_in_len as f32;
+        if at < fade_in_len {
+            let t = at as f32 / fade_in_len as f32;
             gain *= (t * std::f32::consts::FRAC_PI_2).sin();
         }
         if at >= fade_out_from {
@@ -1603,7 +1609,7 @@ fn start(
     let pcm = Arc::new(Pcm {
         underruns: control.underruns.clone(),
         equalizer: output.equalizer,
-        fade_in_len: fade_in,
+        fade_in_len: AtomicU64::new(fade_in),
         ..Pcm::new(CHANNELS, SAMPLE_RATE, output.volume, paused)
     });
     prefill(&pcm, &bytes, false);
@@ -1739,7 +1745,12 @@ fn controller(
             }
             Ok(Command::Pause) => {
                 pause_intent = true;
+                // A pause ends a crossfade outright: the old track is gone
+                // and the new one resumes at full level.
                 fading = None;
+                if let Some(r) = &running {
+                    r.pcm.end_fade_in();
+                }
                 if let Some(r) = &running {
                     r.pcm.paused.store(true, Ordering::Relaxed);
                 }
@@ -1754,7 +1765,11 @@ fn controller(
                 if !control.current(epoch) {
                     continue;
                 }
+                // A seek ends a crossfade outright, both its sides.
                 fading = None;
+                if let Some(r) = &running {
+                    r.pcm.end_fade_in();
+                }
                 active = epoch;
                 let Some(source) = &source else {
                     publish(&state, &control, active, PlaybackState::Stopped, (0.0, 0.0));
@@ -1928,6 +1943,24 @@ mod tests {
         pcm.primed.store(epoch | 1, Ordering::Release);
     }
     #[test]
+    fn ending_a_fade_in_plays_at_full_level_at_once_even_after_a_refill() {
+        let p = Pcm {
+            fade_in_len: AtomicU64::new(1_000),
+            ..Pcm::new(1, 100, Arc::new(AtomicU32::new(1.0_f32.to_bits())), false)
+        };
+        seed_pcm(&p, 0, std::iter::repeat_n(1.0, 400));
+        let mut output = vec![0.0; 100];
+        render(&mut output, &p);
+        assert!(output[50] < 0.2, "still fading in");
+        // A seek refills from frame 0; ended, the fade never starts again.
+        p.end_fade_in();
+        seed_pcm(&p, 0, std::iter::repeat_n(1.0, 400));
+        let mut output = vec![0.0; 100];
+        render(&mut output, &p);
+        assert!(output.iter().all(|sample| *sample == 1.0));
+    }
+
+    #[test]
     fn a_stream_started_mid_track_without_a_crossfade_plays_at_full_level() {
         // After a seek a stream starts at its own frame 0 with no fade in.
         let p = Pcm::new(2, 10, Arc::new(AtomicU32::new(0.5_f32.to_bits())), false);
@@ -1943,7 +1976,7 @@ mod tests {
         // 100 frames a second keeps the arithmetic readable.
         let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
         let new = Pcm {
-            fade_in_len: 100,
+            fade_in_len: AtomicU64::new(100),
             ..Pcm::new(1, 100, volume.clone(), false)
         };
         seed_pcm(&new, 0, std::iter::repeat_n(1.0, 300));

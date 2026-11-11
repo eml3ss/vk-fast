@@ -132,3 +132,17 @@ fn seeking_into_the_crossfade_seconds_cancels_it_and_seeking_back_restores_it() 
     assert!(app.playback_pending.is_some() && app.crossfading());
     finish_resolvers(&mut app);
 }
+
+#[test]
+fn a_seek_while_the_next_track_loads_ends_the_crossfade() {
+    let ctx = egui::Context::default();
+    let mut app = playing_at(&ctx, 195.0);
+    app.poll_playback(&ctx);
+    assert!(app.playback_pending.is_some() && app.crossfading());
+    app.commit_playback_seek(30.0);
+    assert!(
+        !app.crossfading(),
+        "the next track starts without a crossfade"
+    );
+    finish_resolvers(&mut app);
+}

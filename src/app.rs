@@ -2316,6 +2316,9 @@ impl MusicApp {
         // one starts as usual. Seeking back before them restores it.
         let starts_at = f64::from(track.duration) - f64::from(self.crossfade_seconds);
         self.crossfade_skipped = (self.crossfade && position >= starts_at).then(|| track.key());
+        // A seek ends a crossfade under way outright: the next track, if it
+        // is still loading, starts without one.
+        self.crossfade_until = None;
         self.system_media.position_changed();
         if self.resume_position.is_some() {
             self.resume_position = Some(position);
