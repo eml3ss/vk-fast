@@ -141,6 +141,9 @@ enum Command {
         /// switches at once.
         crossfade: f32,
     },
+    /// Opens the next track paused, so a crossfade into it starts at once;
+    /// `None` drops it.
+    Preload(Option<Source>),
     Pause,
     Resume,
     Seek {
@@ -274,6 +277,21 @@ impl Player {
             0.0,
             seconds,
         );
+    }
+
+    /// Opens the next track paused and decodes its first seconds, so the
+    /// crossfade into it (`crossfade_cached` with the same key) starts at once.
+    pub fn preload_cached(&mut self, key: CacheKey, url: Option<String>) {
+        self.send(Command::Preload(Some(Source {
+            url: url.map(Zeroizing::new),
+            duration: key.duration,
+            key: Some(key),
+        })));
+    }
+
+    /// Drops a preloaded next track.
+    pub fn drop_preload(&mut self) {
+        self.send(Command::Preload(None));
     }
 
     fn play_source(&mut self, source: Source, offset: f64) {
@@ -1690,6 +1708,8 @@ fn controller(
     let mut pause_intent = false;
     // The track fading out under a crossfade, and the fade's length.
     let mut fading: Option<(Running, u64)> = None;
+    // The next track, opened paused ahead of its crossfade.
+    let mut ready: Option<(Option<CacheKey>, Running)> = None;
     loop {
         match commands.recv_timeout(TICK) {
             Ok(Command::Play {
@@ -1711,6 +1731,10 @@ fn controller(
                     .filter(|old| frames > 0 && old.audible())
                     .map(|old| (old, frames));
                 let fade_in = if fading.is_some() { frames } else { 0 };
+                // The preloaded next track, when this is it, starts at once.
+                let preloaded = ready.take().filter(|(key, _)| {
+                    offset == 0.0 && key.is_some() && *key == source.as_ref().and_then(|s| s.key)
+                });
                 active = epoch;
                 pause_intent = false;
                 if !control.current(epoch) {
@@ -1724,6 +1748,13 @@ fn controller(
                     PlaybackState::Loading,
                     (offset, offset),
                 );
+                if let Some((_, new)) = preloaded {
+                    crate::diagnostics::event("playback", "crossfade: preloaded track starts");
+                    new.pcm.fade_in_len.store(fade_in, Ordering::Release);
+                    new.pcm.paused.store(false, Ordering::Release);
+                    running = Some(new);
+                    continue;
+                }
                 match start(
                     source.as_ref().unwrap(),
                     offset,
@@ -1742,6 +1773,31 @@ fn controller(
                         (offset, offset),
                     ),
                 }
+            }
+            Ok(Command::Preload(next)) => {
+                ready = next.and_then(|next| {
+                    match start(
+                        &next,
+                        0.0,
+                        output.clone(),
+                        0,
+                        true,
+                        control.clone(),
+                        cache.as_ref(),
+                    ) {
+                        Ok(new) => {
+                            crate::diagnostics::event(
+                                "playback",
+                                "crossfade: next track preloaded",
+                            );
+                            Some((next.key, new))
+                        }
+                        Err(_) => {
+                            crate::diagnostics::event("playback", "crossfade: preload failed");
+                            None
+                        }
+                    }
+                });
             }
             Ok(Command::Pause) => {
                 pause_intent = true;
@@ -1844,6 +1900,7 @@ fn controller(
                 active = epoch;
                 running = None;
                 fading = None;
+                ready = None;
                 source = None;
                 pause_intent = false;
                 publish(&state, &control, active, PlaybackState::Stopped, (0.0, 0.0));

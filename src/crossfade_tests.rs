@@ -146,3 +146,60 @@ fn a_seek_while_the_next_track_loads_ends_the_crossfade() {
     );
     finish_resolvers(&mut app);
 }
+
+#[test]
+fn the_next_track_is_found_ten_seconds_before_the_crossfade_and_used_by_it() {
+    let ctx = egui::Context::default();
+    // 20 s left with a 6 s crossfade: too early to load anything.
+    let mut app = playing_at(&ctx, 180.0);
+    app.poll_playback(&ctx);
+    assert!(app.crossfade_preload.is_none() && app.workers.is_empty());
+    // 15 s left: within 10 s of the crossfade, the next track is found.
+    let mut app = playing_at(&ctx, 185.0);
+    let next = app.play_queue.as_ref().unwrap()[1].clone();
+    app.poll_playback(&ctx);
+    let preload = app.crossfade_preload.as_ref().expect("preloading");
+    assert_eq!(preload.key, next.key());
+    assert_eq!(
+        app.playing.as_ref().map(Track::key),
+        Some(app.play_queue.as_ref().unwrap()[0].key()),
+        "the queue and the player stay on the playing track"
+    );
+    assert!(app.playback_pending.is_none());
+    finish_resolvers(&mut app);
+    // Found (as a VK session would): the player opens it paused.
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let cache_key = CacheKey {
+        account_id: 42,
+        owner_id: next.owner_id,
+        track_id: next.id,
+        duration: next.duration,
+    };
+    sender
+        .send(Ok(ResolvedTrack {
+            track: next.clone(),
+            url: Some("https://example.com/next.mp3".into()),
+            cache_key,
+        }))
+        .unwrap();
+    app.crossfade_preload.as_mut().unwrap().receiver = Some(receiver);
+    app.poll_playback(&ctx);
+    assert!(app.crossfade_preload.as_ref().unwrap().resolved.is_some());
+    // The crossfade takes it: no second request.
+    app.player = Player::test_playing(200, 195.0).0;
+    app.poll_playback(&ctx);
+    assert_eq!(app.playing.as_ref().map(Track::key), Some(next.key()));
+    assert!(app.playback_pending.is_some() && app.workers.is_empty());
+    assert!(app.crossfade_preload.is_none());
+}
+
+#[test]
+fn a_seek_drops_the_preloaded_next_track() {
+    let ctx = egui::Context::default();
+    let mut app = playing_at(&ctx, 185.0);
+    app.poll_playback(&ctx);
+    assert!(app.crossfade_preload.is_some());
+    app.commit_playback_seek(20.0);
+    assert!(app.crossfade_preload.is_none());
+    finish_resolvers(&mut app);
+}

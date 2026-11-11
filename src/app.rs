@@ -942,6 +942,23 @@ struct ResolvedTrack {
     cache_key: CacheKey,
 }
 
+/// Where a background resolve hands over its track's audio.
+type ResolveReceiver = Receiver<Result<ResolvedTrack, UiError>>;
+
+/// How long before its crossfade the next track starts loading.
+const CROSSFADE_PRELOAD_SECONDS: f64 = 10.0;
+
+/// The next track, found and opened paused ahead of its crossfade.
+struct CrossfadePreload {
+    /// The track that was playing when it was asked for.
+    from: (i64, i64),
+    key: (i64, i64),
+    cancel: Arc<AtomicBool>,
+    receiver: Option<ResolveReceiver>,
+    /// Found, and handed to the player to open paused.
+    resolved: Option<ResolvedTrack>,
+}
+
 struct QrConnected {
     profile: Profile,
     cookies: Vec<SessionCookie>,
@@ -1392,6 +1409,7 @@ pub struct MusicApp {
     crossfade_until: Option<Instant>,
     /// The track a seek into its last seconds played on without a crossfade.
     crossfade_skipped: Option<(i64, i64)>,
+    crossfade_preload: Option<CrossfadePreload>,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
     screen_cache_owner: Option<i64>,
     /// Known "date added" of own playlist tracks, by playlist.
@@ -1794,6 +1812,7 @@ impl MusicApp {
             crossfade_save_failed: false,
             crossfade_until: None,
             crossfade_skipped: None,
+            crossfade_preload: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),
@@ -2317,8 +2336,9 @@ impl MusicApp {
         let starts_at = f64::from(track.duration) - f64::from(self.crossfade_seconds);
         self.crossfade_skipped = (self.crossfade && position >= starts_at).then(|| track.key());
         // A seek ends a crossfade under way outright: the next track, if it
-        // is still loading, starts without one.
+        // is still loading, starts without one, and nothing stays preloaded.
         self.crossfade_until = None;
+        self.drop_crossfade_preload();
         self.system_media.position_changed();
         if self.resume_position.is_some() {
             self.resume_position = Some(position);
@@ -2402,22 +2422,7 @@ impl MusicApp {
         let Some(session) = &self.session else {
             return;
         };
-        let Some(track) = self
-            .play_queue
-            .iter()
-            .flat_map(|tracks| tracks.iter())
-            .chain(self.library.tracks.iter())
-            .chain(self.recent.iter())
-            .chain(self.queued_tracks.get(&key))
-            .chain(self.playing.iter())
-            .chain(
-                self.home_collections
-                    .iter()
-                    .flat_map(|collection| collection.tracks.iter()),
-            )
-            .find(|track| track.key() == key)
-            .cloned()
-        else {
+        let Some(track) = self.known_track(key) else {
             return;
         };
         if track.unavailable == Some(true) {
@@ -2425,7 +2430,6 @@ impl MusicApp {
             self.reject_unavailable_track(ctx, key, false);
             return;
         }
-        let music = session.music.clone();
         crate::diagnostics::event("playback", "play_request: resolve_start");
         let keys = self.playback_keys();
         self.play_order.sync(&keys, Some(key));
@@ -2436,11 +2440,15 @@ impl MusicApp {
             track_id: key.1,
             duration: track.duration,
         };
-        let cache = self.audio_cache.clone();
         if let Some(cancel) = self.playback_cancel.take() {
             cancel.store(true, Ordering::Release);
         }
-        let cancel = Arc::new(AtomicBool::new(false));
+        // Resolved ahead for a crossfade into this very track: no new request.
+        let preloaded = self.take_crossfade_preload(key);
+        let cancel = preloaded.as_ref().map_or_else(
+            || Arc::new(AtomicBool::new(false)),
+            |(cancel, _)| cancel.clone(),
+        );
         self.playback_cancel = Some(cancel.clone());
         // A crossfade keeps the ending track audible while this one loads.
         if !self.crossfading() {
@@ -2456,6 +2464,50 @@ impl MusicApp {
         self.finished_handled = false;
         self.crossfade_skipped = None;
         self.advance_on_load = false;
+        if let Some((_, receiver)) = preloaded {
+            self.playback_pending = Some(receiver);
+            ctx.request_repaint();
+            return;
+        }
+        match self.spawn_resolve(ctx, track, cache_key, cancel) {
+            Some(receiver) => self.playback_pending = Some(receiver),
+            None => self.playback_error = Some(UiError::WorkerStart),
+        }
+    }
+
+    /// The track with `key` among those the app holds.
+    fn known_track(&self, key: (i64, i64)) -> Option<Track> {
+        self.play_queue
+            .iter()
+            .flat_map(|tracks| tracks.iter())
+            .chain(self.library.tracks.iter())
+            .chain(self.recent.iter())
+            .chain(self.queued_tracks.get(&key))
+            .chain(self.playing.iter())
+            .chain(
+                self.home_collections
+                    .iter()
+                    .flat_map(|collection| collection.tracks.iter()),
+            )
+            .find(|track| track.key() == key)
+            .cloned()
+    }
+
+    /// Finds `track`'s audio in the background: the complete cache, VK, or
+    /// the track's own link.
+    fn spawn_resolve(
+        &mut self,
+        ctx: &egui::Context,
+        track: Track,
+        cache_key: CacheKey,
+        cancel: Arc<AtomicBool>,
+    ) -> Option<ResolveReceiver> {
+        let key = track.key();
+        let music = self
+            .session
+            .as_ref()
+            .and_then(|session| session.music.clone());
+        let cache = self.audio_cache.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let ctx = self.repaint_target.with_context(ctx);
         self.workers.retain(|worker| !worker.is_finished());
@@ -2507,9 +2559,9 @@ impl MusicApp {
             }) {
             Ok(worker) => {
                 self.workers.push(worker);
-                self.playback_pending = Some(receiver);
+                Some(receiver)
             }
-            Err(_) => self.playback_error = Some(UiError::WorkerStart),
+            Err(_) => None,
         }
     }
 
@@ -3060,6 +3112,7 @@ impl MusicApp {
                 }
             }
         }
+        self.preload_crossfade(ctx);
         self.start_crossfade(ctx);
         if self.playback_pending.is_none()
             && self.playing.is_some()
@@ -3076,6 +3129,138 @@ impl MusicApp {
             crate::diagnostics::event("playback", "track ended; advancing");
             self.advance_track(ctx, true);
         }
+    }
+
+    /// Drops the next track found or opened ahead of a crossfade.
+    fn drop_crossfade_preload(&mut self) {
+        if let Some(preload) = self.crossfade_preload.take() {
+            preload.cancel.store(true, Ordering::Release);
+            if preload.resolved.is_some() {
+                self.player.drop_preload();
+            }
+        }
+    }
+
+    /// The resolve of `key` made ahead of its crossfade, as the cancel flag
+    /// and result channel of a regular one; anything else is dropped.
+    fn take_crossfade_preload(
+        &mut self,
+        key: (i64, i64),
+    ) -> Option<(Arc<AtomicBool>, ResolveReceiver)> {
+        if self
+            .crossfade_preload
+            .as_ref()
+            .is_none_or(|preload| preload.key != key || !self.crossfading())
+        {
+            self.drop_crossfade_preload();
+            return None;
+        }
+        let preload = self.crossfade_preload.take()?;
+        if let Some(resolved) = preload.resolved {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let _ = sender.send(Ok(resolved));
+            return Some((preload.cancel, receiver));
+        }
+        preload.receiver.map(|receiver| (preload.cancel, receiver))
+    }
+
+    /// `CROSSFADE_PRELOAD_SECONDS` before a crossfade begins, finds the next
+    /// track and has the player open it paused, so the crossfade starts on
+    /// time; only its first seconds are decoded until then.
+    fn preload_crossfade(&mut self, ctx: &egui::Context) {
+        let current = self.playing.as_ref().map(Track::key);
+        let crossfading = self.crossfading();
+        if let Some(preload) = &mut self.crossfade_preload {
+            if Some(preload.from) != current && !crossfading {
+                self.drop_crossfade_preload();
+                return;
+            }
+            let result = match &preload.receiver {
+                Some(receiver) => match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => Some(Err(UiError::Interrupted)),
+                },
+                None => None,
+            };
+            match result {
+                Some(Ok(resolved)) => {
+                    self.player
+                        .preload_cached(resolved.cache_key, resolved.url.clone());
+                    preload.receiver = None;
+                    preload.resolved = Some(resolved);
+                }
+                // The crossfade then loads it the usual way.
+                Some(Err(_)) => self.drop_crossfade_preload(),
+                None => {}
+            }
+            return;
+        }
+        if !self.crossfade
+            || self.finished_handled
+            || self.playback_pending.is_some()
+            || self.resume_position.is_some()
+            || self.seek_position.is_some()
+            || self.home_autoplay.is_some()
+            || self.unavailable_playback.active()
+        {
+            return;
+        }
+        let Some(track) = &self.playing else { return };
+        let from = track.key();
+        if self.crossfade_skipped == Some(from) {
+            return;
+        }
+        let snapshot = self.player.snapshot();
+        let fade = f64::from(self.crossfade_seconds);
+        let duration = f64::from(track.duration);
+        let left = duration - snapshot.position;
+        if snapshot.state != PlaybackState::Playing
+            || duration < fade * 2.0 + 5.0
+            || left <= fade
+            || left > fade + CROSSFADE_PRELOAD_SECONDS
+            || self.play_order.repeats(Some(from)).is_some()
+        {
+            return;
+        }
+        // What the end would play, asked of a copy: the queue itself moves
+        // only when the crossfade begins.
+        self.synchronize_order();
+        let mut order = self.play_order.clone();
+        let Some(key) = order
+            .advance_next(from, self.allow_queue_wrap(), true)
+            .filter(|key| *key != from)
+        else {
+            return;
+        };
+        let Some(next) = self
+            .known_track(key)
+            .filter(|next| next.unavailable != Some(true))
+        else {
+            return;
+        };
+        let Some(session) = &self.session else { return };
+        let cache_key = CacheKey {
+            account_id: session.profile.id,
+            owner_id: key.0,
+            track_id: key.1,
+            duration: next.duration,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let Some(receiver) = self.spawn_resolve(ctx, next, cache_key, cancel.clone()) else {
+            return;
+        };
+        crate::diagnostics::event(
+            "playback",
+            &format!("crossfade: preloading the next track {left:.1}s before the end"),
+        );
+        self.crossfade_preload = Some(CrossfadePreload {
+            from,
+            key,
+            cancel,
+            receiver: Some(receiver),
+            resolved: None,
+        });
     }
 
     /// The next track is being started under a crossfade.
@@ -11613,8 +11798,15 @@ impl MusicApp {
             let crossfade_in = duration - f64::from(self.crossfade_seconds) - snapshot.position;
             let skipped = self.crossfade_skipped.is_some()
                 && self.crossfade_skipped == self.playing.as_ref().map(Track::key);
-            if self.crossfade && !self.finished_handled && !skipped && crossfade_in > 0.0 {
-                wake = wake.min(Duration::from_secs_f64(crossfade_in + 0.005));
+            if self.crossfade && !self.finished_handled && !skipped {
+                // The preload and the crossfade itself, whichever comes next.
+                let preload_in = crossfade_in - CROSSFADE_PRELOAD_SECONDS;
+                for at in [preload_in, crossfade_in] {
+                    if at > 0.0 {
+                        wake = wake.min(Duration::from_secs_f64(at + 0.005));
+                        break;
+                    }
+                }
             }
             ctx.request_repaint_after(wake);
         }
@@ -12232,6 +12424,7 @@ mod tests {
             crossfade_save_failed: false,
             crossfade_until: None,
             crossfade_skipped: None,
+            crossfade_preload: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),
