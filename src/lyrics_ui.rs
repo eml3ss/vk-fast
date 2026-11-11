@@ -353,11 +353,11 @@ pub fn show(
             } else {
                 18.0
             };
-            // Fullscreen: the scrollbar ends as far above the bottom as it
-            // starts below the header.
+            // Fullscreen: the lines and their scrollbar end as far above the
+            // player as they start below the top of the screen.
             let mut area = content;
             if view.fullscreen {
-                area.max.y -= 12.0;
+                area.max.y = area.max.y.min(rect.bottom() - (area.top() - rect.top()));
             }
             if let Some(at) = lines(
                 ui,
@@ -635,8 +635,8 @@ fn lines(
                         });
                         state.height += height;
                     }
-                    // Room after the last line; fullscreen keeps less of it.
-                    state.height += rect.height() * if fullscreen { 0.16 } else { 0.4 };
+                    // Room after the last line.
+                    state.height += rect.height() * 0.16;
                     state.stamp = Some(stamp);
                 }
                 let (whole, _) = ui.allocate_exact_size(
@@ -981,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_scrollbar_ends_as_far_from_the_bottom_as_it_starts_below_the_top_row() {
+    fn fullscreen_scrollbar_ends_as_far_from_the_bottom_as_it_starts_from_the_top() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut covers = CoverCache::new();
@@ -1034,8 +1034,7 @@ mod tests {
             })
             .max_by(|a, b| a.height().total_cmp(&b.height()))
             .expect("the scrollbar track");
-        // The top row (title and buttons) ends 54 points down.
-        let above = track.top() - 54.0;
+        let above = track.top();
         let below = size.y - track.bottom();
         assert!((above - below).abs() < 0.5, "{above} vs {below}");
     }
