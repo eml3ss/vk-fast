@@ -6,7 +6,6 @@
 | --- | --- |
 | Symphonia | MPL-2.0 |
 | Rubato | MIT / Apache-2.0 |
-| ebur128 | MIT |
 | Остальные Rust-зависимости | Условия, закреплённые в Cargo.lock и исходных уведомлениях |
 | NSIS, инструмент Windows-установщика | [COPYING](third-party/windows/NSIS.txt) |
 

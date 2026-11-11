@@ -17,7 +17,6 @@ pub enum Setting {
     MiddleAutoscroll,
     ExplicitBadge,
     AnimatedBackdrop,
-    NormalizeVolume,
     VolumeKeys,
     MixAfterQueue,
     Broadcast,
@@ -79,9 +78,6 @@ impl Query {
             }
             Setting::AnimatedBackdrop => {
                 "интерфейс анимированный анимация фон размытый размытие обложка полноэкранный полный экран текст плеер interface animated animation background backdrop blur blurred cover fullscreen lyrics player"
-            }
-            Setting::NormalizeVolume => {
-                "воспроизведение нормализация нормализовать выравнивание громкость громкости звука звук треки playback normalize normalization volume loudness sound audio level tracks"
             }
             Setting::VolumeKeys => {
                 "воспроизведение громкость клавиши кнопки мультимедийные ctrl контрол глобально горячие сочетание приложения playback volume keys media multimedia keyboard ctrl control global hotkey shortcut app"
@@ -205,15 +201,15 @@ mod tests {
         }
         assert!(!Query::new("discord").matches(Setting::Logging));
         assert!(!Query::new("cache limit").matches(Setting::DiscordRpc));
-        assert!(!Query::new("активность").matches(Setting::NormalizeVolume));
+        assert!(!Query::new("активность").matches(Setting::VolumeKeys));
     }
 
     #[test]
     fn settings_queries_match_both_languages_case_and_multiple_words() {
-        assert!(Query::new("  ГРОМКОСТЬ  ").matches(Setting::NormalizeVolume));
-        assert!(Query::new("SoUnD volume").matches(Setting::NormalizeVolume));
-        assert!(Query::new("normalize volume").matches(Setting::NormalizeVolume));
-        assert!(Query::new("выравнивание громкости").matches(Setting::NormalizeVolume));
+        assert!(Query::new("  ГРОМКОСТЬ  ").matches(Setting::VolumeKeys));
+        assert!(Query::new("MeDiA volume").matches(Setting::VolumeKeys));
+        assert!(Query::new("volume keys").matches(Setting::VolumeKeys));
+        assert!(Query::new("мультимедийные клавиши").matches(Setting::VolumeKeys));
         assert!(Query::new("minimize tray closing").matches(Setting::MinimizeToTray));
         assert!(Query::new("системный трей").matches(Setting::MinimizeToTray));
         assert!(!Query::new("громкость").matches(Setting::CacheLimit));
@@ -224,10 +220,10 @@ mod tests {
         assert!(Query::new("двойным щелчком").matches(Setting::DoubleClickPlay));
         assert!(Query::new("double click").matches(Setting::DoubleClickPlay));
         assert!(Query::new("одинарный клик").matches(Setting::DoubleClickPlay));
-        assert!(!Query::new("double click").matches(Setting::NormalizeVolume));
+        assert!(!Query::new("double click").matches(Setting::VolumeKeys));
         assert!(Query::new("gpl").matches(Setting::About));
         assert!(!Query::new("nonexistent").matches(Setting::Language));
         assert!(Query::new(" \n ").is_empty());
-        assert!(Query::new("").matches(Setting::NormalizeVolume));
+        assert!(Query::new("").matches(Setting::VolumeKeys));
     }
 }

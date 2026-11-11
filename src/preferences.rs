@@ -20,7 +20,6 @@ const DEFAULT_VOLUME: f32 = 0.7;
 const DEFAULT_COMPACT_SEEK_BAR: bool = true;
 const DEFAULT_DOUBLE_CLICK_TO_PLAY: bool = true;
 const DEFAULT_SYSTEM_TITLEBAR: bool = false;
-const DEFAULT_NORMALIZE_VOLUME: bool = false;
 const DEFAULT_MINIMIZE_TO_TRAY: bool = false;
 const DEFAULT_LOGGING_ENABLED: bool = false;
 const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
@@ -50,8 +49,6 @@ struct Preferences {
     system_titlebar: bool,
     #[serde(deserialize_with = "deserialize_double_click_to_play")]
     double_click_to_play: bool,
-    #[serde(deserialize_with = "deserialize_normalize_volume")]
-    normalize_volume: bool,
     #[serde(deserialize_with = "deserialize_minimize_to_tray")]
     minimize_to_tray: bool,
     #[serde(deserialize_with = "deserialize_logging_enabled")]
@@ -98,7 +95,6 @@ impl Default for Preferences {
             compact_seek_bar: DEFAULT_COMPACT_SEEK_BAR,
             system_titlebar: DEFAULT_SYSTEM_TITLEBAR,
             double_click_to_play: DEFAULT_DOUBLE_CLICK_TO_PLAY,
-            normalize_volume: DEFAULT_NORMALIZE_VOLUME,
             minimize_to_tray: DEFAULT_MINIMIZE_TO_TRAY,
             logging_enabled: DEFAULT_LOGGING_ENABLED,
             discord_rpc_enabled: DEFAULT_DISCORD_RPC_ENABLED,
@@ -199,13 +195,6 @@ fn deserialize_double_click_to_play<'de, D: serde::Deserializer<'de>>(
 ) -> Result<bool, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_bool().unwrap_or(DEFAULT_DOUBLE_CLICK_TO_PLAY))
-}
-
-fn deserialize_normalize_volume<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<bool, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_bool().unwrap_or(DEFAULT_NORMALIZE_VOLUME))
 }
 
 fn deserialize_minimize_to_tray<'de, D: serde::Deserializer<'de>>(
@@ -514,6 +503,7 @@ fn load_at(path: &Path) -> io::Result<Option<f32>> {
             || json.get("compact_seek_bar").is_some()
             || json.get("system_titlebar").is_some()
             || json.get("double_click_to_play").is_some()
+            // Volume normalization was removed; old files still carry it.
             || json.get("normalize_volume").is_some()
             || json.get("minimize_to_tray").is_some()
             || json.get("logging_enabled").is_some()
@@ -575,10 +565,6 @@ fn save_double_click_at(path: &Path, double_click: bool) -> io::Result<()> {
     update_at(path, |preferences| {
         preferences.double_click_to_play = double_click
     })
-}
-
-fn save_normalize_volume_at(path: &Path, enabled: bool) -> io::Result<()> {
-    update_at(path, |preferences| preferences.normalize_volume = enabled)
 }
 
 fn save_minimize_to_tray_at(path: &Path, enabled: bool) -> io::Result<()> {
@@ -717,19 +703,6 @@ pub fn load_double_click_to_play() -> bool {
 
 pub fn save_double_click_to_play(double_click: bool) -> io::Result<()> {
     save_double_click_at(&preferences_path()?, double_click)
-}
-
-pub fn load_normalize_volume() -> bool {
-    preferences_path()
-        .ok()
-        .and_then(|path| load_preferences_at(&path).ok().flatten())
-        .map_or(DEFAULT_NORMALIZE_VOLUME, |preferences| {
-            preferences.normalize_volume
-        })
-}
-
-pub fn save_normalize_volume(enabled: bool) -> io::Result<()> {
-    save_normalize_volume_at(&preferences_path()?, enabled)
 }
 
 pub fn load_minimize_to_tray() -> bool {
@@ -1043,7 +1016,7 @@ mod tests {
         let path = directory.0.join("preferences.json");
         assert!(!Preferences::default().logging_enabled);
         save_at(&path, 0.375).unwrap();
-        let mut value = serde_json::json!({"volume":0.375,"normalize_volume":true,"compact_seek_bar":false,"future_setting":{"keep":true}});
+        let mut value = serde_json::json!({"volume":0.375,"volume_keys":true,"compact_seek_bar":false,"future_setting":{"keep":true}});
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(!load_preferences_at(&path).unwrap().unwrap().logging_enabled);
         for enabled in [true, false] {
@@ -1051,7 +1024,7 @@ mod tests {
             let preferences = load_preferences_at(&path).unwrap().unwrap();
             assert_eq!(preferences.logging_enabled, enabled);
             assert_eq!(preferences.volume, 0.375);
-            assert!(preferences.normalize_volume && !preferences.compact_seek_bar);
+            assert!(preferences.volume_keys && !preferences.compact_seek_bar);
             assert_eq!(preferences.extra["future_setting"]["keep"], true);
         }
         for malformed in [
@@ -1085,7 +1058,7 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({
                 "volume":0.375, "cache_limit_mb":384, "language":"en",
                 "compact_seek_bar":false, "double_click_to_play":false,
-                "system_titlebar":true, "normalize_volume":true,
+                "system_titlebar":true, "volume_keys":true,
                 "minimize_to_tray":true, "logging_enabled":true,
                 "future_setting":{"keep":true}
             }))
@@ -1106,7 +1079,7 @@ mod tests {
             assert_eq!(preferences.cache_limit_mb, 384);
             assert_eq!(preferences.language, "en");
             assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
-            assert!(preferences.system_titlebar && preferences.normalize_volume);
+            assert!(preferences.system_titlebar && preferences.volume_keys);
             assert!(preferences.minimize_to_tray && preferences.logging_enabled);
             assert_eq!(preferences.extra["future_setting"]["keep"], true);
         }
@@ -1141,7 +1114,7 @@ mod tests {
                 &path,
                 serde_json::to_vec(&serde_json::json!({
                     "volume":0.375, "language":"en", "logging_enabled":true,
-                    "normalize_volume":true, "minimize_to_tray":true,
+                    "volume_keys":true, "minimize_to_tray":true,
                     "discord_rpc_enabled":malformed, "future_setting":"kept"
                 }))
                 .unwrap(),
@@ -1151,7 +1124,7 @@ mod tests {
             assert!(preferences.discord_rpc_enabled);
             assert!(
                 preferences.logging_enabled
-                    && preferences.normalize_volume
+                    && preferences.volume_keys
                     && preferences.minimize_to_tray
             );
             assert_eq!(preferences.volume, 0.375);
@@ -1189,7 +1162,7 @@ mod tests {
         ] {
             assert!(preferences.compact_seek_bar && preferences.double_click_to_play);
             assert!(!preferences.system_titlebar);
-            assert!(!preferences.normalize_volume && !preferences.minimize_to_tray);
+            assert!(!preferences.volume_keys && !preferences.minimize_to_tray);
             assert!(preferences.discord_rpc_enabled);
             assert_eq!(preferences.volume, DEFAULT_VOLUME);
         }
@@ -1215,11 +1188,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        for (normalize, tray) in [(true, false), (false, true), (true, true)] {
-            save_normalize_volume_at(&legacy, normalize).unwrap();
+        for (keys, tray) in [(true, false), (false, true), (true, true)] {
+            update_at(&legacy, |preferences| preferences.volume_keys = keys).unwrap();
             save_minimize_to_tray_at(&legacy, tray).unwrap();
             let preferences = load_preferences_at(&legacy).unwrap().unwrap();
-            assert_eq!(preferences.normalize_volume, normalize);
+            assert_eq!(preferences.volume_keys, keys);
             assert_eq!(preferences.minimize_to_tray, tray);
             assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
             assert!(preferences.system_titlebar);
@@ -1232,7 +1205,7 @@ mod tests {
         save_cache_at(&legacy, 512).unwrap();
         migrate_at(&legacy, &destination).unwrap();
         let preferences = load_preferences_at(&destination).unwrap().unwrap();
-        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert!(preferences.volume_keys && preferences.minimize_to_tray);
         assert!(!preferences.compact_seek_bar && !preferences.double_click_to_play);
         assert!(preferences.system_titlebar);
         assert_eq!(preferences.volume, 0.625);
@@ -1262,7 +1235,7 @@ mod tests {
                 serde_json::to_vec(&serde_json::json!({
                     "volume":0.375, "cache_limit_mb":384, "language":"en",
                     "compact_seek_bar":"invalid", "double_click_to_play":[],
-                    "system_titlebar":true, "normalize_volume":bad,
+                    "system_titlebar":true, "volume_keys":bad,
                     "minimize_to_tray":bad, "future_setting":"kept"
                 }))
                 .unwrap(),
@@ -1271,14 +1244,15 @@ mod tests {
             let preferences = load_preferences_at(&path).unwrap().unwrap();
             assert!(preferences.compact_seek_bar && preferences.double_click_to_play);
             assert!(preferences.system_titlebar);
-            assert!(!preferences.normalize_volume && !preferences.minimize_to_tray);
+            assert!(!preferences.volume_keys && !preferences.minimize_to_tray);
             assert_eq!(preferences.volume, 0.375);
-            save_normalize_volume_at(&path, true).unwrap();
+            update_at(&path, |preferences| preferences.volume_keys = true).unwrap();
             save_minimize_to_tray_at(&path, true).unwrap();
             let preferences = load_preferences_at(&path).unwrap().unwrap();
-            assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+            assert!(preferences.volume_keys && preferences.minimize_to_tray);
             assert_eq!(preferences.extra["future_setting"], "kept");
         }
+        // A file from before volume normalization was removed still counts.
         for key in ["normalize_volume", "minimize_to_tray"] {
             fs::write(
                 &path,
@@ -1705,7 +1679,7 @@ mod tests {
         save_compact_seek_at(&legacy, true).unwrap();
         save_system_titlebar_at(&legacy, true).unwrap();
         save_double_click_at(&legacy, true).unwrap();
-        save_normalize_volume_at(&legacy, true).unwrap();
+        update_at(&legacy, |preferences| preferences.volume_keys = true).unwrap();
         save_minimize_to_tray_at(&legacy, true).unwrap();
         let unrelated = legacy.parent().unwrap().join("unrelated.json");
         fs::write(&unrelated, b"synthetic unrelated state").unwrap();
@@ -1721,7 +1695,7 @@ mod tests {
         assert!(preferences.compact_seek_bar);
         assert!(preferences.system_titlebar);
         assert!(preferences.double_click_to_play);
-        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert!(preferences.volume_keys && preferences.minimize_to_tray);
         assert_eq!(fs::read(&unrelated).unwrap(), b"synthetic unrelated state");
         #[cfg(unix)]
         {
@@ -1828,10 +1802,10 @@ mod tests {
                 save_double_click_at(&click_path, double_click).unwrap();
             }
         });
-        let normalize_path = path.clone();
-        let normalize = std::thread::spawn(move || {
+        let keys_path = path.clone();
+        let keys = std::thread::spawn(move || {
             for enabled in [true, false, true] {
-                save_normalize_volume_at(&normalize_path, enabled).unwrap();
+                update_at(&keys_path, |preferences| preferences.volume_keys = enabled).unwrap();
             }
         });
         let tray_path = path.clone();
@@ -1852,7 +1826,7 @@ mod tests {
         compact.join().unwrap();
         titlebar.join().unwrap();
         click.join().unwrap();
-        normalize.join().unwrap();
+        keys.join().unwrap();
         tray.join().unwrap();
         discord.join().unwrap();
         let preferences = load_preferences_at(&path).unwrap().unwrap();
@@ -1862,7 +1836,7 @@ mod tests {
         assert!(preferences.compact_seek_bar);
         assert!(preferences.system_titlebar);
         assert!(preferences.double_click_to_play);
-        assert!(preferences.normalize_volume && preferences.minimize_to_tray);
+        assert!(preferences.volume_keys && preferences.minimize_to_tray);
         assert!(!preferences.discord_rpc_enabled);
     }
 

@@ -33,8 +33,6 @@ mod library_membership_tests;
 mod lyrics_app;
 #[path = "mix_prepare.rs"]
 mod mix_prepare;
-#[path = "next_preload.rs"]
-mod next_preload;
 #[path = "notice_fade.rs"]
 mod notice_fade;
 #[cfg(test)]
@@ -183,18 +181,6 @@ fn save_click_behavior(double_click: bool) -> bool {
     #[cfg(test)]
     {
         let _ = (double_click, preferences::save_double_click_to_play);
-        true
-    }
-}
-
-fn save_normalization(enabled: bool) -> bool {
-    #[cfg(not(test))]
-    {
-        preferences::save_normalize_volume(enabled).is_ok()
-    }
-    #[cfg(test)]
-    {
-        let _ = (enabled, preferences::save_normalize_volume);
         true
     }
 }
@@ -1299,8 +1285,6 @@ pub struct MusicApp {
     artist_library: Option<ArtistLibrary>,
     /// What the diagnostic log last wrote about the interface.
     frame_log: app_diagnostics::FrameLog,
-    /// The next track, being readied while the current one plays.
-    next_preload: Option<next_preload::NextPreload>,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1319,7 +1303,6 @@ pub struct MusicApp {
     tray: tray_app::State,
     minimize_to_tray: bool,
     tray_save_failed: bool,
-    normalization_save_failed: bool,
     logging_enabled: bool,
     logging_save_failed: bool,
     logging_runtime_failed: bool,
@@ -1605,7 +1588,6 @@ impl MusicApp {
         if let Some(volume) = preferences::load_volume() {
             player.set_volume(volume);
         }
-        player.set_normalize_volume(preferences::load_normalize_volume());
         let (shuffle, repeat) = preferences::load_playback_modes();
         let mut app = Self {
             session: None,
@@ -1684,7 +1666,6 @@ impl MusicApp {
             prepared_mix: None,
             artist_library: None,
             frame_log: Default::default(),
-            next_preload: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -1703,7 +1684,6 @@ impl MusicApp {
             tray: tray_app::State::default(),
             minimize_to_tray: preferences::load_minimize_to_tray(),
             tray_save_failed: false,
-            normalization_save_failed: false,
             logging_enabled: preferences::load_logging_enabled(),
             logging_save_failed: false,
             logging_runtime_failed: preferences::load_logging_enabled()
@@ -10220,7 +10200,6 @@ impl MusicApp {
                 Setting::AnimatedBackdrop,
             ],
             SettingsSection::Playback => &[
-                Setting::NormalizeVolume,
                 Setting::VolumeKeys,
                 Setting::MixAfterQueue,
                 Setting::Broadcast,
@@ -10613,40 +10592,7 @@ impl MusicApp {
                 }
             }
             SettingsSection::Playback => {
-                if query.matches(Setting::NormalizeVolume) {
-                    let mut normalize = self.player.normalize_volume();
-                    if theme::switch(
-                        ui,
-                        &mut normalize,
-                        t("Нормализация громкости", "Normalize volume"),
-                    )
-                    .changed()
-                    {
-                        self.player.set_normalize_volume(normalize);
-                        self.normalization_save_failed = !save_normalization(normalize);
-                    }
-                    ui.label(
-                        RichText::new(t(
-                            "Выравнивает воспринимаемую громкость разных треков.",
-                            "Keeps different tracks at a consistent perceived volume.",
-                        ))
-                        .small()
-                        .color(MUTED),
-                    );
-                    if self.normalization_save_failed {
-                        ui.colored_label(
-                            Color32::from_rgb(255, 158, 153),
-                            t(
-                                "Не удалось сохранить настройку нормализации.",
-                                "Could not save the normalization setting.",
-                            ),
-                        );
-                    }
-                }
                 if query.matches(Setting::VolumeKeys) {
-                    if query.matches(Setting::NormalizeVolume) {
-                        ui.add_space(16.0);
-                    }
                     let support = crate::volume_keys::support();
                     let available = support == crate::volume_keys::Support::Available;
                     let label = t(
@@ -10702,8 +10648,7 @@ impl MusicApp {
                     }
                 }
                 if query.matches(Setting::MixAfterQueue) {
-                    if query.matches(Setting::NormalizeVolume) || query.matches(Setting::VolumeKeys)
-                    {
+                    if query.matches(Setting::VolumeKeys) {
                         ui.add_space(16.0);
                     }
                     let label = t(
@@ -10733,10 +10678,7 @@ impl MusicApp {
                     }
                 }
                 if query.matches(Setting::Broadcast) {
-                    if query.matches(Setting::NormalizeVolume)
-                        || query.matches(Setting::VolumeKeys)
-                        || query.matches(Setting::MixAfterQueue)
-                    {
+                    if query.matches(Setting::VolumeKeys) || query.matches(Setting::MixAfterQueue) {
                         ui.add_space(16.0);
                     }
                     let label = t(
@@ -10774,8 +10716,7 @@ impl MusicApp {
                     }
                 }
                 if query.matches(Setting::Lyrics) {
-                    if query.matches(Setting::NormalizeVolume)
-                        || query.matches(Setting::VolumeKeys)
+                    if query.matches(Setting::VolumeKeys)
                         || query.matches(Setting::MixAfterQueue)
                         || query.matches(Setting::Broadcast)
                     {
@@ -11346,7 +11287,6 @@ impl MusicApp {
         }
         self.poll_mix(ctx);
         self.prepare_queue_end_mix(ctx);
-        self.preload_next_track(ctx);
         if self.mix_active
             && self.mix_has_more
             && !self.unavailable_playback.halted()
@@ -11947,7 +11887,6 @@ mod tests {
             prepared_mix: None,
             artist_library: None,
             frame_log: Default::default(),
-            next_preload: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -11966,7 +11905,6 @@ mod tests {
             tray: tray_app::State::default(),
             minimize_to_tray: false,
             tray_save_failed: false,
-            normalization_save_failed: false,
             logging_enabled: false,
             logging_save_failed: false,
             logging_runtime_failed: false,
@@ -13386,7 +13324,10 @@ mod tests {
             assert!(
                 account_ui_text_rect(
                     &output,
-                    language.text("Нормализация громкости", "Normalize volume")
+                    language.text(
+                        "Включать микс, когда очередь закончится",
+                        "Start a mix when the queue ends"
+                    )
                 )
                 .is_some()
             );
@@ -16135,7 +16076,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_search_filters_all_sections_and_leaves_the_normalization_switch_editable() {
+    fn settings_search_filters_all_sections_and_leaves_the_volume_keys_switch_editable() {
         for language in [Language::Russian, Language::English] {
             let ctx = egui::Context::default();
             let mut app = account_ui_app(&ctx, language);
@@ -16173,13 +16114,11 @@ mod tests {
             assert_eq!(app.settings_query, language.text("ГРОМКОСТЬ", "VoLuMe"));
             assert_eq!(app.search.input, "music query stays here");
             assert!(app.settings_section == SettingsSection::General);
-            assert!(
-                account_ui_text_rect(
-                    &output,
-                    language.text("Нормализация громкости", "Normalize volume")
-                )
-                .is_some()
+            let keys = language.text(
+                "Изменение громкости с помощью Ctrl + мультимедийных клавиш",
+                "Adjust the volume with Ctrl + media keys",
             );
+            assert!(account_ui_text_rect(&output, keys).is_some());
             assert!(account_ui_text_rect(&output, language.text("Громкость", "Volume")).is_none());
             for label in [
                 language.text("Язык интерфейса", "Interface language"),
@@ -16196,17 +16135,11 @@ mod tests {
                     "Unmatched or global search leaked: {label}"
                 );
             }
-            let point = account_ui_text_rect(
-                &output,
-                language.text("Нормализация громкости", "Normalize volume"),
-            )
-            .unwrap()
-            .center();
+            let point = account_ui_text_rect(&output, keys).unwrap().center();
             let volume = app.player.snapshot().volume;
             settings_search_test_frame(&ctx, &mut app, &mut frame, seek_pointer(point, true));
             settings_search_test_frame(&ctx, &mut app, &mut frame, seek_pointer(point, false));
-            assert!(app.player.normalize_volume());
-            assert!(!app.normalization_save_failed);
+            assert!(app.volume_keys_enabled && !app.volume_keys_save_failed);
             assert_eq!(app.player.snapshot().volume, volume);
             assert!(app.volume_save_at.is_none());
             assert!(

@@ -29,7 +29,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rfd = "0.17.2"
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 raw-window-handle = "0.6.2"
-ebur128 = "0.1.11"
 symphonia = { version = "0.6.1", default-features = false, features = ["mpa", "aac", "isomp4", "pcm", "wav", "ogg", "vorbis", "flac", "alac", "all-meta", "opt-simd"] }
 rubato = { version = "5.0.1", default-features = false }
 audioadapter-buffers = "5.2"
@@ -64,9 +63,6 @@ global-hotkey = "0.10.0"
 screenshot = []
 
 [profile.release]
-opt-level = 2
-
-[profile.dev.package.ebur128]
 opt-level = 2
 
 [lints.rust]

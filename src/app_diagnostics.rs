@@ -318,11 +318,10 @@ impl MusicApp {
             (
                 "settings values",
                 format!(
-                    "language={:?} normalize={} tray={} discord={} broadcast={} \
+                    "language={:?} tray={} discord={} broadcast={} \
                      titlebar={} compact_seek={} double_click={} search_on_enter={} \
                      autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={}",
                     self.language,
-                    self.player.normalize_volume(),
                     self.minimize_to_tray,
                     self.discord_rpc_enabled,
                     self.broadcast,

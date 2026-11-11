@@ -126,7 +126,7 @@ fn discord_presence_switch_is_searchable_and_does_not_change_playback_or_start_u
 }
 
 #[test]
-fn normalize_switch_replaces_settings_volume_and_does_not_change_the_master_level() {
+fn playback_settings_no_longer_offer_volume_normalization() {
     for language in [Language::Russian, Language::English] {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, language);
@@ -135,19 +135,23 @@ fn normalize_switch_replaces_settings_volume_and_does_not_change_the_master_leve
         let size = egui::vec2(1120.0, 850.0);
         let mut tick = 0;
         let output = warm(&ctx, &mut app, size, &mut tick);
-        let label = language.text("Нормализация громкости", "Normalize volume");
-        let position = content_text(&output, label).center();
-        assert!(!app.player.normalize_volume());
-        assert!(account_ui_text_rect(&output, language.text("Громкость", "Volume")).is_none());
-        let volume = app.player.snapshot().volume;
-        account_ui_click(&ctx, &mut app, size, &mut tick, position);
-        assert!(app.player.normalize_volume());
-        assert_eq!(app.player.snapshot().volume, volume);
-        assert!(app.volume_save_at.is_none() && !app.normalization_save_failed);
-        account_ui_click(&ctx, &mut app, size, &mut tick, position);
-        assert!(!app.player.normalize_volume());
-        assert_eq!(app.player.snapshot().volume, volume);
-        assert!(app.volume_save_at.is_none());
+        assert!(
+            account_ui_text_rect(
+                &output,
+                language.text("Нормализация громкости", "Normalize volume")
+            )
+            .is_none()
+        );
+        assert!(
+            account_ui_text_rect(
+                &output,
+                language.text(
+                    "Включать микс, когда очередь закончится",
+                    "Start a mix when the queue ends"
+                )
+            )
+            .is_some()
+        );
     }
 }
 
@@ -165,7 +169,10 @@ fn tray_switch_is_in_general_and_search_keeps_only_the_matching_new_setting() {
             "Сворачивать в системный трей при закрытии",
             "Minimize to system tray when closing",
         );
-        let normalize = language.text("Нормализация громкости", "Normalize volume");
+        let other = language.text(
+            "Включать микс, когда очередь закончится",
+            "Start a mix when the queue ends",
+        );
         let position = content_text(&output, tray).center();
         assert!(!app.minimize_to_tray);
         account_ui_click(&ctx, &mut app, size, &mut tick, position);
@@ -173,15 +180,15 @@ fn tray_switch_is_in_general_and_search_keeps_only_the_matching_new_setting() {
         account_ui_click(&ctx, &mut app, size, &mut tick, position);
         assert!(!app.minimize_to_tray);
         assert!(app.workers.is_empty());
-        app.settings_query = "normalize volume".into();
+        app.settings_query = "mix end of queue".into();
         let output = warm(&ctx, &mut app, size, &mut tick);
-        assert!(account_ui_text_rect(&output, normalize).is_some());
+        assert!(account_ui_text_rect(&output, other).is_some());
         assert!(account_ui_text_rect(&output, tray).is_none());
         assert!(account_ui_text_rect(&output, language.text("Громкость", "Volume")).is_none());
         app.settings_query = "minimize tray closing".into();
         let output = warm(&ctx, &mut app, size, &mut tick);
         assert!(account_ui_text_rect(&output, tray).is_some());
-        assert!(account_ui_text_rect(&output, normalize).is_none());
+        assert!(account_ui_text_rect(&output, other).is_none());
         assert!(!app.settings_open || app.cache_pending.is_none());
         assert!(app.workers.is_empty());
     }
@@ -215,7 +222,6 @@ fn logging_is_an_opt_in_general_switch_and_search_does_not_touch_music_or_other_
         for caption in [
             language.text("Язык интерфейса", "Interface language"),
             language.text("Системный заголовок окна", "System title bar"),
-            language.text("Нормализация громкости", "Normalize volume"),
             language.text(
                 "Сворачивать в системный трей при закрытии",
                 "Minimize to system tray when closing",
@@ -239,7 +245,6 @@ fn logging_is_an_opt_in_general_switch_and_search_does_not_touch_music_or_other_
         );
         assert!(app.workers.is_empty() && app.cache_pending.is_none());
         assert!(app.volume_save_at.is_none() && !app.minimize_to_tray);
-        assert!(!app.player.normalize_volume());
 
         account_ui_click(&ctx, &mut app, size, &mut tick, position);
         assert!(!app.logging_enabled);

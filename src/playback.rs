@@ -1,7 +1,5 @@
 //! Rust media decoding feeds a bounded, seekable PCM window. The native
 //! output callback never waits for network, decoding or a mutex.
-#[path = "playback_normalization.rs"]
-mod normalization;
 pub(crate) use crate::audio_cache::completed_duration_plausible;
 use crate::{
     audio_cache::{AudioCache, CacheKey, CachePin},
@@ -9,7 +7,6 @@ use crate::{
     i18n::Language,
 };
 use std::{
-    collections::VecDeque,
     io::Read,
     mem::size_of,
     sync::{
@@ -146,10 +143,6 @@ enum Command {
         offset: f64,
     },
     Stop(Epoch),
-    NormalizationChanged,
-    /// Download, decode and measure a track that is about to play, without
-    /// playing it, so its loudness is known before its first sample.
-    Preload(Source),
     Shutdown,
 }
 pub struct Player {
@@ -157,8 +150,6 @@ pub struct Player {
     state: Arc<Mutex<Snapshot>>,
     volume: Arc<AtomicU32>,
     unmuted_volume: AtomicU32,
-    normalize: Arc<AtomicBool>,
-    normalization_profiles: VecDeque<(CacheKey, Arc<normalization::Profile>)>,
     control: Arc<Control>,
     source_duration: Option<u32>,
     worker: Option<JoinHandle<()>>,
@@ -187,8 +178,6 @@ impl Player {
                 })),
                 volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
                 unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
-                normalize: Arc::new(AtomicBool::new(false)),
-                normalization_profiles: VecDeque::new(),
                 control,
                 source_duration: Some(duration),
                 worker: None,
@@ -208,7 +197,6 @@ impl Player {
         let (commands, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(Snapshot::default()));
         let volume = Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits()));
-        let normalize = Arc::new(AtomicBool::new(false));
         let control = Arc::new(Control::default());
         let (ws, wv, wc) = (state.clone(), volume.clone(), control.clone());
         let worker = thread::Builder::new()
@@ -220,8 +208,6 @@ impl Player {
             state,
             volume,
             unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
-            normalize,
-            normalization_profiles: VecDeque::new(),
             control,
             source_duration: None,
             worker,
@@ -247,61 +233,19 @@ impl Player {
                 url: Some(Zeroizing::new(url)),
                 duration,
                 key: None,
-                loudness: normalization::Profile::new(self.normalize.clone()),
             },
             offset,
         );
     }
     pub fn play_cached(&mut self, key: CacheKey, url: Option<String>, offset: f64) {
-        let profile = if let Some(index) = self
-            .normalization_profiles
-            .iter()
-            .position(|(stored, _)| *stored == key)
-        {
-            self.normalization_profiles.remove(index).unwrap().1
-        } else {
-            normalization::Profile::new(self.normalize.clone())
-        };
-        self.normalization_profiles
-            .push_front((key, profile.clone()));
-        self.normalization_profiles.truncate(32);
         self.play_source(
             Source {
                 url: url.map(Zeroizing::new),
                 duration: key.duration,
                 key: Some(key),
-                loudness: profile,
             },
             offset,
         );
-    }
-    /// Readies the track that will most likely play next: its audio is
-    /// cached and its loudness measured in the background, so it starts at
-    /// once and at its normalized level from the first sample. Only while
-    /// normalization is on; a later call replaces it, and any playback
-    /// cancels it.
-    pub fn preload(&mut self, key: CacheKey, url: String) {
-        if !self.normalize.load(Ordering::Relaxed) {
-            return;
-        }
-        let profile = if let Some(index) = self
-            .normalization_profiles
-            .iter()
-            .position(|(stored, _)| *stored == key)
-        {
-            self.normalization_profiles.remove(index).unwrap().1
-        } else {
-            normalization::Profile::new(self.normalize.clone())
-        };
-        self.normalization_profiles
-            .push_front((key, profile.clone()));
-        self.normalization_profiles.truncate(32);
-        self.send(Command::Preload(Source {
-            url: Some(Zeroizing::new(url)),
-            duration: key.duration,
-            key: Some(key),
-            loudness: profile,
-        }));
     }
 
     fn play_source(&mut self, source: Source, offset: f64) {
@@ -373,14 +317,6 @@ impl Player {
             f32::from_bits(self.unmuted_volume.load(Ordering::Relaxed))
         });
     }
-    pub fn set_normalize_volume(&self, enabled: bool) {
-        if self.normalize.swap(enabled, Ordering::Relaxed) != enabled {
-            self.send(Command::NormalizationChanged);
-        }
-    }
-    pub fn normalize_volume(&self) -> bool {
-        self.normalize.load(Ordering::Relaxed)
-    }
     /// Diagnostic counter: cached seeks never spawn another decoder.
     pub fn decoder_starts(&self) -> u64 {
         self.control.decoder_starts.load(Ordering::Relaxed)
@@ -442,7 +378,6 @@ struct Source {
     url: Option<Zeroizing<String>>,
     duration: u32,
     key: Option<CacheKey>,
-    loudness: Arc<normalization::Profile>,
 }
 // Relative frames use 48 bits (more than every u32-second 48 kHz track);
 // the remaining bits version refills so an in-flight callback cannot overwrite
@@ -483,10 +418,7 @@ impl PcmWindow {
             for (channel, raw) in frame.as_chunks::<4>().0.iter().enumerate() {
                 let value = f32::from_le_bytes(*raw);
                 let value = if value.is_finite() {
-                    // Floating-point decoders can produce valid inter-sample
-                    // overs. Keep them until normalization can attenuate them.
-                    let limit = if pcm.loudness.is_some() { 16.0 } else { 1.0 };
-                    value.clamp(-limit, limit)
+                    value.clamp(-1.0, 1.0)
                 } else {
                     0.0
                 };
@@ -520,8 +452,6 @@ struct Pcm {
     device_failed: AtomicBool,
     started: AtomicBool,
     volume: Arc<AtomicU32>,
-    loudness: Option<Arc<normalization::Profile>>,
-    normalization_gain: AtomicU32,
 }
 impl Pcm {
     fn new(channels: u16, sample_rate: u32, volume: Arc<AtomicU32>, paused: bool) -> Self {
@@ -558,8 +488,6 @@ impl Pcm {
             device_failed: AtomicBool::new(false),
             started: AtomicBool::new(false),
             volume,
-            loudness: None,
-            normalization_gain: AtomicU32::new(0),
         }
     }
     fn is_primed(&self) -> bool {
@@ -638,19 +566,7 @@ impl Pcm {
         true
     }
 }
-#[cfg(test)]
 fn render(output: &mut [f32], pcm: &Pcm) {
-    render_normalized(
-        output,
-        pcm,
-        &mut normalization::OutputNormalizer::new(pcm.sample_rate),
-    );
-}
-fn render_normalized(
-    output: &mut [f32],
-    pcm: &Pcm,
-    normalizer: &mut normalization::OutputNormalizer,
-) {
     output.fill(0.0);
     if pcm.canceled.load(Ordering::Acquire) || pcm.paused.load(Ordering::Acquire) {
         return;
@@ -680,11 +596,7 @@ fn render_normalized(
         let slot = ((read + index as u64) % capacity_frames as u64) as usize * pcm.channels;
         for (channel, sample) in output.iter_mut().enumerate() {
             let raw = f32::from_bits(pcm.samples[slot + channel].load(Ordering::Relaxed));
-            *sample = if pcm.loudness.is_some() {
-                raw
-            } else {
-                (raw * volume).clamp(-1.0, 1.0)
-            };
+            *sample = (raw * volume).clamp(-1.0, 1.0);
         }
     }
     let next = (cursor & !PCM_FRAME_MASK) | ((read + frames as u64) & PCM_FRAME_MASK);
@@ -697,25 +609,6 @@ fn render_normalized(
         // Discard this obsolete quantum instead of advancing the new timeline.
         output.fill(0.0);
         return;
-    }
-    if let Some(profile) = &pcm.loudness {
-        let enabled = profile.enabled();
-        let stored = pcm.normalization_gain.load(Ordering::Relaxed);
-        let latched = (stored != 0).then(|| f32::from_bits(stored));
-        // Metadata or a prepared measurement is fixed before the first audible
-        // sample. Without it, the look-ahead measurement can only lower this
-        // track's level; the normalizer smooths every change.
-        let gain = profile.running_gain(latched).to_bits();
-        if enabled && frames > 0 && gain != stored {
-            pcm.normalization_gain.store(gain, Ordering::Relaxed);
-        }
-        normalizer.process(
-            &mut output[..frames * pcm.channels],
-            pcm.channels,
-            enabled,
-            f32::from_bits(gain),
-            volume,
-        );
     }
     if frames > 0 {
         pcm.started.store(true, Ordering::Release);
@@ -985,7 +878,6 @@ fn pump_mode(
     decoder: DecoderFactory,
 ) -> Result<(), PlaybackError> {
     let first_frame = frame;
-    let _gain = normalization::CacheGain::new(&source.loudness, cache);
     let mut writer = CacheWriter::new(cache);
     writer.revision = revision;
     loop {
@@ -1005,7 +897,6 @@ fn pump_mode(
         if let Some(cache) = cache {
             let bytes = cache.read(frame);
             if !bytes.is_empty() {
-                source.loudness.feed(frame, &bytes);
                 if pcm.is_some_and(|pcm| !push_pcm(&bytes, pcm, canceled)) {
                     return Ok(());
                 }
@@ -1015,7 +906,6 @@ fn pump_mode(
             if let Some(end) = cache.complete()
                 && frame >= end
             {
-                source.loudness.finish_stream(end);
                 if let Some(eof_frame) = eof_frame {
                     eof_frame.store(end, Ordering::Release);
                 }
@@ -1038,8 +928,6 @@ fn pump_mode(
         control.decoder_starts.fetch_add(1, Ordering::Relaxed);
         *decoder_slot.lock().map_err(|_| PlaybackError::Worker)? = Some(stream.cancellation);
         let mut input = stream.reader;
-        let loudness = stream.loudness;
-        let mut metadata_applied = false;
         if canceled.load(Ordering::Relaxed) {
             let _ = finish_decoder(decoder_slot, canceled, true);
             return Ok(());
@@ -1061,12 +949,6 @@ fn pump_mode(
                     return Err(PlaybackError::Decoder);
                 }
             };
-            if !metadata_applied && let Some(metadata) = loudness.get() {
-                if let Some(metadata) = metadata {
-                    source.loudness.apply_metadata(*metadata);
-                }
-                metadata_applied = true;
-            }
             let available = carry + n;
             let complete = available / FRAME_BYTES * FRAME_BYTES;
             let frames = (complete / FRAME_BYTES) as u64;
@@ -1074,7 +956,6 @@ fn pump_mode(
                 next_cached.map_or(frames, |end| frames.min(end.saturating_sub(frame)));
             let take_bytes = take_frames as usize * FRAME_BYTES;
             if take_bytes > 0 {
-                source.loudness.feed(frame, &bytes[..take_bytes]);
                 let mut saved = writer.append(frame, &bytes[..take_bytes]);
                 if revision.is_some() && frame == first_frame {
                     // Make the initial seek position audible immediately; later
@@ -1114,7 +995,6 @@ fn pump_mode(
                 crate::diagnostics::event("decoder", "output_duration_incomplete");
                 return Err(PlaybackError::Decoder);
             }
-            source.loudness.finish_stream(frame);
             if let Some(eof_frame) = eof_frame {
                 eof_frame.store(frame, Ordering::Release);
             } else if let Some(cache) = cache {
@@ -1233,7 +1113,6 @@ impl Prefetch {
                         .cache
                         .mark_complete_at_revision(&cache.key, end, revision)
                         .map_err(|_| PlaybackError::CacheMiss)?;
-                    source.loudness.scan_cache(&cache, control.clone());
                     Ok(())
                 });
                 if let Ok(mut result) = worker_result.lock() {
@@ -1296,7 +1175,6 @@ fn pump_from_prefetch(
         }
         let bytes = cache.read(frame);
         if !bytes.is_empty() {
-            source.loudness.feed(frame, &bytes);
             if !push_pcm(&bytes, pcm, canceled) {
                 return Ok(());
             }
@@ -1308,7 +1186,6 @@ fn pump_from_prefetch(
         // independently of whether the entire track is ready for offline reuse.
         let end = prefetch.eof.load(Ordering::Acquire);
         if (end > 0 && frame >= end) || cache.complete().is_some_and(|end| frame >= end) {
-            source.loudness.finish_stream(frame);
             return Ok(());
         }
         let policy_changed = !cache
@@ -1529,9 +1406,8 @@ fn open_output(pcm: &Arc<Pcm>, control: &Control) -> Result<OutputStream, Playba
     connect_output(pcm, control, attempts, |pcm| {
         let render_pcm = pcm.clone();
         let errors = pcm.clone();
-        let mut normalizer = normalization::OutputNormalizer::new(SAMPLE_RATE);
         audio_output::open(
-            move |data| render_normalized(data, &render_pcm, &mut normalizer),
+            move |data| render(data, &render_pcm),
             move || {
                 errors.device_failed.store(true, Ordering::Relaxed);
             },
@@ -1593,16 +1469,8 @@ fn start(
     }
     let pcm = Arc::new(Pcm {
         underruns: control.underruns.clone(),
-        loudness: Some(source.loudness.clone()),
         ..Pcm::new(CHANNELS, SAMPLE_RATE, volume, paused)
     });
-    if let Some(cache) = &cache {
-        source.loudness.load_cache(cache);
-    }
-    source.loudness.feed(frame, &bytes);
-    if let Some(cache) = &cache {
-        source.loudness.scan_cache(cache, control.clone());
-    }
     prefill(&pcm, &bytes, false);
     let stream = open_output(&pcm, &control)?;
     let prefetch = match &cache {
@@ -1667,82 +1535,6 @@ fn completion_state(
         PlaybackState::Failed(PlaybackError::Decoder)
     }
 }
-/// A track readied ahead in the background: the same full download and
-/// decode as a playing track's prefetch, into the cache, with no output.
-struct Preload {
-    canceled: Arc<AtomicBool>,
-    decoder_slot: DecoderSlot,
-    worker: Option<JoinHandle<()>>,
-}
-impl Preload {
-    fn start(source: Source, cache: &AudioCache, decoder: DecoderFactory) -> Option<Self> {
-        let binding = binding(&source, Some(cache))?;
-        if source.url.is_none() || source.duration == 0 || binding.complete().is_some() {
-            return None;
-        }
-        let (limit, revision) = cache.policy().ok()?;
-        let required = u64::from(source.duration)
-            .saturating_add(2)
-            .saturating_mul(u64::from(SAMPLE_RATE))
-            .saturating_mul(FRAME_BYTES as u64);
-        if limit < required {
-            return None;
-        }
-        let canceled = Arc::new(AtomicBool::new(false));
-        let decoder_slot: DecoderSlot = Arc::new(Mutex::new(None));
-        let (worker_cancel, worker_slot) = (canceled.clone(), decoder_slot.clone());
-        let worker = thread::Builder::new()
-            .name("vk-track-preload".into())
-            .spawn(move || {
-                let started = std::time::Instant::now();
-                // Its own control: a preload is no playing source.
-                let control = Control::default();
-                let result = pump_mode(
-                    &source,
-                    Some(&binding),
-                    0,
-                    None,
-                    &worker_cancel,
-                    &worker_slot,
-                    &control,
-                    Some(revision),
-                    None,
-                    None,
-                    decoder,
-                );
-                if !worker_cancel.load(Ordering::Acquire) {
-                    crate::diagnostics::event(
-                        "playback",
-                        &format!(
-                            "next track readied ok={} gain_known={} ms={}",
-                            result.is_ok(),
-                            source.loudness.measured(),
-                            started.elapsed().as_millis()
-                        ),
-                    );
-                }
-            })
-            .ok()?;
-        Some(Self {
-            canceled,
-            decoder_slot,
-            worker: Some(worker),
-        })
-    }
-}
-impl Drop for Preload {
-    fn drop(&mut self) {
-        self.canceled.store(true, Ordering::Release);
-        if let Ok(mut guard) = self.decoder_slot.lock()
-            && let Some(process) = guard.as_mut()
-        {
-            process.cancel();
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
 
 fn controller(
     commands: Receiver<Command>,
@@ -1755,8 +1547,6 @@ fn controller(
     let mut running: Option<Running> = None;
     let mut active = Epoch::default();
     let mut pause_intent = false;
-    // Dropping it cancels the readied track.
-    let mut _preload: Option<Preload> = None;
     loop {
         match commands.recv_timeout(TICK) {
             Ok(Command::Play {
@@ -1764,8 +1554,6 @@ fn controller(
                 source: selected,
                 offset,
             }) => {
-                // Two downloads must never write one track's cache at once.
-                _preload = None;
                 if !control.current_source(epoch) {
                     continue;
                 }
@@ -1894,28 +1682,6 @@ fn controller(
                 source = None;
                 pause_intent = false;
                 publish(&state, &control, active, PlaybackState::Stopped, (0.0, 0.0));
-            }
-            Ok(Command::NormalizationChanged) => {
-                if let Some(source) = &source
-                    && let Some(running) = &running
-                {
-                    source.loudness.analyze_window(&running.pcm, running.offset);
-                    running
-                        .pcm
-                        .normalization_gain
-                        .store(source.loudness.gain().to_bits(), Ordering::Relaxed);
-                    if let Some(cache) = &running.cache {
-                        source.loudness.scan_cache(cache, control.clone());
-                    }
-                }
-            }
-            Ok(Command::Preload(next)) => {
-                _preload = None;
-                if source.as_ref().and_then(|source| source.key) != next.key
-                    && let Some(cache) = &cache
-                {
-                    _preload = Preload::start(next, cache, spawn_decoder);
-                }
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => (),
@@ -2421,8 +2187,6 @@ mod tests {
             state: Arc::new(Mutex::new(snapshot)),
             volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
             unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
-            normalize: Arc::new(AtomicBool::new(false)),
-            normalization_profiles: VecDeque::new(),
             control: Arc::new(Control::default()),
             source_duration: duration,
             worker: None,
@@ -2462,61 +2226,6 @@ mod tests {
         assert_eq!(silent.snapshot().volume, DEFAULT_VOLUME);
     }
 
-    #[test]
-    fn normalization_toggle_is_live_and_profiles_are_bounded_and_account_bound() {
-        let (mut player, receiver) = queued_player(Snapshot::default(), None);
-        assert!(!player.normalize_volume());
-        player.set_normalize_volume(true);
-        assert!(player.normalize_volume());
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(Command::NormalizationChanged)
-        ));
-        player.set_normalize_volume(true);
-        assert!(receiver.try_recv().is_err());
-        let key = cache_key(2);
-        player.play_cached(key, None, 0.0);
-        let first = match receiver.try_recv().unwrap() {
-            Command::Play { source, .. } => source.loudness,
-            _ => panic!("Expected play"),
-        };
-        player.play_cached(key, None, 0.5);
-        let repeated = match receiver.try_recv().unwrap() {
-            Command::Play { source, .. } => source.loudness,
-            _ => panic!("Expected play"),
-        };
-        assert!(Arc::ptr_eq(&first, &repeated));
-        assert!(first.enabled());
-        player.set_normalize_volume(false);
-        assert!(!first.enabled());
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(Command::NormalizationChanged)
-        ));
-        let other = CacheKey {
-            account_id: key.account_id + 1,
-            ..key
-        };
-        player.play_cached(other, None, 0.0);
-        let distinct = match receiver.try_recv().unwrap() {
-            Command::Play { source, .. } => source.loudness,
-            _ => panic!("Expected play"),
-        };
-        assert!(!Arc::ptr_eq(&first, &distinct));
-        for id in 1..40 {
-            player.play_cached(
-                CacheKey {
-                    track_id: id,
-                    ..key
-                },
-                None,
-                0.0,
-            );
-            assert!(matches!(receiver.try_recv(), Ok(Command::Play { .. })));
-        }
-        assert_eq!(player.normalization_profiles.len(), 32);
-        assert_eq!(player.control.decoder_starts.load(Ordering::Relaxed), 0);
-    }
     #[test]
     fn seek_publishes_the_requested_position_and_keeps_ready_buffer_metadata() {
         let (mut p, _receiver) = queued_player(
@@ -2713,7 +2422,6 @@ mod tests {
         }
         let cache = AudioCache::test_at(directory.0.join("audio"), 4 * 1024 * 1024).unwrap();
         let source = Source {
-            loudness: normalization::Profile::new(Arc::new(AtomicBool::new(false))),
             url: None,
             duration: key.duration,
             key: Some(key),
@@ -2750,7 +2458,6 @@ mod tests {
             .collect();
         cache.write_range(&key, 0, &bytes).unwrap();
         let source = Source {
-            loudness: normalization::Profile::new(Arc::new(AtomicBool::new(false))),
             url: None,
             duration: key.duration,
             key: Some(key),
@@ -2835,7 +2542,6 @@ mod tests {
                 cancellation: cancellation.clone(),
             }),
             cancellation,
-            loudness: Default::default(),
         })
     }
     fn synthetic_decoder(_url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {
@@ -2861,7 +2567,6 @@ mod tests {
         let key = cache_key(24);
         let cache = AudioCache::test_at(directory.0.join("audio"), 16 * 1024 * 1024).unwrap();
         let source = Source {
-            loudness: normalization::Profile::new(Arc::new(AtomicBool::new(false))),
             url: Some(Zeroizing::new("https://example.test/synthetic".into())),
             duration: 24,
             key: Some(key),
@@ -2871,35 +2576,6 @@ mod tests {
             CacheBinding { cache, key },
             Arc::new(Control::default()),
         )
-    }
-
-    #[test]
-    fn a_readied_track_starts_at_its_measured_loudness_from_the_first_sample() {
-        let directory = CacheDirectory::new();
-        let (mut source, cache, _) = preload_fixture(&directory);
-        let normalize = Arc::new(AtomicBool::new(true));
-        source.loudness = normalization::Profile::new(normalize.clone());
-        let preload = Preload::start(source.clone(), &cache.cache, synthetic_decoder)
-            .expect("a track to ready");
-        let end = 24 * u64::from(SAMPLE_RATE);
-        wait_until(|| cache.complete() == Some(end) && source.loudness.measured());
-        drop(preload);
-        let saved = cache
-            .cache
-            .normalization_gain(&cache.key, -14.0)
-            .unwrap()
-            .expect("the measured gain is kept with the cached track");
-        // Played later, even with a fresh profile, the gain is final before
-        // the first sample: not held at unity and lowered as it plays.
-        let fresh = normalization::Profile::new(normalize);
-        fresh.load_cache(&cache);
-        assert!(fresh.measured());
-        assert_eq!(
-            fresh.running_gain(None),
-            saved.clamp(0.063_095_73, 3.981_071_7)
-        );
-        // Nothing is readied twice, nor beyond the cache's budget.
-        assert!(Preload::start(source, &cache.cache, synthetic_decoder).is_none());
     }
 
     #[test]
