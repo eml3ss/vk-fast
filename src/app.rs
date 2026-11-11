@@ -9188,7 +9188,12 @@ impl MusicApp {
         // In the player only the cover, the title and the artists are links
         // with a hand; buttons and sliders keep the arrow. Menus opened over
         // the bar are another layer and keep their own cursor.
-        let bar = egui::Rect::from_min_max(egui::pos2(body.left(), panel_top), body.max);
+        // The whole bar with its padding: egui takes a widget as hovered a
+        // few points past its edge, so the seek bar reaches into the padding.
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(body.left() - 16.0, panel_top),
+            body.max + egui::vec2(16.0, f32::from(PLAYER_PADDING_Y)),
+        );
         if let Some(pointer) = ctx.pointer_hover_pos()
             && bar.contains(pointer)
             && ctx.layer_id_at(pointer) == Some(ui.layer_id())

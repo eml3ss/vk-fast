@@ -336,4 +336,11 @@ fn player_bar_shows_a_hand_only_on_its_cover_title_and_artists() {
     // The play button sits in the middle of the bar, level with the title.
     let play = egui::pos2(size.x * 0.5, title.center().y);
     assert_eq!(hover(&mut app, &mut frame, play), egui::CursorIcon::Default);
+    // egui takes the seek bar as hovered a few points past its edge, into
+    // the bar's bottom padding: the arrow there too.
+    let bottom = egui::pos2(size.x * 0.5, size.y - 5.0);
+    assert_eq!(
+        hover(&mut app, &mut frame, bottom),
+        egui::CursorIcon::Default
+    );
 }
