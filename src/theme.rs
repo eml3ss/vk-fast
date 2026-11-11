@@ -232,8 +232,9 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// egui's slider for settings: a white round handle and the passed part of
-/// the rail filled with the accent blue, ending under the handle.
+/// egui's slider for settings, with its upright rounded handle in white and
+/// the passed part of the rail filled with the accent blue, ending under the
+/// handle.
 pub fn slider<N: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     value: &mut N,
@@ -253,10 +254,14 @@ pub fn slider<N: egui::emath::Numeric>(
             egui::Slider::new(value, range.clone())
                 .step_by(step)
                 .show_value(false)
-                .trailing_fill(true)
-                .handle_shape(egui::style::HandleShape::Circle),
+                .trailing_fill(true),
         );
-        // egui paints its handle in the rail's colour; this one is white.
+        // egui paints its handle in the rail's colour; this one is white, in
+        // the same place and shape.
+        let aspect = match ui.style().visuals.handle_shape {
+            egui::style::HandleShape::Rect { aspect_ratio } => aspect_ratio,
+            egui::style::HandleShape::Circle => 1.0,
+        };
         let radius = response.rect.height() / 2.5;
         let (low, high) = (range.start().to_f64(), range.end().to_f64());
         let fraction = if high > low {
@@ -264,12 +269,13 @@ pub fn slider<N: egui::emath::Numeric>(
         } else {
             0.0
         };
-        let track = response.rect.x_range().shrink(radius);
+        let track = response.rect.x_range().shrink(radius * aspect);
         let x = egui::lerp(track.min..=track.max, fraction);
         let grow = ui.style().interact(&response).expansion;
-        ui.painter().circle_filled(
-            egui::pos2(x, response.rect.center().y),
-            radius + grow,
+        let half = egui::vec2(radius * aspect, radius) + egui::Vec2::splat(grow);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(egui::pos2(x, response.rect.center().y), half * 2.0),
+            egui::CornerRadius::same((half.x * 0.5).round() as u8),
             Color32::WHITE,
         );
         response
