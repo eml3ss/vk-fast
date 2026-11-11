@@ -1,0 +1,37 @@
+{
+  "id": "catppuccin",
+  "name": {
+    "ru": "Catppuccin",
+    "en": "Catppuccin"
+  },
+  "palette": {
+    "accent": "#cba6f7",
+    "muted": "#a6adc8",
+    "text": "#cdd6f4",
+    "strong": "#eef1ff",
+    "error": "#f38ba8",
+    "warning": "#fab387",
+    "light": false,
+    "background": "#181825",
+    "panel": "#1e1e2e",
+    "panel_line": null,
+    "surface": "#1e1e2e",
+    "primary": "#7f56c2",
+    "selected": "#35294f",
+    "scroll_handle": "#45475a",
+    "scroll_hovered": "#585b70",
+    "scroll_active": "#6c7086",
+    "field": "#181825",
+    "link": "#b4befe",
+    "control": "#313244",
+    "control_stroke": "#45475a",
+    "control_hovered": "#3b3d52",
+    "control_hovered_stroke": "#7f56c2",
+    "chroma": 1.2,
+    "tint": [
+      2.0,
+      0.0,
+      8.0
+    ]
+  }
+}

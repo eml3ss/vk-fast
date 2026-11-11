@@ -404,14 +404,15 @@ impl Palette {
                 .all(|value| (-255.0..=255.0).contains(value))
     }
 
-    /// The theme's own accent when it is not of the original blue family (a
-    /// theme file with, say, a green accent); `None` for blue themes.
+    /// The theme's own accent when it is not the original blue or a close
+    /// shade of it (the built-in blue themes differ by at most 14 a channel):
+    /// a green accent, or a pale blue like Kanagawa's; `None` otherwise.
     pub fn own_accent(&self) -> Option<Color32> {
-        let [hue, saturation, _] = hsl(self.accent);
-        let [blue, _, _] = hsl(BLUE);
-        let turn = (hue - blue).abs();
-        let blue_family = saturation < 0.15 || turn.min(1.0 - turn) < 0.04;
-        (!blue_family).then_some(self.accent)
+        let distance = (0..3)
+            .map(|channel| self.accent.to_array()[channel].abs_diff(BLUE.to_array()[channel]))
+            .max()
+            .unwrap_or(0);
+        (distance > 32).then_some(self.accent)
     }
 
     /// This theme with `accent` in place of its own. [`THEME_ACCENT`] keeps
@@ -479,11 +480,27 @@ impl Palette {
         let target = self.level(level);
         // Darkest greys carry the full tint; it fades out towards white.
         let tint_weight = (1.0 - target / 160.0).clamp(0.0, 1.0);
+        // Light greys lean towards the cast of the theme's own text, so a
+        // warm text (Kanagawa's cream) gets warm light greys beside it.
+        let text_level = self.level_of(self.text);
+        let text_weight = if self.light || text_level <= 160.0 {
+            0.0
+        } else {
+            ((target - 160.0) / (text_level - 160.0)).clamp(0.0, 1.0)
+        };
+        let dark_text = dark.text.to_array();
+        let dark_text_level = self.level_of(dark.text);
+        let own_text = self.text.to_array();
         let mapped = std::array::from_fn::<_, 3, _>(|index| {
+            let text_cast = (f32::from(own_text[index]) - text_level)
+                - (f32::from(dark_text[index]) - dark_text_level) * self.chroma;
             let value = if target <= 0.0 {
                 0.0
             } else {
-                target + (channels[index] - level) * self.chroma + self.tint[index] * tint_weight
+                target
+                    + (channels[index] - level) * self.chroma
+                    + self.tint[index] * tint_weight
+                    + text_cast * text_weight
             };
             value.round().clamp(0.0, 255.0) as u8
         });
@@ -600,11 +617,24 @@ mod tests {
 
     #[test]
     fn a_theme_with_an_accent_of_its_own_keeps_it_until_another_is_picked() {
-        for theme in Theme::all() {
+        for theme in Theme::all().filter(|theme| theme.palette().own_accent().is_none()) {
             let palette = theme.palette();
-            assert_eq!(palette.own_accent(), None, "{theme:?}");
             assert_eq!(palette.with_accent(THEME_ACCENT), *palette);
             assert_eq!(palette.with_accent(BLUE), *palette);
+        }
+        // Kanagawa's and Tokyo Night's pale blues are accents of their own.
+        for code in ["kanagawa", "tokyo-night", "catppuccin", "rose-pine"] {
+            let theme = Theme::all().find(|theme| theme.code() == code).unwrap();
+            assert_eq!(
+                theme.palette().own_accent(),
+                Some(theme.palette().accent),
+                "{code}"
+            );
+        }
+        // The original five are blue themes.
+        for code in ["dark", "oled", "graphite", "midnight", "light"] {
+            let theme = Theme::all().find(|theme| theme.code() == code).unwrap();
+            assert_eq!(theme.palette().own_accent(), None, "{code}");
         }
         let mut green = *original_dark();
         green.accent = rgb(0x67, 0xe4, 0x95);
@@ -669,12 +699,18 @@ mod tests {
     fn blue_accent_keeps_every_theme_exactly_and_others_replace_the_blue() {
         for theme in Theme::all() {
             let palette = theme.palette();
-            assert_eq!(palette.with_accent(Accent::Blue.color()), *palette);
-            assert_eq!(
-                palette.accent_tone(Color32::from_rgb(72, 132, 216)),
-                Color32::from_rgb(72, 132, 216)
-            );
-            for accent in Accent::ALL.into_iter().skip(1) {
+            // Every theme keeps its own colours with no accent picked; a blue
+            // one also with blue picked.
+            assert_eq!(palette.with_accent(THEME_ACCENT).accent, palette.accent);
+            let own = palette.own_accent().is_some();
+            if !own {
+                assert_eq!(palette.with_accent(Accent::Blue.color()), *palette);
+                assert_eq!(
+                    palette.accent_tone(Color32::from_rgb(72, 132, 216)),
+                    Color32::from_rgb(72, 132, 216)
+                );
+            }
+            for accent in Accent::ALL.into_iter().skip(usize::from(!own)) {
                 let colored = palette.with_accent(accent.color());
                 // Greys stay the theme's own.
                 assert_eq!(colored.background, palette.background);
@@ -696,10 +732,12 @@ mod tests {
                     assert!(lightness(colored.primary) < lightness(colored.accent));
                     assert!(lightness(colored.selected) < lightness(colored.primary));
                 }
-                assert_ne!(
-                    colored.accent_tone(Color32::from_rgb(72, 132, 216)),
-                    Color32::from_rgb(72, 132, 216)
-                );
+                if accent != Accent::Blue {
+                    assert_ne!(
+                        colored.accent_tone(Color32::from_rgb(72, 132, 216)),
+                        Color32::from_rgb(72, 132, 216)
+                    );
+                }
             }
         }
         // The original dark theme with the original accent.

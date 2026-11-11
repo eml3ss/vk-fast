@@ -729,7 +729,7 @@ mod tests {
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
-                        egui::vec2(600.0, 500.0),
+                        egui::vec2(600.0, 800.0),
                     )),
                     events,
                     ..Default::default()
@@ -1036,8 +1036,10 @@ mod tests {
     fn a_swatch_click_picks_its_accent_and_any_colour_counts_as_custom() {
         let mut page = Page::new();
         page.frame(Vec::new());
-        // The second swatch (violet), in the row under two rows of cards.
-        let top = 2.0 * (CARD.y + 22.0) + 2.0 * 12.0;
+        // The second swatch (violet), in the row under the rows of cards.
+        let per_row = (((600.0 + 12.0) / (CARD.x + 12.0)).floor() as usize).max(1);
+        let rows = Theme::all().count().div_ceil(per_row) as f32;
+        let top = rows * (CARD.y + 22.0) + rows * 12.0;
         let violet = egui::pos2(SWATCH * 1.5 + 10.0, top + SWATCH * 0.5);
         page.click(violet);
         assert_eq!(page.accent, Accent::Violet.color());

@@ -1,0 +1,37 @@
+{
+  "id": "tokyo-night",
+  "name": {
+    "ru": "Tokyo Night",
+    "en": "Tokyo Night"
+  },
+  "palette": {
+    "accent": "#7aa2f7",
+    "muted": "#a0a8cd",
+    "text": "#c0caf5",
+    "strong": "#e4e9ff",
+    "error": "#f7768e",
+    "warning": "#ff9e64",
+    "light": false,
+    "background": "#16161e",
+    "panel": "#1a1b26",
+    "panel_line": null,
+    "surface": "#1a1b26",
+    "primary": "#3d59a1",
+    "selected": "#283457",
+    "scroll_handle": "#3b4261",
+    "scroll_hovered": "#414868",
+    "scroll_active": "#565f89",
+    "field": "#16161e",
+    "link": "#7dcfff",
+    "control": "#292e42",
+    "control_stroke": "#3b4261",
+    "control_hovered": "#2f3549",
+    "control_hovered_stroke": "#3d59a1",
+    "chroma": 1.4,
+    "tint": [
+      0.0,
+      0.0,
+      8.0
+    ]
+  }
+}

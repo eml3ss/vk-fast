@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::{i18n::Language, palette::Palette};
 
 const MAX_BYTES: u64 = 32 * 1024;
-const TEMPLATES: [(&str, &str); 5] = [
+const TEMPLATES: [(&str, &str); 9] = [
     ("dark.json", include_str!("../assets/themes/dark.json")),
     ("oled.json", include_str!("../assets/themes/oled.json")),
     (
@@ -25,6 +25,22 @@ const TEMPLATES: [(&str, &str); 5] = [
         include_str!("../assets/themes/midnight.json"),
     ),
     ("light.json", include_str!("../assets/themes/light.json")),
+    (
+        "kanagawa.json",
+        include_str!("../assets/themes/kanagawa.json"),
+    ),
+    (
+        "catppuccin.json",
+        include_str!("../assets/themes/catppuccin.json"),
+    ),
+    (
+        "tokyo-night.json",
+        include_str!("../assets/themes/tokyo-night.json"),
+    ),
+    (
+        "rose-pine.json",
+        include_str!("../assets/themes/rose-pine.json"),
+    ),
 ];
 
 #[derive(Clone, Deserialize)]
@@ -206,7 +222,7 @@ mod tests {
         let config = root.path().join("Музыка и настройки").join("config");
         let catalog = load_at(&config).unwrap();
         let directory = config.join("themes");
-        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog.len(), TEMPLATES.len());
         for ((filename, _), theme) in TEMPLATES.iter().zip(&catalog) {
             let saved = read_theme(&directory.join(filename)).unwrap();
             assert_eq!(saved.id, theme.id);
@@ -217,7 +233,7 @@ mod tests {
         let edited = serde_json::to_vec(&edited_dark("dark", "Моя тёмная", "My dark")).unwrap();
         fs::write(&path, &edited).unwrap();
         let catalog = load_at(&config).unwrap();
-        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog.len(), TEMPLATES.len());
         assert_eq!(catalog[0].title(Language::Russian), "Моя тёмная");
         assert_eq!(catalog[0].palette.background, Color32::from_rgb(23, 37, 56));
         assert_eq!(fs::read(path).unwrap(), edited);
@@ -237,7 +253,7 @@ mod tests {
                 fs::rename(&path, directory.join("Renamed theme.json")).unwrap();
             }
             let catalog = load_at(root.path()).unwrap();
-            assert_eq!(catalog.len(), 6);
+            assert_eq!(catalog.len(), TEMPLATES.len() + 1);
             let theme = catalog
                 .iter()
                 .find(|theme| theme.id == "night-drive")
@@ -264,11 +280,12 @@ mod tests {
         fs::write(directory.join("02.json"), duplicate.to_string()).unwrap();
 
         let catalog = load_at(root.path()).unwrap();
-        assert_eq!(catalog.len(), 6);
+        assert_eq!(catalog.len(), TEMPLATES.len() + 1);
         assert_eq!(catalog[0].palette, *original_dark());
         assert_eq!(fs::read(dark).unwrap(), b"{invalid");
-        assert_eq!(catalog[5].id, "drive");
-        assert_eq!(catalog[5].title(Language::English), "First");
+        let drive = &catalog[TEMPLATES.len()];
+        assert_eq!(drive.id, "drive");
+        assert_eq!(drive.title(Language::English), "First");
     }
 
     #[test]
@@ -279,7 +296,7 @@ mod tests {
         let edited = edited_dark("dark", "Тёмная на диске", "Dark on disk");
         fs::write(directory.join("something else.json"), edited.to_string()).unwrap();
         let catalog = load_at(root.path()).unwrap();
-        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog.len(), TEMPLATES.len());
         assert_eq!(catalog[0].title(Language::English), "Dark on disk");
         assert!(!directory.join("dark.json").exists());
     }
