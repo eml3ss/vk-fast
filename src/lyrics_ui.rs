@@ -50,7 +50,9 @@ pub struct State {
     rows: Vec<Row>,
     height: f32,
     follow: bool,
-    last_active: Option<usize>,
+    /// The line the view last scrolled to: `Some(None)` is the top, before
+    /// the first timed line; `None` asks to scroll again.
+    followed: Option<Option<usize>>,
     last_position: Option<f64>,
     gap_clock: GapClock,
 }
@@ -63,7 +65,7 @@ impl Default for State {
             rows: Vec::new(),
             height: 0.0,
             follow: true,
-            last_active: None,
+            followed: None,
             last_position: None,
             gap_clock: GapClock::default(),
         }
@@ -384,7 +386,7 @@ pub fn show(
                 );
                 if response.clicked() {
                     state.follow = true;
-                    state.last_active = None;
+                    state.followed = None;
                     response.surrender_focus();
                     action = None;
                 }
@@ -534,7 +536,7 @@ fn lines(
         .is_some_and(|old| (position - old).abs() > 2.5)
     {
         state.follow = true;
-        state.last_active = None;
+        state.followed = None;
     }
     state.last_position = Some(position);
     let manually_scrolling = ui.input(|input| {
@@ -574,7 +576,7 @@ fn lines(
                 ));
         }
     }
-    let should_follow = state.follow && active != state.last_active;
+    let should_follow = state.follow && state.followed != Some(active);
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(rect));
         if fullscreen {
@@ -643,16 +645,29 @@ fn lines(
                     egui::vec2(width, state.height.max(rect.height())),
                     Sense::hover(),
                 );
-                if (should_follow || (changed && state.follow))
-                    && let Some(index) = active
-                    && let Some(row) = state.rows.get(index)
-                {
-                    let target = Rect::from_min_size(
-                        whole.min + egui::vec2(0.0, row.top),
-                        egui::vec2(width, row.height),
-                    );
-                    ui.scroll_to_rect(target, Some(Align::Center));
-                    state.last_active = active;
+                if should_follow || (changed && state.follow) {
+                    match active {
+                        Some(index) => {
+                            if let Some(row) = state.rows.get(index) {
+                                let target = Rect::from_min_size(
+                                    whole.min + egui::vec2(0.0, row.top),
+                                    egui::vec2(width, row.height),
+                                );
+                                ui.scroll_to_rect(target, Some(Align::Center));
+                                state.followed = Some(active);
+                            }
+                        }
+                        // Before the first timed line, such as after seeking
+                        // back to the start: the top of the lyrics.
+                        None if data.synced => {
+                            ui.scroll_to_rect(
+                                Rect::from_min_size(whole.min, egui::vec2(width, 1.0)),
+                                Some(Align::Min),
+                            );
+                            state.followed = Some(None);
+                        }
+                        None => {}
+                    }
                 }
                 let start = state
                     .rows
@@ -732,7 +747,7 @@ fn lines(
                         if response.clicked() {
                             action = data.lines[index].at;
                             state.follow = true;
-                            state.last_active = None;
+                            state.followed = None;
                             response.surrender_focus();
                         }
                     }
@@ -914,6 +929,47 @@ mod tests {
             (current_rect.left() - other_rect.left()).abs() < 1.0,
             "grows from the left"
         );
+    }
+
+    #[test]
+    fn seeking_before_the_first_timed_line_scrolls_back_to_the_top() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = State::default();
+        // The first line starts at 0:10.
+        let mut data = crate::lyrics::test_data(80, true);
+        for line in &mut data.lines {
+            line.at = line.at.map(|at| at + 10.0);
+        }
+        let size = egui::vec2(600.0, 400.0);
+        let mut tick = 0;
+        let mut show_at = |state: &mut State, position: f64| {
+            let mut output = egui::FullOutput::default();
+            for _ in 0..40 {
+                tick += 1;
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        time: Some(f64::from(tick) * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        lines(ui, state, ui.max_rect(), &data, position, 18.0, false, true);
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            texts(&output)
+        };
+        let first = |shown: &[(String, Rect, Color32, f32)]| {
+            shown
+                .iter()
+                .find(|(text, ..)| text == "Synthetic lyric line 0")
+                .map(|(_, rect, ..)| rect.top())
+        };
+        assert_eq!(first(&show_at(&mut state, 500.0)), None, "scrolled down");
+        let top = first(&show_at(&mut state, 5.0)).expect("back at the first line");
+        assert!(top < 40.0, "the first line is at the top: {top}");
     }
 
     #[test]
