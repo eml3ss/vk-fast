@@ -51,6 +51,8 @@ enum Action {
     },
     Clear,
     Track(Box<TrackAction>),
+    /// A row of the mix that follows the queue: the mix starts there.
+    PlayPrepared((i64, i64)),
 }
 
 impl MusicApp {
@@ -210,6 +212,12 @@ impl MusicApp {
             };
             panel.stamp = Some(stamp);
         }
+        // The mix that follows the queue, once it is ready: listed after it.
+        let extra: Vec<Track> = if panel.open {
+            self.prepared_mix_tracks().to_vec()
+        } else {
+            Vec::new()
+        };
         let mut close = false;
         let mut action = None;
         let language = self.language;
@@ -257,6 +265,13 @@ impl MusicApp {
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(t("Далее", "Up next")).family(theme::semibold()));
+                    if !extra.is_empty() {
+                        ui.label(
+                            RichText::new(t("затем микс по треку", "then a track mix"))
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
                     if !self.play_order.queued().is_empty() {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui
@@ -280,7 +295,7 @@ impl MusicApp {
                     }
                 });
                 ui.add_space(8.0);
-                if panel.upcoming.is_empty() {
+                if panel.upcoming.is_empty() && extra.is_empty() {
                     ui.add(
                         egui::Label::new(
                             RichText::new(t("Очередь пуста", "The queue is empty")).color(MUTED),
@@ -309,7 +324,7 @@ impl MusicApp {
                             .id_salt("playback-queue-list")
                             .auto_shrink([false, false]),
                         50.0,
-                        panel.upcoming.len(),
+                        panel.upcoming.len() + extra.len(),
                         |ui, range| {
                             // "Up next": rows retracing history, then the added
                             // tracks, then the source. Added tracks and the
@@ -357,7 +372,16 @@ impl MusicApp {
                                     })
                                     .collect()
                             };
-                            let row_key = |index: usize| row_keys[index];
+                            // The mix after the queue follows, never dragged.
+                            let total = len + extra.len();
+                            let row_key = |index: usize| {
+                                row_keys.get(index).copied().unwrap_or_else(|| {
+                                    row_drag::track_key((
+                                        4,
+                                        row_drag::track_key(extra[index - len].key()) as i64,
+                                    ))
+                                })
+                            };
                             let mut lane = row_drag::Lane::begin(
                                 ui,
                                 egui::Id::new("queue-row-drag"),
@@ -373,7 +397,7 @@ impl MusicApp {
                                         .as_ref()
                                         .map_or(0, |tracks| tracks.as_ptr() as usize),
                                 )),
-                                |key| (0..len).find(|index| row_key(*index) == key),
+                                |key| (0..total).find(|index| row_key(*index) == key),
                             );
                             // A carried-in track: picked up here, or done.
                             if let Some(adopted) = &mut panel.adopted {
@@ -411,33 +435,37 @@ impl MusicApp {
                                 }
                             }
                             let lifted = lane.dragging() || lane.suppressing();
-                            let rows = range.start.saturating_sub(1)..(range.end + 1).min(len);
+                            let rows = range.start.saturating_sub(1)..(range.end + 1).min(total);
                             for index in rows {
-                                let entry = panel.upcoming[index];
                                 let key = row_key(index);
                                 if lane.hides(key) {
                                     continue;
                                 }
                                 let rect = lane.rect(ui.ctx(), index, key);
-                                let Some(track) = self
-                                    .queue_track(
-                                        entry.key,
-                                        panel.source_indices.get(&entry.key).copied(),
-                                    )
-                                    .cloned()
-                                else {
-                                    continue;
+                                let (track, queued_id, entry_key) = if index < len {
+                                    let entry = panel.upcoming[index];
+                                    let Some(track) = self
+                                        .queue_track(
+                                            entry.key,
+                                            panel.source_indices.get(&entry.key).copied(),
+                                        )
+                                        .cloned()
+                                    else {
+                                        continue;
+                                    };
+                                    (track, entry.queued_id, entry.key)
+                                } else {
+                                    let track = extra[index - len].clone();
+                                    let key = track.key();
+                                    (track, None, key)
                                 };
                                 self.row_drag_enabled = group(index).is_some() && !lane.dragging();
                                 let row_action = ui
                                     .scope_builder(
-                                        egui::UiBuilder::new().max_rect(rect).id_salt((
-                                            stamp.0,
-                                            index,
-                                            entry.queued_id,
-                                            entry.key,
-                                        )),
-                                        |ui| self.queue_row(ui, &track, entry.queued_id, false),
+                                        egui::UiBuilder::new()
+                                            .max_rect(rect)
+                                            .id_salt((stamp.0, index, queued_id, entry_key)),
+                                        |ui| self.queue_row(ui, &track, queued_id, false),
                                     )
                                     .inner;
                                 self.row_drag_enabled = false;
@@ -451,6 +479,9 @@ impl MusicApp {
                                     && let Some(row_action) = row_action
                                 {
                                     action = Some(match row_action {
+                                        Action::Play(_) if index >= len => {
+                                            Action::PlayPrepared(entry_key)
+                                        }
                                         Action::Play(_) => Action::Play(index),
                                         other => other,
                                     });
@@ -546,6 +577,9 @@ impl MusicApp {
                 self.prune_queued_tracks();
             }
             Some(Action::Track(action)) => self.handle_track_action(ctx, *action),
+            Some(Action::PlayPrepared(key)) => {
+                self.start_prepared_mix(ctx, Some(key));
+            }
             _ => {}
         }
         close

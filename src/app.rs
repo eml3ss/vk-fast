@@ -29,6 +29,8 @@ mod library_app;
 mod library_membership_tests;
 #[path = "lyrics_app.rs"]
 mod lyrics_app;
+#[path = "mix_prepare.rs"]
+mod mix_prepare;
 #[path = "notice_fade.rs"]
 mod notice_fade;
 #[cfg(test)]
@@ -1257,6 +1259,8 @@ pub struct MusicApp {
     mix_seed: Option<MixSeed>,
     /// Tracks a track mix already went on from, so it never loops back.
     mix_track_seeds: HashSet<(i64, i64)>,
+    /// The mix that follows the queue, fetched while its last track plays.
+    prepared_mix: Option<mix_prepare::PreparedMix>,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1637,6 +1641,7 @@ impl MusicApp {
             mix_active: false,
             mix_seed: None,
             mix_track_seeds: HashSet::new(),
+            prepared_mix: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -2888,12 +2893,15 @@ impl MusicApp {
             && !self.mix_active
             && let Some(last) = self.playing.as_ref().map(Track::key)
         {
-            // The queue has ended: carry on with a mix of the last track.
+            // The queue has ended: carry on with a mix of the last track,
+            // the one already shown in the queue when it is ready.
             if !self.unavailable_playback.allow_continuation() {
                 self.stop_unavailable_recovery();
                 return;
             }
-            self.play_track_mix(ctx, last);
+            if !self.start_prepared_mix(ctx, None) {
+                self.play_track_mix(ctx, last);
+            }
         }
     }
 
@@ -3854,25 +3862,7 @@ impl MusicApp {
                         if matches!(seed, Some(MixSeed::Playlist(_))) {
                             self.clear_playlist_mix_notice();
                         }
-                        self.mix_has_more = page.has_more;
-                        self.mix_active = true;
-                        self.mix_seed = seed;
-                        self.mix_track_seeds.clear();
-                        if let Some(MixSeed::Track(key)) = seed {
-                            self.mix_track_seeds.insert(key);
-                        }
-                        self.mix_advance = false;
-                        let origin = seed.map_or_else(
-                            || "mix".into(),
-                            |seed| match seed {
-                                MixSeed::Track(key) => format!("track-mix:{}_{}", key.0, key.1),
-                                MixSeed::Playlist(key) => {
-                                    format!("playlist-mix:{}_{}", key.0, key.1)
-                                }
-                                MixSeed::Catalog(session) => format!("catalog-mix:{session}"),
-                            },
-                        );
-                        self.start_queue_from(ctx, page.tracks, origin);
+                        self.begin_mix(ctx, seed, page.tracks, page.has_more, None);
                     } else {
                         if matches!(seed, Some(MixSeed::Playlist(_))) {
                             self.mix_load_failed(ctx, true, seed, WebAudioError::NoStream);
@@ -3933,6 +3923,43 @@ impl MusicApp {
             // VK gave the same batch again: a track mix goes on from another track.
             Err(WebAudioError::Pagination) if !start && self.reseed_track_mix(ctx) => {}
             Err(error) => self.mix_load_failed(ctx, start, seed, error),
+        }
+    }
+
+    /// Plays a mix's first tracks as the new queue, from `first` when it is
+    /// one of them, or from the queue's first track.
+    fn begin_mix(
+        &mut self,
+        ctx: &egui::Context,
+        seed: Option<MixSeed>,
+        tracks: Vec<Track>,
+        has_more: bool,
+        first: Option<(i64, i64)>,
+    ) {
+        self.mix_has_more = has_more;
+        self.mix_active = true;
+        self.mix_seed = seed;
+        self.mix_track_seeds.clear();
+        if let Some(MixSeed::Track(key)) = seed {
+            self.mix_track_seeds.insert(key);
+        }
+        self.mix_advance = false;
+        let origin = seed.map_or_else(
+            || "mix".into(),
+            |seed| match seed {
+                MixSeed::Track(key) => format!("track-mix:{}_{}", key.0, key.1),
+                MixSeed::Playlist(key) => format!("playlist-mix:{}_{}", key.0, key.1),
+                MixSeed::Catalog(session) => format!("catalog-mix:{session}"),
+            },
+        );
+        match first.filter(|key| tracks.iter().any(|track| track.key() == *key)) {
+            Some(key) => {
+                self.unavailable_playback.clear();
+                self.replace_play_queue_from(Some(tracks), origin);
+                self.play_order.select_source(key);
+                self.play_track(ctx, key);
+            }
+            None => self.start_queue_from(ctx, tracks, origin),
         }
     }
 
@@ -11096,6 +11123,7 @@ impl MusicApp {
             self.hydrate_metadata(ctx, vec![track.key()]);
         }
         self.poll_mix(ctx);
+        self.prepare_queue_end_mix(ctx);
         if self.mix_active
             && self.mix_has_more
             && !self.unavailable_playback.halted()
@@ -11693,6 +11721,7 @@ mod tests {
             mix_active: false,
             mix_seed: None,
             mix_track_seeds: HashSet::new(),
+            prepared_mix: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
