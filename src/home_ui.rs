@@ -413,6 +413,14 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
 const FRIEND_HEADER: f32 = 84.0;
 const FRIEND_ROW: f32 = 44.0;
 
+/// How far below a cover's top a title line and the small artists line
+/// under it start, so that the two sit centred on the cover.
+fn centred_text_top(ui: &egui::Ui, cover: f32, title: &egui::FontId, gap: f32) -> f32 {
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let height = ui.fonts_mut(|fonts| fonts.row_height(title) + gap + fonts.row_height(&small));
+    ((cover - height) * 0.5).max(0.0)
+}
+
 fn friend_card_height(friend: &FriendPlaylist) -> f32 {
     FRIEND_HEADER + 6.0 + FRIEND_ROW * friend.tracks.len().min(3) as f32 + 6.0
 }
@@ -506,12 +514,13 @@ fn friend_card(
         if hit.hovered() {
             hover_play(ui.painter(), art);
         }
+        let top = centred_text_top(ui, art.height(), &egui::FontId::proportional(14.0), 1.0);
         let mut line = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt(("home-friend-track", index))
                 .max_rect(egui::Rect::from_min_max(
-                    row.min + egui::vec2(48.0, 5.0),
-                    row.max - egui::vec2(8.0, 4.0),
+                    egui::pos2(row.left() + 48.0, art.top() + top),
+                    row.max - egui::vec2(8.0, 0.0),
                 ))
                 .layout(Layout::top_down(Align::Min)),
         );
@@ -1013,17 +1022,15 @@ fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width:
         Some(track),
         egui::TextStyle::Small.resolve(ui.style()).size,
     );
+    let title_font = egui::FontId::new(16.0, theme::semibold());
+    let top = centred_text_top(ui, art.height(), &title_font, 3.0);
     card_text_badged(
         ui,
         egui::Rect::from_min_max(
-            rect.min + egui::vec2(72.0, 15.0),
-            rect.max - egui::vec2(12.0, 12.0),
+            egui::pos2(rect.left() + 72.0, art.top() + top),
+            rect.max - egui::vec2(12.0, 0.0),
         ),
-        theme::track_title(
-            track,
-            ui.visuals().text_color(),
-            egui::FontId::new(16.0, theme::semibold()),
-        ),
+        theme::track_title(track, ui.visuals().text_color(), title_font),
         &track.artist,
         badge,
     );
@@ -1439,6 +1446,92 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("Missing {label}"))
+    }
+
+    #[test]
+    fn recent_and_friend_track_text_sits_centred_on_the_cover() {
+        let template = crate::model::demo_tracks().remove(0);
+        let track = Track {
+            title: "Centred title".into(),
+            artist: "Centred artist".into(),
+            cover_url: None,
+            ..template
+        };
+        let friend = FriendPlaylist {
+            playlist: AlbumRef {
+                id: 36,
+                owner_id: 7,
+                title: "Friend list".into(),
+                access_key: None,
+                cover_url: None,
+            },
+            owner_name: "Synthetic Friend".into(),
+            owner_photo: None,
+            match_percent: None,
+            color: None,
+            tracks: vec![track.clone()],
+        };
+        for (friend_row, cover) in [(false, 48.0), (true, 32.0)] {
+            let context = egui::Context::default();
+            theme::install(&context);
+            let mut covers = CoverCache::new();
+            let mut output = egui::FullOutput::default();
+            for tick in 0..3 {
+                output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(600.0, 400.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if friend_row {
+                            friend_card(ui, &mut covers, &friend, 300.0, Language::English);
+                        } else {
+                            recent_card(ui, &mut covers, &track, 300.0);
+                        }
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            let text = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(text.visual_bounding_rect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing {label}"))
+            };
+            let (title, artist) = (text("Centred title"), text("Centred artist"));
+            let art = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some(rect.rect),
+                    egui::Shape::Mesh(mesh) => Some(mesh.calc_bounds()),
+                    _ => None,
+                })
+                .find(|rect| {
+                    (rect.width() - cover).abs() < 0.6
+                        && (rect.height() - cover).abs() < 0.6
+                        && rect.right() < title.left()
+                })
+                .expect("the cover");
+            // From the title's capitals to the artists' baseline, the same
+            // space above and below inside the cover.
+            let above = title.top() - art.top();
+            let below = art.bottom() - artist.bottom();
+            assert!(
+                (above - below).abs() <= 1.0,
+                "friend row {friend_row}: above {above}, below {below}"
+            );
+        }
     }
 
     #[test]
