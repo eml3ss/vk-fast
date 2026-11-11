@@ -7221,11 +7221,10 @@ impl MusicApp {
                 }
                 // The artist's tracks the account keeps in My music, one entry
                 // that opens them as a list.
-                if let (Some(library_tracks), Some(artist)) = (&library_tracks, &artist)
+                if let Some(library_tracks) = &library_tracks
                     && self.artist_library_entry(
                         ui,
                         language,
-                        artist,
                         artist_image.as_deref(),
                         library_tracks,
                     )
@@ -7319,13 +7318,12 @@ impl MusicApp {
     }
 
     /// "You liked" on an artist page: the artist's photo with a heart, and
-    /// how many of their tracks and releases are in My music. A click opens
+    /// how many of their tracks are in My music. A click opens
     /// those tracks. Returns whether it was clicked.
     fn artist_library_entry(
         &mut self,
         ui: &mut egui::Ui,
         language: Language,
-        artist: &ArtistRef,
         image_url: Option<&str>,
         tracks: &[Track],
     ) -> bool {
@@ -7357,26 +7355,12 @@ impl MusicApp {
             Icon::HeartFilled,
             theme::ACCENT,
         );
-        let releases: HashSet<_> = tracks
-            .iter()
-            .filter_map(|track| track.album.as_ref())
-            .map(|album| (album.owner_id, album.id))
-            .collect();
-        let mut subtitle = vec![crate::release_info::counted(
+        let subtitle = crate::release_info::counted(
             tracks.len() as u64,
             language,
             ["трек", "трека", "треков"],
             ["song", "songs"],
-        )];
-        if !releases.is_empty() {
-            subtitle.push(crate::release_info::counted(
-                releases.len() as u64,
-                language,
-                ["релиз", "релиза", "релизов"],
-                ["release", "releases"],
-            ));
-        }
-        subtitle.push(artist.name.clone());
+        );
         let left = photo.right() + 14.0;
         let width = (rect.right() - 8.0 - left).max(0.0);
         let line = |text: String, font: egui::FontId, color: Color32| {
@@ -7389,11 +7373,7 @@ impl MusicApp {
             egui::FontId::new(17.0, theme::semibold()),
             ui.visuals().text_color(),
         );
-        let details = line(
-            subtitle.join(" · "),
-            egui::FontId::proportional(13.0),
-            MUTED,
-        );
+        let details = line(subtitle, egui::FontId::proportional(13.0), MUTED);
         let height = heading.size().y + 3.0 + details.size().y;
         let top = rect.center().y - height * 0.5;
         ui.painter()
@@ -17271,7 +17251,7 @@ mod tests {
         let entry = account_ui_text_rect(&output, "You liked").expect("the entry");
         assert!(entry.top() > popular.bottom(), "under Popular");
         assert!(
-            account_ui_text_rect(&output, "8 songs · Liked Artist").is_some(),
+            account_ui_text_rect(&output, "8 songs").is_some(),
             "what it holds"
         );
         assert!(
