@@ -1,0 +1,37 @@
+{
+  "id": "graphite",
+  "name": {
+    "ru": "Графит",
+    "en": "Graphite"
+  },
+  "palette": {
+    "accent": "#427cd0",
+    "muted": "#a6a9b0",
+    "text": "#eaebee",
+    "strong": "#ffffff",
+    "error": "#ff9e99",
+    "warning": "#ffb278",
+    "light": false,
+    "background": "#202124",
+    "panel": "#292a2e",
+    "panel_line": null,
+    "surface": "#292a2e",
+    "primary": "#285696",
+    "selected": "#2d3c52",
+    "scroll_handle": "#4c4e54",
+    "scroll_hovered": "#60636a",
+    "scroll_active": "#72767e",
+    "field": "#242528",
+    "link": "#6c9ce0",
+    "control": "#34363b",
+    "control_stroke": "#404248",
+    "control_hovered": "#3e4046",
+    "control_hovered_stroke": "#5c687c",
+    "chroma": 0.25,
+    "tint": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}

@@ -7,77 +7,54 @@
 
 use std::{
     cell::Cell,
-    sync::atomic::{AtomicU8, AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
 use eframe::egui::Color32;
+use serde::{Deserialize, Deserializer};
 
-use crate::i18n::Language;
+use crate::{i18n::Language, themes};
+use themes::original_dark;
 
+/// A position in the startup catalog. Preferences store the stable JSON id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Theme {
-    /// The original dark blue-grey look.
-    #[default]
-    Dark,
-    /// Pure black page and panels: an OLED screen switches those pixels off.
-    Oled,
-    /// Softer, lighter neutral greys without the blue cast.
-    Graphite,
-    /// A deeper navy blue.
-    Midnight,
-    /// White cards and panels on a light grey page, dark text.
-    Light,
-}
+pub struct Theme(usize);
 
 impl Theme {
-    pub const ALL: [Self; 5] = [
-        Self::Dark,
-        Self::Oled,
-        Self::Graphite,
-        Self::Midnight,
-        Self::Light,
-    ];
-
-    /// The value saved in `preferences.json` and written to the logs.
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Dark => "dark",
-            Self::Oled => "oled",
-            Self::Graphite => "graphite",
-            Self::Midnight => "midnight",
-            Self::Light => "light",
-        }
+    pub fn all() -> impl ExactSizeIterator<Item = Self> {
+        (0..themes::available().len()).map(Self)
     }
 
     pub fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|theme| theme.code() == code)
+        themes::available()
+            .iter()
+            .position(|theme| theme.id == code)
+            .map(Self)
+    }
+
+    fn definition(self) -> &'static themes::Definition {
+        &themes::available()[self.0]
+    }
+
+    pub fn code(self) -> &'static str {
+        &self.definition().id
+    }
+
+    pub fn diagnostic_code(self) -> &'static str {
+        let code = self.code();
+        if themes::builtin_id(code) {
+            code
+        } else {
+            "custom"
+        }
     }
 
     pub fn title(self, language: Language) -> &'static str {
-        match self {
-            Self::Dark => language.text("Тёмная", "Dark"),
-            Self::Oled => language.text("Чёрная (OLED)", "Black (OLED)"),
-            Self::Graphite => language.text("Графит", "Graphite"),
-            Self::Midnight => language.text("Полночь", "Midnight"),
-            Self::Light => language.text("Светлая", "Light"),
-        }
+        self.definition().title(language)
     }
 
     pub fn palette(self) -> &'static Palette {
-        match self {
-            Self::Dark => &DARK,
-            Self::Oled => &OLED,
-            Self::Graphite => &GRAPHITE,
-            Self::Midnight => &MIDNIGHT,
-            Self::Light => &LIGHT,
-        }
-    }
-
-    fn index(self) -> u8 {
-        Self::ALL
-            .iter()
-            .position(|theme| *theme == self)
-            .unwrap_or(0) as u8
+        &self.definition().palette
     }
 }
 
@@ -180,49 +157,72 @@ pub fn accent_code(accent: Color32) -> String {
 
 /// The named colours of a theme. Greys drawn by individual widgets that
 /// have no name here follow the theme through [`Palette::tone`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Palette {
     /// Links, the playing row, the passed part of sliders.
+    #[serde(deserialize_with = "deserialize_color")]
     pub accent: Color32,
     /// Secondary text and icons.
+    #[serde(deserialize_with = "deserialize_color")]
     pub muted: Color32,
     /// Main text.
+    #[serde(deserialize_with = "deserialize_color")]
     pub text: Color32,
     /// The brightest text and icons: white in dark themes.
+    #[serde(deserialize_with = "deserialize_color")]
     pub strong: Color32,
     /// Error and warning text.
+    #[serde(deserialize_with = "deserialize_color")]
     pub error: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub warning: Color32,
     /// Light themes draw dark text on light surfaces.
     pub light: bool,
     /// The page behind everything.
+    #[serde(deserialize_with = "deserialize_color")]
     pub background: Color32,
     /// The sidebar, player bar and the lyrics/queue panel.
+    #[serde(deserialize_with = "deserialize_color")]
     pub panel: Color32,
     /// The line between panels and the page; none where their fills differ.
+    #[serde(default, deserialize_with = "deserialize_optional_color")]
     pub panel_line: Option<Color32>,
     /// Cards, fields, menus and dialogs.
+    #[serde(deserialize_with = "deserialize_color")]
     pub surface: Color32,
     /// Filled buttons: Play, switches that are on.
+    #[serde(deserialize_with = "deserialize_color")]
     pub primary: Color32,
     /// The selected sidebar item, pressed controls, hovered caption buttons.
+    #[serde(deserialize_with = "deserialize_color")]
     pub selected: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub scroll_handle: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub scroll_hovered: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub scroll_active: Color32,
     /// Text fields.
+    #[serde(deserialize_with = "deserialize_color")]
     pub field: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub link: Color32,
     /// Buttons and other controls at rest, their outline, and when hovered.
+    #[serde(deserialize_with = "deserialize_color")]
     pub control: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub control_stroke: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub control_hovered: Color32,
+    #[serde(deserialize_with = "deserialize_color")]
     pub control_hovered_stroke: Color32,
     /// How much of the original greys' blue cast is kept (1 = all of it).
     chroma: f32,
     /// A cast added to greys, strongest in the darkest ones.
     tint: [f32; 3],
     /// The accent the blue colours above were turned to.
+    #[serde(skip, default = "original_accent")]
     accent_color: Color32,
 }
 
@@ -233,184 +233,63 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
 /// The original accent.
 const BLUE: Color32 = rgb(54, 112, 196);
 
-pub const DARK: Palette = Palette {
-    accent: rgb(54, 112, 196),
-    muted: rgb(156, 166, 181),
-    text: rgb(231, 235, 242),
-    strong: Color32::WHITE,
-    error: rgb(255, 158, 153),
-    warning: rgb(255, 178, 120),
-    light: false,
-    background: rgb(15, 17, 21),
-    panel: rgb(23, 27, 33),
-    panel_line: None,
-    surface: rgb(23, 27, 33),
-    primary: rgb(34, 77, 139),
-    selected: rgb(27, 44, 67),
-    scroll_handle: rgb(57, 65, 77),
-    scroll_hovered: rgb(75, 85, 99),
-    scroll_active: rgb(91, 104, 122),
-    field: rgb(18, 21, 27),
-    link: rgb(98, 148, 219),
-    control: rgb(32, 38, 47),
-    control_stroke: rgb(43, 50, 61),
-    control_hovered: rgb(42, 50, 63),
-    control_hovered_stroke: rgb(69, 87, 112),
-    chroma: 1.0,
-    tint: [0.0; 3],
-    accent_color: BLUE,
-};
+fn original_accent() -> Color32 {
+    BLUE
+}
 
-const OLED: Palette = Palette {
-    accent: rgb(54, 112, 196),
-    muted: rgb(150, 156, 166),
-    text: rgb(231, 235, 242),
-    strong: Color32::WHITE,
-    error: rgb(255, 158, 153),
-    warning: rgb(255, 178, 120),
-    light: false,
-    background: rgb(0, 0, 0),
-    panel: rgb(0, 0, 0),
-    panel_line: Some(rgb(34, 35, 39)),
-    surface: rgb(17, 18, 20),
-    primary: rgb(34, 77, 139),
-    selected: rgb(22, 38, 61),
-    scroll_handle: rgb(50, 52, 57),
-    scroll_hovered: rgb(70, 73, 80),
-    scroll_active: rgb(88, 92, 100),
-    field: rgb(8, 8, 9),
-    link: rgb(98, 148, 219),
-    control: rgb(29, 30, 34),
-    control_stroke: rgb(42, 43, 48),
-    control_hovered: rgb(40, 42, 47),
-    control_hovered_stroke: rgb(66, 80, 102),
-    chroma: 0.3,
-    tint: [0.0; 3],
-    accent_color: BLUE,
-};
+fn decode_theme_color<E: serde::de::Error>(code: &str) -> Result<Color32, E> {
+    code.starts_with('#')
+        .then(|| parse_accent(code))
+        .flatten()
+        .ok_or_else(|| E::custom("Expected a #rrggbb theme colour"))
+}
 
-const GRAPHITE: Palette = Palette {
-    accent: rgb(66, 124, 208),
-    muted: rgb(166, 169, 176),
-    text: rgb(234, 235, 238),
-    strong: Color32::WHITE,
-    error: rgb(255, 158, 153),
-    warning: rgb(255, 178, 120),
-    light: false,
-    background: rgb(32, 33, 36),
-    panel: rgb(41, 42, 46),
-    panel_line: None,
-    surface: rgb(41, 42, 46),
-    primary: rgb(40, 86, 150),
-    selected: rgb(45, 60, 82),
-    scroll_handle: rgb(76, 78, 84),
-    scroll_hovered: rgb(96, 99, 106),
-    scroll_active: rgb(114, 118, 126),
-    field: rgb(36, 37, 40),
-    link: rgb(108, 156, 224),
-    control: rgb(52, 54, 59),
-    control_stroke: rgb(64, 66, 72),
-    control_hovered: rgb(62, 64, 70),
-    control_hovered_stroke: rgb(92, 104, 124),
-    chroma: 0.25,
-    tint: [0.0; 3],
-    accent_color: BLUE,
-};
+fn deserialize_color<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Color32, D::Error> {
+    decode_theme_color(&String::deserialize(deserializer)?)
+}
 
-const MIDNIGHT: Palette = Palette {
-    accent: rgb(58, 118, 210),
-    muted: rgb(150, 164, 190),
-    text: rgb(228, 234, 246),
-    strong: Color32::WHITE,
-    error: rgb(255, 158, 153),
-    warning: rgb(255, 178, 120),
-    light: false,
-    background: rgb(9, 13, 24),
-    panel: rgb(15, 21, 37),
-    panel_line: None,
-    surface: rgb(15, 21, 37),
-    primary: rgb(34, 77, 150),
-    selected: rgb(24, 44, 80),
-    scroll_handle: rgb(46, 58, 82),
-    scroll_hovered: rgb(62, 77, 106),
-    scroll_active: rgb(78, 95, 128),
-    field: rgb(12, 17, 30),
-    link: rgb(104, 152, 228),
-    control: rgb(24, 33, 52),
-    control_stroke: rgb(36, 47, 70),
-    control_hovered: rgb(34, 45, 68),
-    control_hovered_stroke: rgb(64, 86, 124),
-    chroma: 1.5,
-    tint: [-3.0, -1.0, 6.0],
-    accent_color: BLUE,
-};
+fn deserialize_optional_color<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Color32>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|code| decode_theme_color(&code))
+        .transpose()
+}
 
-const LIGHT: Palette = Palette {
-    accent: rgb(40, 98, 184),
-    muted: rgb(96, 104, 118),
-    text: rgb(26, 29, 35),
-    strong: rgb(12, 14, 18),
-    error: rgb(186, 38, 46),
-    warning: rgb(164, 88, 8),
-    light: true,
-    background: rgb(240, 242, 245),
-    panel: rgb(255, 255, 255),
-    panel_line: Some(rgb(221, 224, 230)),
-    surface: rgb(255, 255, 255),
-    primary: rgb(46, 102, 186),
-    selected: rgb(216, 229, 248),
-    scroll_handle: rgb(196, 201, 209),
-    scroll_hovered: rgb(172, 178, 188),
-    scroll_active: rgb(148, 155, 167),
-    field: rgb(246, 247, 249),
-    link: rgb(32, 92, 178),
-    control: rgb(233, 236, 241),
-    control_stroke: rgb(212, 216, 223),
-    control_hovered: rgb(222, 226, 233),
-    control_hovered_stroke: rgb(140, 163, 198),
-    chroma: 0.5,
-    tint: [0.0; 3],
-    accent_color: BLUE,
-};
-
-static ACTIVE: AtomicU8 = AtomicU8::new(0);
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// The accent as `0x00rrggbb`.
 static ACCENT: AtomicU32 = AtomicU32::new(0x0036_70c4);
 
 thread_local! {
-    /// A theme drawn instead of the active one for a while on this thread:
-    /// scenes over covers stay dark in a light theme.
-    static SCENE: Cell<Option<Theme>> = const { Cell::new(None) };
+    /// Scenes over covers can use the original dark palette regardless of the
+    /// current theme or changes to its on-disk definition.
+    static SCENE: Cell<Option<&'static Palette>> = const { Cell::new(None) };
 }
 
-/// Draw `contents` in `theme`'s colours (with the active accent) on this
-/// thread, then return to the active theme.
-pub fn scene<R>(theme: Theme, contents: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Theme>);
+fn scene<R>(palette: &'static Palette, contents: impl FnOnce() -> R) -> R {
+    struct Restore(Option<&'static Palette>);
     impl Drop for Restore {
         fn drop(&mut self) {
             SCENE.with(|scene| scene.set(self.0));
         }
     }
-    let _restore = Restore(SCENE.with(|scene| scene.replace(Some(theme))));
+    let _restore = Restore(SCENE.with(|scene| scene.replace(Some(palette))));
     contents()
 }
 
-/// The theme the app is drawn in now.
+pub fn dark_scene<R>(contents: impl FnOnce() -> R) -> R {
+    scene(original_dark(), contents)
+}
+
+/// The selected theme, independently of any temporary scene palette.
 pub fn active() -> Theme {
-    if let Some(theme) = SCENE.with(Cell::get) {
-        return theme;
-    }
-    Theme::ALL
-        .get(usize::from(ACTIVE.load(Ordering::Relaxed)))
-        .copied()
-        .unwrap_or_default()
+    Theme(ACTIVE.load(Ordering::Relaxed))
 }
 
 /// Draw everything in `theme` from the next paint on. `theme::apply` also
 /// rebuilds egui's own widget colours.
 pub fn set_active(theme: Theme) {
-    ACTIVE.store(theme.index(), Ordering::Relaxed);
+    ACTIVE.store(theme.0, Ordering::Relaxed);
 }
 
 /// The accent the app is drawn with now.
@@ -429,7 +308,10 @@ pub fn set_accent(accent: Color32) {
 
 /// The colours of the active theme with the active accent.
 pub fn current() -> Palette {
-    active().palette().with_accent(active_accent())
+    SCENE
+        .with(Cell::get)
+        .unwrap_or_else(|| active().palette())
+        .with_accent(active_accent())
 }
 
 /// Hue (0..1), saturation and lightness of `color`.
@@ -474,6 +356,14 @@ fn luma(color: [f32; 3]) -> f32 {
 }
 
 impl Palette {
+    pub fn valid_tones(&self) -> bool {
+        (0.0..=4.0).contains(&self.chroma)
+            && self
+                .tint
+                .iter()
+                .all(|value| (-255.0..=255.0).contains(value))
+    }
+
     /// This theme with `accent` in place of its blue. Blue keeps the theme's
     /// own colours exactly.
     pub fn with_accent(&self, accent: Color32) -> Self {
@@ -525,8 +415,10 @@ impl Palette {
     /// cards, controls and text as `color` has in the dark theme. Accent and
     /// cover colours are not toned. The dark theme returns `color` itself.
     pub fn tone(&self, color: Color32) -> Color32 {
-        if self.chroma == DARK.chroma
-            && self.tint == DARK.tint
+        let dark = original_dark();
+        if self.light == dark.light
+            && self.chroma == dark.chroma
+            && self.tint == dark.tint
             && [
                 self.background,
                 self.surface,
@@ -536,13 +428,13 @@ impl Palette {
                 self.muted,
                 self.text,
             ] == [
-                DARK.background,
-                DARK.surface,
-                DARK.control,
-                DARK.control_stroke,
-                DARK.scroll_active,
-                DARK.muted,
-                DARK.text,
+                dark.background,
+                dark.surface,
+                dark.control,
+                dark.control_stroke,
+                dark.scroll_active,
+                dark.muted,
+                dark.text,
             ]
         {
             return color;
@@ -567,6 +459,7 @@ impl Palette {
     /// This theme's brightness for a brightness of the dark theme, through
     /// the named colours both themes have.
     fn level(&self, level: f32) -> f32 {
+        let dark = original_dark();
         let pair = |dark: Color32, own: Color32| {
             let level = |color: Color32| {
                 let [r, g, b, _] = color.to_array();
@@ -583,13 +476,13 @@ impl Palette {
         };
         let anchors = [
             (0.0, black),
-            pair(DARK.background, self.background),
-            pair(DARK.surface, self.surface),
-            pair(DARK.control, self.control),
-            pair(DARK.control_stroke, self.control_stroke),
-            pair(DARK.scroll_active, self.scroll_active),
-            pair(DARK.muted, self.muted),
-            pair(DARK.text, self.text),
+            pair(dark.background, self.background),
+            pair(dark.surface, self.surface),
+            pair(dark.control, self.control),
+            pair(dark.control_stroke, self.control_stroke),
+            pair(dark.scroll_active, self.scroll_active),
+            pair(dark.muted, self.muted),
+            pair(dark.text, self.text),
             (255.0, white),
         ];
         let mut below = anchors[0];
@@ -620,8 +513,8 @@ mod tests {
 
     #[test]
     fn dark_palette_is_the_original_look() {
-        assert_eq!(Theme::default(), Theme::Dark);
-        let dark = Theme::Dark.palette();
+        assert_eq!(Theme::default().code(), "dark");
+        let dark = Theme::default().palette();
         assert_eq!(dark.accent, Color32::from_rgb(54, 112, 196));
         assert_eq!(dark.muted, Color32::from_rgb(156, 166, 181));
         assert_eq!(dark.background, Color32::from_rgb(15, 17, 21));
@@ -653,11 +546,11 @@ mod tests {
 
     #[test]
     fn oled_page_and_panels_are_pure_black_and_cards_still_stand_out() {
-        let oled = Theme::Oled.palette();
+        let oled = Theme::from_code("oled").unwrap().palette();
         assert_eq!(oled.background, Color32::BLACK);
         assert_eq!(oled.panel, Color32::BLACK);
         // Everything as dark as the original page or darker is off.
-        assert_eq!(oled.tone(DARK.background), Color32::BLACK);
+        assert_eq!(oled.tone(original_dark().background), Color32::BLACK);
         assert_eq!(oled.tone(Color32::from_gray(10)), Color32::BLACK);
         assert!(oled.panel_line.is_some());
         let lift = |color: Color32| {
@@ -673,7 +566,7 @@ mod tests {
 
     #[test]
     fn every_theme_maps_its_named_greys_to_themselves_and_keeps_order() {
-        for theme in Theme::ALL {
+        for theme in Theme::all() {
             let palette = theme.palette();
             // Brightness stays in order: a lighter dark-theme grey is never
             // darker in another dark theme, and never lighter in a light
@@ -694,9 +587,9 @@ mod tests {
                 previous = Some(level);
             }
             for (dark, own) in [
-                (DARK.surface, palette.surface),
-                (DARK.control, palette.control),
-                (DARK.text, palette.text),
+                (original_dark().surface, palette.surface),
+                (original_dark().control, palette.control),
+                (original_dark().text, palette.text),
             ] {
                 let toned = palette.tone(dark).to_array();
                 let own = own.to_array();
@@ -713,7 +606,7 @@ mod tests {
 
     #[test]
     fn blue_accent_keeps_every_theme_exactly_and_others_replace_the_blue() {
-        for theme in Theme::ALL {
+        for theme in Theme::all() {
             let palette = theme.palette();
             assert_eq!(palette.with_accent(Accent::Blue.color()), *palette);
             assert_eq!(
@@ -725,7 +618,10 @@ mod tests {
                 // Greys stay the theme's own.
                 assert_eq!(colored.background, palette.background);
                 assert_eq!(colored.surface, palette.surface);
-                assert_eq!(colored.tone(DARK.control), palette.tone(DARK.control));
+                assert_eq!(
+                    colored.tone(original_dark().control),
+                    palette.tone(original_dark().control)
+                );
                 // The accent takes the chosen hue; filled buttons stay darker.
                 let [hue, ..] = hsl(colored.accent);
                 let [chosen, ..] = hsl(accent.color());
@@ -747,16 +643,18 @@ mod tests {
         }
         // The original dark theme with the original accent.
         assert_eq!(
-            Theme::Dark.palette().with_accent(Accent::default().color()),
-            DARK
+            Theme::default()
+                .palette()
+                .with_accent(Accent::default().color()),
+            *original_dark()
         );
     }
 
     #[test]
     fn hsl_round_trips_colours() {
         for color in [
-            DARK.accent,
-            DARK.selected,
+            original_dark().accent,
+            original_dark().selected,
             Color32::from_rgb(214, 118, 42),
             Color32::from_gray(90),
             Color32::WHITE,
@@ -772,7 +670,7 @@ mod tests {
     #[test]
     fn accent_codes_round_trip_and_unknown_codes_are_rejected() {
         assert_eq!(Accent::default(), Accent::Blue);
-        assert_eq!(Accent::Blue.color(), DARK.accent);
+        assert_eq!(Accent::Blue.color(), original_dark().accent);
         for accent in Accent::ALL {
             assert_eq!(Accent::from_code(accent.code()), Some(accent));
             assert!(!accent.title(Language::Russian).is_empty());
@@ -782,17 +680,24 @@ mod tests {
 
     #[test]
     fn light_theme_turns_dark_greys_light_and_light_text_dark() {
-        let light = Theme::Light.palette();
+        let light = Theme::from_code("light").unwrap().palette();
         assert!(light.light);
         let level = |color: Color32| light.level_of(color);
         // The original page, cards and controls become light; its white and
         // grey text dark, still apart from each other.
-        for grey in [DARK.background, DARK.surface, DARK.control] {
+        for grey in [
+            original_dark().background,
+            original_dark().surface,
+            original_dark().control,
+        ] {
             assert!(level(light.tone(grey)) > 200.0, "{grey:?}");
         }
         assert!(level(light.tone(Color32::WHITE)) < 30.0);
-        assert!(level(light.tone(DARK.muted)) < 130.0);
-        assert!(level(light.tone(DARK.muted)) > level(light.tone(DARK.text)) + 40.0);
+        assert!(level(light.tone(original_dark().muted)) < 130.0);
+        assert!(
+            level(light.tone(original_dark().muted))
+                > level(light.tone(original_dark().text)) + 40.0
+        );
         assert!(level(light.strong) < level(light.text) + 1.0);
         assert!(level(light.error) < 120.0);
     }
@@ -800,12 +705,16 @@ mod tests {
     #[test]
     fn a_scene_draws_in_its_theme_and_restores_the_active_one() {
         let before = active();
-        let inside = scene(Theme::Oled, || {
-            let nested = scene(Theme::Light, || current().light);
-            (active(), current().background, nested)
+        let palette_before = current();
+        let oled = Theme::from_code("oled").unwrap().palette();
+        let light = Theme::from_code("light").unwrap().palette();
+        let inside = scene(oled, || {
+            let nested = scene(light, || current().light);
+            (current().background, nested)
         });
-        assert_eq!(inside, (Theme::Oled, Color32::BLACK, true));
+        assert_eq!(inside, (Color32::BLACK, true));
         assert_eq!(active(), before);
+        assert_eq!(current(), palette_before);
     }
 
     #[test]
@@ -827,7 +736,7 @@ mod tests {
             Color32::WHITE,
             Color32::from_rgb(255, 255, 0),
         ] {
-            let accent = DARK.with_accent(picked).accent;
+            let accent = original_dark().with_accent(picked).accent;
             let lightness = hsl(accent)[2];
             assert!(
                 (0.25..=0.7).contains(&lightness),
@@ -838,7 +747,7 @@ mod tests {
 
     #[test]
     fn theme_codes_round_trip_and_unknown_codes_are_rejected() {
-        for theme in Theme::ALL {
+        for theme in Theme::all() {
             assert_eq!(Theme::from_code(theme.code()), Some(theme));
             assert!(!theme.title(Language::Russian).is_empty());
             assert!(!theme.title(Language::English).is_empty());

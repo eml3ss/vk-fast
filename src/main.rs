@@ -65,6 +65,7 @@ mod single_instance;
 mod system_media;
 mod system_tray;
 mod theme;
+mod themes;
 mod titlebar;
 mod track_drag;
 mod track_menu;
@@ -284,6 +285,7 @@ fn main() -> eframe::Result {
     if diagnostics::init(preferences::load_logging_enabled()).is_err() {
         eprintln!("Could not enable VK Fast diagnostic logging.");
     }
+    themes::initialize();
     let language = language_override.unwrap_or_else(preferences::load_language);
     let demo = args.iter().any(|arg| arg == "--demo");
     let qr_sign_in = args

@@ -323,7 +323,7 @@ impl MusicApp {
                      autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={} \
                      equalizer={}:{} crossfade={}",
                     self.language,
-                    self.theme.code(),
+                    self.theme.diagnostic_code(),
                     // A picked colour is logged only as custom.
                     crate::palette::Accent::of(self.accent)
                         .map_or("custom", crate::palette::Accent::code),

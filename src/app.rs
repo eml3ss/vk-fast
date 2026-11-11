@@ -11536,7 +11536,7 @@ impl MusicApp {
                 });
         };
         if dark_bar {
-            crate::palette::scene(theme::Theme::Dark, || player(ui));
+            crate::palette::dark_scene(|| player(ui));
         } else {
             player(ui);
         }

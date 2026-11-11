@@ -1,0 +1,37 @@
+{
+  "id": "light",
+  "name": {
+    "ru": "Светлая",
+    "en": "Light"
+  },
+  "palette": {
+    "accent": "#2862b8",
+    "muted": "#606876",
+    "text": "#1a1d23",
+    "strong": "#0c0e12",
+    "error": "#ba262e",
+    "warning": "#a45808",
+    "light": true,
+    "background": "#f0f2f5",
+    "panel": "#ffffff",
+    "panel_line": "#dde0e6",
+    "surface": "#ffffff",
+    "primary": "#2e66ba",
+    "selected": "#d8e5f8",
+    "scroll_handle": "#c4c9d1",
+    "scroll_hovered": "#acb2bc",
+    "scroll_active": "#949ba7",
+    "field": "#f6f7f9",
+    "link": "#205cb2",
+    "control": "#e9ecf1",
+    "control_stroke": "#d4d8df",
+    "control_hovered": "#dee2e9",
+    "control_hovered_stroke": "#8ca3c6",
+    "chroma": 0.5,
+    "tint": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}

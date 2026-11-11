@@ -80,7 +80,7 @@ pub fn dark_scene<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> 
     if !is_light() {
         return contents(ui);
     }
-    crate::palette::scene(Theme::Dark, || {
+    crate::palette::dark_scene(|| {
         ui.scope(|ui| {
             *ui.visuals_mut() = visuals(&crate::palette::current());
             contents(ui)
@@ -746,7 +746,7 @@ mod tests {
         original.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(69, 87, 112));
         original.widgets.active.bg_fill = Color32::from_rgb(27, 44, 67);
         original.widgets.active.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(54, 112, 196));
-        assert_eq!(visuals(Theme::Dark.palette()), original);
+        assert_eq!(visuals(crate::themes::original_dark()), original);
         assert_eq!(visuals(Theme::default().palette()), original);
         // Tests never switch the global theme, so this is the default too.
         let context = egui::Context::default();
@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn oled_theme_paints_page_and_panels_black_and_separates_them_by_lines() {
-        let oled = Theme::Oled.palette();
+        let oled = Theme::from_code("oled").unwrap().palette();
         let visuals = visuals(oled);
         assert_eq!(visuals.panel_fill, Color32::BLACK);
         assert_eq!(oled.panel, Color32::BLACK);
@@ -771,7 +771,7 @@ mod tests {
         assert_ne!(visuals.window_fill, Color32::BLACK);
         assert_ne!(visuals.widgets.inactive.bg_fill, Color32::BLACK);
         assert_ne!(visuals.widgets.inactive.weak_bg_fill, Color32::BLACK);
-        for theme in Theme::ALL {
+        for theme in Theme::all() {
             let visuals = super::visuals(theme.palette());
             assert_eq!(visuals.panel_fill, theme.palette().background);
             assert_eq!(visuals.window_fill, theme.palette().surface);

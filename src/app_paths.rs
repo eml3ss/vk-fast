@@ -1,12 +1,9 @@
-//! Windows data roots selected by the installer. A missing marker preserves
-//! the portable ZIP layout; the working directory never affects data paths.
+//! Configuration roots. On Windows the installer selects data locations; a
+//! missing marker preserves the portable ZIP layout.
 
 #[cfg(any(windows, test))]
-use std::{
-    fs, io,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{fs, io::Read, path::Path};
+use std::{io, path::PathBuf};
 
 #[cfg(any(windows, test))]
 const STORAGE_FILE: &str = "vk-fast-storage.ini";
@@ -193,6 +190,30 @@ pub fn config_dir() -> io::Result<PathBuf> {
     Ok(data_paths()?.config.clone())
 }
 
+#[cfg(not(windows))]
+pub fn config_dir() -> io::Result<PathBuf> {
+    xdg_config_dir(
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+#[cfg(any(not(windows), test))]
+fn xdg_config_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> io::Result<PathBuf> {
+    xdg.filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        })
+        .map(|path| path.join("vk-fast"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "User config directory is unavailable",
+            )
+        })
+}
+
 #[cfg(windows)]
 pub fn state_dir() -> io::Result<PathBuf> {
     config_dir()
@@ -216,6 +237,22 @@ mod tests {
         {
             PathBuf::from("/Music players/Музыка VK")
         }
+    }
+
+    #[test]
+    fn config_dir_uses_absolute_xdg_then_absolute_home() {
+        let root = installation();
+        let xdg = root.join("Папка настроек");
+        let home = root.join("home");
+        assert_eq!(
+            xdg_config_dir(Some(xdg.clone()), Some(home.clone())).unwrap(),
+            xdg.join("vk-fast")
+        );
+        assert_eq!(
+            xdg_config_dir(Some(PathBuf::from("relative")), Some(home.clone())).unwrap(),
+            home.join(".config/vk-fast")
+        );
+        assert!(xdg_config_dir(None, Some(PathBuf::from("relative"))).is_err());
     }
 
     #[test]

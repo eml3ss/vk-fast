@@ -25,12 +25,13 @@ pub fn theme_cards(
     let gap = 12.0;
     // Rows of whole cards: as many as fit in the width, the rest below.
     let per_row = (((ui.available_width() + gap) / (CARD.x + gap)).floor() as usize).max(1);
+    let mut choices = Theme::all().peekable();
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = gap;
-        for row in Theme::ALL.chunks(per_row) {
+        while choices.peek().is_some() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for &choice in row {
+                for choice in choices.by_ref().take(per_row) {
                     let title = choice.title(language);
                     let response = ui
                         .push_id(("theme-card", choice.code()), |ui| {
@@ -83,7 +84,7 @@ fn theme_card(
         Stroke::new(width, color),
         egui::StrokeKind::Outside,
     );
-    let text = ui.painter().layout_no_wrap(
+    let mut layout = egui::text::LayoutJob::simple(
         title.to_owned(),
         label,
         if selected {
@@ -91,7 +92,16 @@ fn theme_card(
         } else {
             ui.visuals().text_color()
         },
+        CARD.x,
     );
+    layout.wrap.max_rows = 1;
+    layout.wrap.break_anywhere = true;
+    let text = ui.painter().layout_job(layout);
+    let response = if text.elided {
+        response.on_hover_text(title)
+    } else {
+        response
+    };
     ui.painter().galley(
         egui::pos2(
             rect.center().x - text.size().x * 0.5,
@@ -678,7 +688,7 @@ mod tests {
             theme::install(&ctx);
             Self {
                 ctx,
-                theme: Theme::Dark,
+                theme: Theme::default(),
                 accent: Accent::Blue.color(),
             }
         }
@@ -721,7 +731,7 @@ mod tests {
         let mut page = Page::new();
         let output = page.frame(Vec::new());
         // Every card's title is shown, and no card reaches past the column.
-        for theme in Theme::ALL {
+        for theme in Theme::all() {
             let title = theme.title(Language::English);
             let shape = output
                 .shapes
@@ -736,8 +746,8 @@ mod tests {
         // 600 points hold four cards: the light theme starts a second row.
         let light = egui::pos2(CARD.x * 0.5, CARD.y * 1.5 + 22.0 + 12.0);
         page.click(light);
-        assert_eq!(page.theme, Theme::Light);
-        assert_eq!(crate::palette::active(), Theme::Dark);
+        assert_eq!(page.theme.code(), "light");
+        assert_eq!(crate::palette::active(), Theme::default());
     }
 
     #[test]

@@ -141,7 +141,7 @@ fn deserialize_theme<'de, D: serde::Deserializer<'de>>(
 ) -> Result<String, D::Error> {
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_str()
-        .filter(|code| Theme::from_code(code).is_some())
+        .filter(|code| crate::themes::valid_id(code))
         .unwrap_or_default()
         .to_owned())
 }
@@ -352,29 +352,7 @@ fn invalid() -> io::Error {
 }
 
 fn preferences_path() -> io::Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        Ok(crate::app_paths::config_dir()?.join("preferences.json"))
-    }
-    #[cfg(not(windows))]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|home| home.join(".config"))
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "User config directory is unavailable",
-                )
-            })?;
-        Ok(config.join("vk-fast/preferences.json"))
-    }
+    Ok(crate::app_paths::config_dir()?.join("preferences.json"))
 }
 
 fn legacy_preferences_path() -> io::Result<PathBuf> {
@@ -1213,18 +1191,15 @@ mod tests {
                 .unwrap()
                 .contains("theme")
         );
-        for theme in Theme::ALL {
-            update_at(&path, |preferences| {
-                preferences.theme = theme.code().to_owned()
-            })
-            .unwrap();
+        for code in Theme::all().map(Theme::code).chain(["night-drive"]) {
+            update_at(&path, |preferences| preferences.theme = code.to_owned()).unwrap();
             save_at(&path, 0.375).unwrap();
             let restored = load_preferences_at(&path).unwrap().unwrap();
-            assert_eq!(Theme::from_code(&restored.theme), Some(theme));
+            assert_eq!(restored.theme, code);
             assert_eq!(restored.volume, 0.375);
         }
         let restored: Preferences = serde_json::from_str(r#"{"theme":"oled"}"#).unwrap();
-        assert_eq!(Theme::from_code(&restored.theme), Some(Theme::Oled));
+        assert_eq!(restored.theme, "oled");
     }
 
     #[test]
@@ -1250,10 +1225,7 @@ mod tests {
                 .unwrap()
                 .contains("accent")
         );
-        update_at(&path, |preferences| {
-            preferences.theme = Theme::Oled.code().to_owned()
-        })
-        .unwrap();
+        update_at(&path, |preferences| preferences.theme = "oled".to_owned()).unwrap();
         for accent in Accent::ALL {
             update_at(&path, |preferences| {
                 preferences.accent = accent.code().to_owned()
@@ -1262,7 +1234,7 @@ mod tests {
             save_at(&path, 0.375).unwrap();
             let restored = load_preferences_at(&path).unwrap().unwrap();
             assert_eq!(Accent::from_code(&restored.accent), Some(accent));
-            assert_eq!(Theme::from_code(&restored.theme), Some(Theme::Oled));
+            assert_eq!(restored.theme, "oled");
             assert_eq!(restored.volume, 0.375);
         }
     }

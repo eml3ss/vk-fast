@@ -1,0 +1,37 @@
+{
+  "id": "dark",
+  "name": {
+    "ru": "Тёмная",
+    "en": "Dark"
+  },
+  "palette": {
+    "accent": "#3670c4",
+    "muted": "#9ca6b5",
+    "text": "#e7ebf2",
+    "strong": "#ffffff",
+    "error": "#ff9e99",
+    "warning": "#ffb278",
+    "light": false,
+    "background": "#0f1115",
+    "panel": "#171b21",
+    "panel_line": null,
+    "surface": "#171b21",
+    "primary": "#224d8b",
+    "selected": "#1b2c43",
+    "scroll_handle": "#39414d",
+    "scroll_hovered": "#4b5563",
+    "scroll_active": "#5b687a",
+    "field": "#12151b",
+    "link": "#6294db",
+    "control": "#20262f",
+    "control_stroke": "#2b323d",
+    "control_hovered": "#2a323f",
+    "control_hovered_stroke": "#455770",
+    "chroma": 1.0,
+    "tint": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}

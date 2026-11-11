@@ -1,0 +1,37 @@
+{
+  "id": "midnight",
+  "name": {
+    "ru": "Полночь",
+    "en": "Midnight"
+  },
+  "palette": {
+    "accent": "#3a76d2",
+    "muted": "#96a4be",
+    "text": "#e4eaf6",
+    "strong": "#ffffff",
+    "error": "#ff9e99",
+    "warning": "#ffb278",
+    "light": false,
+    "background": "#090d18",
+    "panel": "#0f1525",
+    "panel_line": null,
+    "surface": "#0f1525",
+    "primary": "#224d96",
+    "selected": "#182c50",
+    "scroll_handle": "#2e3a52",
+    "scroll_hovered": "#3e4d6a",
+    "scroll_active": "#4e5f80",
+    "field": "#0c111e",
+    "link": "#6898e4",
+    "control": "#182134",
+    "control_stroke": "#242f46",
+    "control_hovered": "#222d44",
+    "control_hovered_stroke": "#40567c",
+    "chroma": 1.5,
+    "tint": [
+      -3.0,
+      -1.0,
+      6.0
+    ]
+  }
+}
