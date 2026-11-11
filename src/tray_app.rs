@@ -11,7 +11,16 @@ pub(super) struct State {
     native_hidden: bool,
     quitting: bool,
     wayland: bool,
+    /// The window was active, shown and not minimized, on the last frame.
+    active: bool,
+    /// When it last stopped being active.
+    deactivated_at: Option<Instant>,
 }
+
+/// A tray click takes focus from the window on the press (the taskbar
+/// becomes active) and arrives on the release: a window active this
+/// recently was the one in front when the click began.
+const TRAY_CLICK_FOCUS_GRACE: Duration = Duration::from_millis(1_000);
 
 impl State {
     pub(super) fn detach(&mut self) {
@@ -120,12 +129,7 @@ impl MusicApp {
         }
         match command {
             Command::ToggleWindow
-                if !self.tray.hidden
-                    && !self.window_reopen
-                    && ctx.input(|input| {
-                        let window = input.viewport();
-                        window.focused == Some(true) && window.minimized != Some(true)
-                    }) =>
+                if !self.tray.hidden && !self.window_reopen && self.window_in_front(ctx) =>
             {
                 self.hide_native_window(ctx);
                 crate::diagnostics::event("tray", "click: hide_native_window");
@@ -148,6 +152,33 @@ impl MusicApp {
                 }
             }
         }
+    }
+
+    /// Notes when the window stops being the active, shown one.
+    fn track_window_activity(&mut self, ctx: &egui::Context) {
+        let active = ctx.input(|input| {
+            let window = input.viewport();
+            window.focused == Some(true) && window.minimized != Some(true)
+        });
+        if self.tray.active && !active {
+            self.tray.deactivated_at = Some(Instant::now());
+        }
+        self.tray.active = active;
+    }
+
+    /// The window is in front for a tray click: active now, or until the
+    /// click itself took the focus away a moment ago.
+    fn window_in_front(&self, ctx: &egui::Context) -> bool {
+        let (focused, minimized) = ctx.input(|input| {
+            let window = input.viewport();
+            (window.focused == Some(true), window.minimized == Some(true))
+        });
+        !minimized
+            && (focused
+                || self
+                    .tray
+                    .deactivated_at
+                    .is_some_and(|at| at.elapsed() < TRAY_CLICK_FOCUS_GRACE))
     }
 
     fn hide_native_window(&mut self, ctx: &egui::Context) {
@@ -200,6 +231,9 @@ impl MusicApp {
                 }
             }
         }
+        // Before the commands: a click that just took the focus finds the
+        // moment the window lost it.
+        self.track_window_activity(ctx);
         let commands = self
             .tray
             .service
@@ -302,6 +336,47 @@ mod tests {
         assert_eq!(app.playing.as_ref().unwrap().key(), track.key());
         assert_eq!(app.play_queue.as_ref().unwrap().len(), 1);
         assert_eq!(app.resume_position, Some(42.0));
+    }
+
+    #[test]
+    fn a_tray_click_that_took_the_focus_on_its_press_still_hides_the_window() {
+        use egui::ViewportCommand::{Focus, Minimized, Visible};
+
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.minimize_to_tray = true;
+        let frame = |ctx: &egui::Context, app: &mut MusicApp, focused: bool| {
+            let mut raw = egui::RawInput {
+                focused,
+                ..Default::default()
+            };
+            let viewport = raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.focused = Some(focused);
+            viewport.minimized = Some(false);
+            let _ = ctx.run_logic(&raw, |ctx| app.track_window_activity(ctx));
+        };
+        // In front, then the press on the tray icon makes the taskbar active.
+        frame(&ctx, &mut app, true);
+        frame(&ctx, &mut app, false);
+        assert_eq!(
+            window_action(&ctx, &mut app, Command::ToggleWindow, Some(false), false),
+            [Visible(false)]
+        );
+        assert!(app.tray.hidden);
+        // Shown again; then another program stays in front for a while.
+        assert_eq!(
+            window_action(&ctx, &mut app, Command::ToggleWindow, Some(false), false),
+            [Visible(true), Minimized(false), Focus]
+        );
+        frame(&ctx, &mut app, true);
+        frame(&ctx, &mut app, false);
+        app.tray.deactivated_at =
+            Some(Instant::now() - TRAY_CLICK_FOCUS_GRACE - Duration::from_millis(1));
+        assert_eq!(
+            window_action(&ctx, &mut app, Command::ToggleWindow, Some(false), false),
+            [Visible(true), Minimized(false), Focus],
+            "a window behind another program comes to the front"
+        );
     }
 
     #[test]
