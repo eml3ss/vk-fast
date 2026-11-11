@@ -150,6 +150,7 @@ pub struct Player {
     state: Arc<Mutex<Snapshot>>,
     volume: Arc<AtomicU32>,
     unmuted_volume: AtomicU32,
+    equalizer: Arc<crate::equalizer::Shared>,
     control: Arc<Control>,
     source_duration: Option<u32>,
     worker: Option<JoinHandle<()>>,
@@ -178,6 +179,7 @@ impl Player {
                 })),
                 volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
                 unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
+                equalizer: Arc::default(),
                 control,
                 source_duration: Some(duration),
                 worker: None,
@@ -198,16 +200,22 @@ impl Player {
         let state = Arc::new(Mutex::new(Snapshot::default()));
         let volume = Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits()));
         let control = Arc::new(Control::default());
+        let equalizer = Arc::new(crate::equalizer::Shared::default());
         let (ws, wv, wc) = (state.clone(), volume.clone(), control.clone());
+        let output = Output {
+            volume: wv,
+            equalizer: equalizer.clone(),
+        };
         let worker = thread::Builder::new()
             .name("vk-audio".into())
-            .spawn(move || controller(receiver, ws, wv, wc, cache))
+            .spawn(move || controller(receiver, ws, output, wc, cache))
             .ok();
         let player = Self {
             commands,
             state,
             volume,
             unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
+            equalizer,
             control,
             source_duration: None,
             worker,
@@ -300,6 +308,14 @@ impl Player {
             s.buffered_until = 0.0;
         }
         self.send(Command::Stop(epoch));
+    }
+    #[cfg(test)]
+    pub fn equalizer(&self) -> (bool, crate::equalizer::Gains) {
+        self.equalizer.current()
+    }
+    /// Applies to the playing track at once, from the next audio quantum.
+    pub fn set_equalizer(&self, enabled: bool, gains: &crate::equalizer::Gains) {
+        self.equalizer.set(enabled, gains);
     }
     pub fn set_volume(&self, volume: f32) {
         let volume = normal_volume(volume);
@@ -452,6 +468,7 @@ struct Pcm {
     device_failed: AtomicBool,
     started: AtomicBool,
     volume: Arc<AtomicU32>,
+    equalizer: Arc<crate::equalizer::Shared>,
 }
 impl Pcm {
     fn new(channels: u16, sample_rate: u32, volume: Arc<AtomicU32>, paused: bool) -> Self {
@@ -488,6 +505,7 @@ impl Pcm {
             device_failed: AtomicBool::new(false),
             started: AtomicBool::new(false),
             volume,
+            equalizer: Arc::default(),
         }
     }
     fn is_primed(&self) -> bool {
@@ -566,7 +584,11 @@ impl Pcm {
         true
     }
 }
+#[cfg(test)]
 fn render(output: &mut [f32], pcm: &Pcm) {
+    render_equalized(output, pcm, &mut crate::equalizer::Processor::new());
+}
+fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equalizer::Processor) {
     output.fill(0.0);
     if pcm.canceled.load(Ordering::Acquire) || pcm.paused.load(Ordering::Acquire) {
         return;
@@ -596,8 +618,13 @@ fn render(output: &mut [f32], pcm: &Pcm) {
         let slot = ((read + index as u64) % capacity_frames as u64) as usize * pcm.channels;
         for (channel, sample) in output.iter_mut().enumerate() {
             let raw = f32::from_bits(pcm.samples[slot + channel].load(Ordering::Relaxed));
-            *sample = (raw * volume).clamp(-1.0, 1.0);
+            *sample = raw * volume;
         }
+    }
+    let played = &mut output[..frames * pcm.channels];
+    equalizer.process(&pcm.equalizer, played, pcm.channels);
+    for sample in played {
+        *sample = sample.clamp(-1.0, 1.0);
     }
     let next = (cursor & !PCM_FRAME_MASK) | ((read + frames as u64) & PCM_FRAME_MASK);
     if pcm
@@ -1406,8 +1433,9 @@ fn open_output(pcm: &Arc<Pcm>, control: &Control) -> Result<OutputStream, Playba
     connect_output(pcm, control, attempts, |pcm| {
         let render_pcm = pcm.clone();
         let errors = pcm.clone();
+        let mut equalizer = crate::equalizer::Processor::new();
         audio_output::open(
-            move |data| render(data, &render_pcm),
+            move |data| render_equalized(data, &render_pcm, &mut equalizer),
             move || {
                 errors.device_failed.store(true, Ordering::Relaxed);
             },
@@ -1444,10 +1472,17 @@ fn connect_output<T>(
     Err(PlaybackError::Device)
 }
 
+/// What every opened output plays through: the volume and the equalizer.
+#[derive(Clone)]
+struct Output {
+    volume: Arc<AtomicU32>,
+    equalizer: Arc<crate::equalizer::Shared>,
+}
+
 fn start(
     source: &Source,
     offset: f64,
-    volume: Arc<AtomicU32>,
+    output: Output,
     paused: bool,
     control: Arc<Control>,
     cache: Option<&AudioCache>,
@@ -1469,7 +1504,8 @@ fn start(
     }
     let pcm = Arc::new(Pcm {
         underruns: control.underruns.clone(),
-        ..Pcm::new(CHANNELS, SAMPLE_RATE, volume, paused)
+        equalizer: output.equalizer,
+        ..Pcm::new(CHANNELS, SAMPLE_RATE, output.volume, paused)
     });
     prefill(&pcm, &bytes, false);
     let stream = open_output(&pcm, &control)?;
@@ -1539,7 +1575,7 @@ fn completion_state(
 fn controller(
     commands: Receiver<Command>,
     state: Arc<Mutex<Snapshot>>,
-    volume: Arc<AtomicU32>,
+    output: Output,
     control: Arc<Control>,
     cache: Option<AudioCache>,
 ) {
@@ -1576,7 +1612,7 @@ fn controller(
                 match start(
                     source.as_ref().unwrap(),
                     offset,
-                    volume.clone(),
+                    output.clone(),
                     false,
                     control.clone(),
                     cache.as_ref(),
@@ -1657,7 +1693,7 @@ fn controller(
                     match start(
                         source,
                         offset,
-                        volume.clone(),
+                        output.clone(),
                         paused,
                         control.clone(),
                         cache.as_ref(),
@@ -2180,6 +2216,38 @@ mod tests {
         c.new_source();
         assert!(!c.current_source(seek));
     }
+    #[test]
+    fn the_equalizer_shapes_what_the_output_plays_and_still_clamps() {
+        let p = Pcm::new(2, 10, Arc::new(AtomicU32::new(1.0_f32.to_bits())), false);
+        let equalizer = Arc::new(crate::equalizer::Shared::default());
+        let p = Pcm {
+            equalizer: equalizer.clone(),
+            ..p
+        };
+        let samples = [0.5_f32, -0.5, 0.25, -0.25];
+        for (slot, value) in p.samples.iter().zip(samples) {
+            slot.store(value.to_bits(), Ordering::Relaxed);
+        }
+        p.end_frame.store(2, Ordering::Release);
+        p.eof.store(true, Ordering::Release);
+        let mut processor = crate::equalizer::Processor::new();
+        let mut output = [0.0; 4];
+        render_equalized(&mut output, &p, &mut processor);
+        assert_eq!(output, samples, "off: untouched");
+        // Turned on mid-track: a cut lowers the next quantum.
+        p.cursor.store(0, Ordering::Release);
+        equalizer.set(true, &[-12.0; 10]);
+        let mut output = [0.0; 4];
+        render_equalized(&mut output, &p, &mut processor);
+        assert!(
+            output
+                .iter()
+                .zip(samples)
+                .all(|(out, raw)| out.abs() < raw.abs())
+        );
+        assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
     fn queued_player(snapshot: Snapshot, duration: Option<u32>) -> (Player, Receiver<Command>) {
         let (commands, receiver) = mpsc::channel();
         let player = Player {
@@ -2187,6 +2255,7 @@ mod tests {
             state: Arc::new(Mutex::new(snapshot)),
             volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
             unmuted_volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
+            equalizer: Arc::default(),
             control: Arc::new(Control::default()),
             source_duration: duration,
             worker: None,

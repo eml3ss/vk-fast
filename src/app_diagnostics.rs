@@ -320,7 +320,8 @@ impl MusicApp {
                 format!(
                     "language={:?} tray={} discord={} broadcast={} \
                      titlebar={} compact_seek={} double_click={} search_on_enter={} \
-                     autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={}",
+                     autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={} \
+                     equalizer={}:{}",
                     self.language,
                     self.minimize_to_tray,
                     self.discord_rpc_enabled,
@@ -333,7 +334,18 @@ impl MusicApp {
                     self.explicit_badge,
                     self.animated_backdrop,
                     self.volume_keys_enabled,
-                    self.mix_after_queue
+                    self.mix_after_queue,
+                    if self.equalizer.enabled { "on" } else { "off" },
+                    // A preset's kind only: names are the user's text, and
+                    // gains change every frame of a drag.
+                    self.equalizer.builtin().map_or(
+                        if self.equalizer.custom().is_some() {
+                            "custom"
+                        } else {
+                            "manual"
+                        },
+                        crate::equalizer::Builtin::id
+                    )
                 ),
             ),
         ]

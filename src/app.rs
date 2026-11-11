@@ -832,16 +832,27 @@ enum SettingsSection {
     General,
     Interface,
     Playback,
+    Equalizer,
     Cache,
     About,
 }
 
 impl SettingsSection {
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Interface,
+        Self::Playback,
+        Self::Equalizer,
+        Self::Cache,
+        Self::About,
+    ];
+
     fn icon(self) -> Icon {
         match self {
             Self::General => Icon::Settings,
             Self::Interface => Icon::Interface,
             Self::Playback => Icon::Play,
+            Self::Equalizer => Icon::Sliders,
             Self::Cache => Icon::Storage,
             Self::About => Icon::Info,
         }
@@ -851,6 +862,7 @@ impl SettingsSection {
             Self::General => language.text("Общие", "General"),
             Self::Interface => language.text("Интерфейс", "Interface"),
             Self::Playback => language.text("Воспроизведение", "Playback"),
+            Self::Equalizer => language.text("Эквалайзер", "Equalizer"),
             Self::Cache => language.text("Кэш", "Cache"),
             Self::About => language.text("О приложении", "About"),
         }
@@ -1336,6 +1348,11 @@ pub struct MusicApp {
     avatar_refresh_url: Option<String>,
     volume_save_at: Option<Instant>,
     volume_save_failed: bool,
+    /// The equalizer's curve and presets, as last applied to the player.
+    equalizer: crate::equalizer::Settings,
+    equalizer_ui: crate::equalizer_ui::State,
+    equalizer_save_at: Option<Instant>,
+    equalizer_save_failed: bool,
     compact_seek_bar: bool,
     seek_layout_save_failed: bool,
     system_titlebar: bool,
@@ -1587,6 +1604,15 @@ impl MusicApp {
         if let Some(volume) = preferences::load_volume() {
             player.set_volume(volume);
         }
+        #[cfg(not(test))]
+        let equalizer = preferences::load_equalizer();
+        // UI tests never read the user's equalizer.
+        #[cfg(test)]
+        let equalizer = {
+            let _ = preferences::load_equalizer;
+            crate::equalizer::Settings::default()
+        };
+        player.set_equalizer(equalizer.enabled, &equalizer.gains);
         let (shuffle, repeat) = preferences::load_playback_modes();
         let mut app = Self {
             session: None,
@@ -1717,6 +1743,10 @@ impl MusicApp {
             avatar_refresh_url: None,
             volume_save_at: None,
             volume_save_failed: false,
+            equalizer,
+            equalizer_ui: crate::equalizer_ui::State::default(),
+            equalizer_save_at: None,
+            equalizer_save_failed: false,
             compact_seek_bar: preferences::load_compact_seek_bar(),
             seek_layout_save_failed: false,
             system_titlebar: preferences::load_system_titlebar(),
@@ -10044,13 +10074,7 @@ impl MusicApp {
                 .color(MUTED),
         );
         ui.add_space(6.0);
-        for section in [
-            SettingsSection::General,
-            SettingsSection::Interface,
-            SettingsSection::Playback,
-            SettingsSection::Cache,
-            SettingsSection::About,
-        ] {
+        for section in SettingsSection::ALL {
             ui.push_id(section as u8, |ui| {
                 if Self::navigation_button(
                     ui,
@@ -10110,13 +10134,7 @@ impl MusicApp {
             |ui| {
                 ui.set_max_width(ui.available_width().min(640.0));
                 let mut found = false;
-                for section in [
-                    SettingsSection::General,
-                    SettingsSection::Interface,
-                    SettingsSection::Playback,
-                    SettingsSection::Cache,
-                    SettingsSection::About,
-                ] {
+                for section in SettingsSection::ALL {
                     if (!searching && section != self.settings_section)
                         || (searching && !Self::settings_section_matches(section, &query))
                     {
@@ -10172,6 +10190,47 @@ impl MusicApp {
         );
     }
 
+    /// Applies a changed equalizer at once and saves it shortly after, so a
+    /// drag writes the file once.
+    fn equalizer_changed(&mut self, ctx: &egui::Context, outcome: crate::equalizer_ui::Outcome) {
+        if outcome.sound {
+            self.player
+                .set_equalizer(self.equalizer.enabled, &self.equalizer.gains);
+        }
+        if outcome.save {
+            let deadline = Instant::now() + Duration::from_millis(600);
+            self.equalizer_save_at = Some(deadline);
+            ctx.request_repaint_after(Duration::from_millis(600));
+        }
+    }
+
+    fn save_equalizer_now(&mut self) {
+        let preset = self.equalizer.builtin().map_or(
+            if self.equalizer.custom().is_some() {
+                "custom"
+            } else {
+                "manual"
+            },
+            crate::equalizer::Builtin::id,
+        );
+        // Preset names are the user's text and never reach the log.
+        crate::diagnostics::event(
+            "equalizer",
+            &format!(
+                "saved enabled={} preset={preset} presets={}",
+                self.equalizer.enabled,
+                self.equalizer.presets.len()
+            ),
+        );
+        #[cfg(not(test))]
+        {
+            self.equalizer_save_failed = preferences::save_equalizer(&self.equalizer).is_err();
+        }
+        // UI tests never write the user's equalizer.
+        #[cfg(test)]
+        let _ = preferences::save_equalizer;
+    }
+
     fn settings_section_matches(section: SettingsSection, query: &SettingsQuery) -> bool {
         let fields: &[Setting] = match section {
             SettingsSection::General => &[
@@ -10196,6 +10255,7 @@ impl MusicApp {
                 Setting::Broadcast,
                 Setting::Lyrics,
             ],
+            SettingsSection::Equalizer => &[Setting::Equalizer],
             SettingsSection::Cache => &[
                 Setting::CacheLimit,
                 Setting::CacheClear,
@@ -10761,6 +10821,26 @@ impl MusicApp {
                     );
                 }
             }
+            SettingsSection::Equalizer => {
+                if query.matches(Setting::Equalizer) {
+                    let outcome = crate::equalizer_ui::show(
+                        ui,
+                        language,
+                        &mut self.equalizer,
+                        &mut self.equalizer_ui,
+                    );
+                    self.equalizer_changed(&ctx, outcome);
+                    if self.equalizer_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t(
+                                "Не удалось сохранить эквалайзер.",
+                                "Could not save the equalizer.",
+                            ),
+                        );
+                    }
+                }
+            }
             SettingsSection::About => {
                 if query.matches(Setting::About) {
                     ui.horizontal(|ui| {
@@ -11324,6 +11404,14 @@ impl MusicApp {
         if self.qr_open {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        if let Some(deadline) = self.equalizer_save_at {
+            if Instant::now() >= deadline {
+                self.equalizer_save_at = None;
+                self.save_equalizer_now();
+            } else {
+                ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+            }
+        }
         if let Some(deadline) = self.volume_save_at {
             if Instant::now() >= deadline {
                 self.volume_save_at = None;
@@ -11437,6 +11525,9 @@ impl Drop for MusicApp {
         self.save_session_cookies();
         if self.volume_save_at.is_some() {
             let _ = save_volume_value(self.player.snapshot().volume);
+        }
+        if self.equalizer_save_at.take().is_some() {
+            self.save_equalizer_now();
         }
         if self.cache_save_at.is_some() {
             let _ = preferences::save_cache_limit_mb(self.cache_limit_mb);
@@ -11925,6 +12016,10 @@ mod tests {
             avatar_refresh_url: None,
             volume_save_at: None,
             volume_save_failed: false,
+            equalizer: crate::equalizer::Settings::default(),
+            equalizer_ui: crate::equalizer_ui::State::default(),
+            equalizer_save_at: None,
+            equalizer_save_failed: false,
             compact_seek_bar: false,
             seek_layout_save_failed: false,
             // Existing layout fixtures exercise the system-decorated variant.

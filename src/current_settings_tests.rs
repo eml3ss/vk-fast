@@ -257,13 +257,7 @@ fn logging_is_an_opt_in_general_switch_and_search_does_not_touch_music_or_other_
 #[test]
 fn every_settings_title_has_balanced_space_between_search_and_its_card() {
     for language in [Language::Russian, Language::English] {
-        for section in [
-            SettingsSection::General,
-            SettingsSection::Interface,
-            SettingsSection::Playback,
-            SettingsSection::Cache,
-            SettingsSection::About,
-        ] {
+        for section in SettingsSection::ALL {
             let ctx = egui::Context::default();
             let mut app = account_ui_app(&ctx, language);
             app.settings_open = true;
@@ -359,13 +353,7 @@ fn settings_navigation_uses_main_tab_colors_icons_and_retains_36_point_rows() {
         app.settings_open = true;
         let size = egui::vec2(1120.0, 850.0);
         let mut tick = 0;
-        for section in [
-            SettingsSection::General,
-            SettingsSection::Interface,
-            SettingsSection::Playback,
-            SettingsSection::Cache,
-            SettingsSection::About,
-        ] {
+        for section in SettingsSection::ALL {
             app.settings_section = section;
             let output = warm(&ctx, &mut app, size, &mut tick);
             let selected: Vec<_> = account_ui_shapes(&output)
@@ -751,4 +739,167 @@ fn the_scrollbar_keeps_the_same_gap_to_the_window_edge_as_the_content_on_the_lef
     let left_gap = 8.0;
     assert!(search.left() > app.page_rect.left() + left_gap);
     assert_eq!(size.x - bar.right(), left_gap, "bar {bar:?}");
+}
+
+#[test]
+fn the_equalizer_is_shaped_on_its_graph_and_keeps_presets_of_its_own() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Equalizer;
+    let size = egui::vec2(1120.0, 950.0);
+    let mut tick = 0;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(
+        !app.equalizer.enabled && app.equalizer.builtin() == Some(crate::equalizer::Builtin::Flat)
+    );
+    let top = account_ui_text_rect(&output, "+12").unwrap().center().y;
+    let bottom = account_ui_text_rect(&output, "−12").unwrap().center().y;
+    let x = account_ui_text_rect(&output, "1k").unwrap().center().x;
+    let zero = (top + bottom) * 0.5;
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Dragging the 1 kHz point to the top boosts it fully and turns the
+    // equalizer on for the playing sound.
+    let start = egui::pos2(x, zero);
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        vec![egui::Event::PointerMoved(start), button(start, true)],
+    );
+    for step in 1..=6 {
+        let at = egui::pos2(x, zero + (top - 4.0 - zero) * step as f32 / 6.0);
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut tick,
+            vec![egui::Event::PointerMoved(at)],
+        );
+    }
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        vec![button(egui::pos2(x, top - 4.0), false)],
+    );
+    let mut boosted = [0.0; 10];
+    boosted[5] = 12.0;
+    assert_eq!(app.equalizer.gains, boosted);
+    assert!(app.equalizer.enabled);
+    assert_eq!(app.player.equalizer(), (true, boosted));
+    assert!(
+        app.equalizer_save_at.take().is_some(),
+        "saved once the drag settles"
+    );
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(account_ui_text_rect(&output, "+12").is_some());
+    // A preset from the list replaces the curve.
+    let picker = account_ui_text_rect(&output, "Custom").expect("the curve is custom");
+    account_ui_click(&ctx, &mut app, size, &mut tick, picker.center());
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let bass = account_ui_text_rect(&output, "More bass").expect("built-in presets listed");
+    account_ui_click(&ctx, &mut app, size, &mut tick, bass.center());
+    assert_eq!(app.equalizer.gains, crate::equalizer::Builtin::Bass.gains());
+    assert_eq!(
+        app.player.equalizer().1,
+        crate::equalizer::Builtin::Bass.gains()
+    );
+    // A changed curve can be saved under a name of the user's.
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let x = account_ui_text_rect(&output, "2k").unwrap().center().x;
+    account_ui_click(&ctx, &mut app, size, &mut tick, egui::pos2(x, bottom));
+    assert_eq!(app.equalizer.gains[6], -12.0);
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let save = account_ui_text_rect(&output, "Save as preset").expect("save offered");
+    account_ui_click(&ctx, &mut app, size, &mut tick, save.center());
+    warm(&ctx, &mut app, size, &mut tick);
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        vec![egui::Event::Text("Late bass".into())],
+    );
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut tick,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert_eq!(app.equalizer.presets.len(), 1);
+    assert_eq!(app.equalizer.presets[0].name, "Late bass");
+    assert_eq!(app.equalizer.custom(), Some(0));
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    assert!(
+        account_ui_text_rect(&output, "Late bass").is_some(),
+        "shown as the current preset"
+    );
+    // Reset returns to flat; the saved preset stays until deleted.
+    let reset = account_ui_text_rect(&output, "Reset").unwrap();
+    account_ui_click(&ctx, &mut app, size, &mut tick, reset.center());
+    assert_eq!(
+        app.equalizer.builtin(),
+        Some(crate::equalizer::Builtin::Flat)
+    );
+    assert_eq!(app.equalizer.presets.len(), 1);
+    app.equalizer.gains = app.equalizer.presets[0].gains;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let delete = account_ui_text_rect(&output, "Delete preset").unwrap();
+    account_ui_click(&ctx, &mut app, size, &mut tick, delete.center());
+    assert!(app.equalizer.presets.is_empty());
+    // Off: the player plays the file as it is again.
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    // The switch's label, not the navigation item or the section title.
+    let switch = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text)
+                if text.galley.text() == "Equalizer"
+                    && text.visual_bounding_rect().left() > 252.0 =>
+            {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap();
+    account_ui_click(&ctx, &mut app, size, &mut tick, switch.center());
+    assert!(!app.equalizer.enabled && !app.player.equalizer().0);
+}
+
+#[test]
+fn settings_search_finds_the_equalizer_by_sound_words() {
+    for (language, query) in [(Language::Russian, "басы"), (Language::English, "treble")] {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, language);
+        app.settings_open = true;
+        app.settings_query = query.into();
+        let size = egui::vec2(1120.0, 950.0);
+        let mut tick = 0;
+        let output = warm(&ctx, &mut app, size, &mut tick);
+        let title = SettingsSection::Equalizer.title(language);
+        assert!(account_ui_shapes(&output).into_iter().any(|shape| matches!(
+            shape,
+            egui::Shape::Text(text) if text.galley.text() == title && text.visual_bounding_rect().left() > 252.0
+        )));
+        assert!(
+            account_ui_text_rect(&output, SettingsSection::Playback.title(language))
+                .is_some_and(|rect| rect.left() < 252.0)
+        );
+    }
 }

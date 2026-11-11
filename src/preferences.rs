@@ -399,7 +399,13 @@ fn write_at(path: &Path, preferences: &Preferences) -> io::Result<()> {
 
 fn write_mode_at(path: &Path, preferences: &Preferences, replace: bool) -> io::Result<bool> {
     let bytes = serde_json::to_vec(preferences).map_err(|_| invalid())?;
-    if bytes.len() as u64 > MAX_BYTES {
+    write_bytes_at(path, &bytes, MAX_BYTES, replace)
+}
+
+/// Publishes `bytes` as a private file at once: a fsynced temporary file
+/// renamed (or, without `replace`, linked) into place.
+fn write_bytes_at(path: &Path, bytes: &[u8], limit: u64, replace: bool) -> io::Result<bool> {
+    if bytes.len() as u64 > limit {
         return Err(invalid());
     }
     let parent = checked_parent(path, true)?;
@@ -421,7 +427,7 @@ fn write_mode_at(path: &Path, preferences: &Preferences, replace: bool) -> io::R
             Err(error) => return Err(error),
         }
     };
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
     let temporary_path = temporary.0.as_ref().ok_or_else(invalid)?;
@@ -443,6 +449,10 @@ fn write_mode_at(path: &Path, preferences: &Preferences, replace: bool) -> io::R
 }
 
 fn read_bytes_at(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    read_limited_at(path, MAX_BYTES)
+}
+
+fn read_limited_at(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
     let Some(metadata) = checked_target(path)? else {
         return Ok(None);
     };
@@ -457,14 +467,12 @@ fn read_bytes_at(path: &Path) -> io::Result<Option<Vec<u8>>> {
             ));
         }
     }
-    if metadata.len() > MAX_BYTES {
+    if metadata.len() > limit {
         return Err(invalid());
     }
     let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(invalid());
     }
     Ok(Some(bytes))
@@ -611,6 +619,50 @@ fn remove_legacy_if_unchanged(legacy: &Path, original: &[u8]) -> io::Result<()> 
         File::open(legacy.parent().ok_or_else(invalid)?)?.sync_all()?;
     }
     Ok(())
+}
+
+/// The equalizer's file: its curve and the user's presets, beside the
+/// preferences but on its own, since presets outgrow their size limit.
+const EQUALIZER_BYTES: u64 = 16 * 1024;
+
+fn equalizer_path() -> io::Result<PathBuf> {
+    let preferences = preferences_path()?;
+    Ok(preferences
+        .parent()
+        .ok_or_else(invalid)?
+        .join("equalizer.json"))
+}
+
+fn load_equalizer_at(path: &Path) -> io::Result<crate::equalizer::Settings> {
+    let Some(bytes) = read_limited_at(path, EQUALIZER_BYTES)? else {
+        return Ok(crate::equalizer::Settings::default());
+    };
+    let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if !json.is_object() {
+        return Err(invalid());
+    }
+    serde_json::from_value::<crate::equalizer::Settings>(json)
+        .map(crate::equalizer::Settings::cleaned)
+        .map_err(|_| invalid())
+}
+
+fn save_equalizer_at(path: &Path, settings: &crate::equalizer::Settings) -> io::Result<()> {
+    let bytes = serde_json::to_vec(&settings.clone().cleaned()).map_err(|_| invalid())?;
+    let _guard = WRITES
+        .lock()
+        .map_err(|_| io::Error::other("Preferences writer unavailable"))?;
+    write_bytes_at(path, &bytes, EQUALIZER_BYTES, true).map(|_| ())
+}
+
+/// Off and flat when there is no file or it cannot be read.
+pub fn load_equalizer() -> crate::equalizer::Settings {
+    equalizer_path()
+        .and_then(|path| load_equalizer_at(&path))
+        .unwrap_or_default()
+}
+
+pub fn save_equalizer(settings: &crate::equalizer::Settings) -> io::Result<()> {
+    save_equalizer_at(&equalizer_path()?, settings)
 }
 
 pub fn load_volume() -> Option<f32> {
@@ -935,6 +987,49 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn equalizer_settings_round_trip_beside_the_preferences_and_bad_files_read_as_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk-fast/equalizer.json");
+        assert_eq!(
+            load_equalizer_at(&path).unwrap(),
+            crate::equalizer::Settings::default()
+        );
+        let mut settings = crate::equalizer::Settings {
+            enabled: true,
+            gains: crate::equalizer::Builtin::Rock.gains(),
+            presets: Vec::new(),
+        };
+        for index in 0..crate::equalizer::MAX_PRESETS {
+            assert!(
+                settings.save_preset(
+                    &"Длинное имя пресета "
+                        .repeat(3)
+                        .replace("пресета", &index.to_string())
+                )
+            );
+        }
+        save_equalizer_at(&path, &settings).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        }
+        assert_eq!(load_equalizer_at(&path).unwrap(), settings);
+        for bad in [&b"[]"[..], b"{\"gains\":[1,2]}", b"not json"] {
+            fs::write(&path, bad).unwrap();
+            assert!(load_equalizer_at(&path).is_err());
+        }
+        fs::write(
+            &path,
+            br#"{"enabled":true,"gains":[99,0,0,0,0,0,0,0,0,0],"future":1}"#,
+        )
+        .unwrap();
+        let loaded = load_equalizer_at(&path).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.gains[0], crate::equalizer::MAX_DB);
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub enum Setting {
     MixAfterQueue,
     Broadcast,
     Lyrics,
+    Equalizer,
     MinimizeToTray,
     LinkHandler,
     Logging,
@@ -90,6 +91,9 @@ impl Query {
             }
             Setting::Lyrics => {
                 "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный токен обновить playback lyrics musixmatch vk genius source fallback anonymous token renew synced источник резервный"
+            }
+            Setting::Equalizer => {
+                "эквалайзер эквалайзера эквалайзер полосы частоты басы бас низкие высокие средние пресет пресеты звук тембр усиление дб гц equalizer eq bands frequencies bass treble mid preset presets sound tone boost gain db hz"
             }
             Setting::MinimizeToTray => {
                 "общие системный трей сворачивать свернуть при закрытии закрытие фон значок general minimize minimise to system tray when close closing background icon"

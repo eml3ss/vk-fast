@@ -23,6 +23,8 @@ mod cover_play;
 mod detail_ui;
 mod diagnostics;
 mod discord_rpc;
+mod equalizer;
+mod equalizer_ui;
 mod home_ui;
 mod i18n;
 mod icons;

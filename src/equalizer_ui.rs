@@ -1,0 +1,439 @@
+//! The equalizer's settings card: a curve whose band knobs are dragged right
+//! on the graph, and a preset picker with the user's own presets.
+
+use eframe::egui::{self, Color32, RichText, Sense, Stroke};
+
+use crate::{
+    equalizer::{self, BANDS, Builtin, MAX_DB, Settings},
+    i18n::Language,
+    theme::{self, ACCENT, BACKGROUND, MUTED},
+};
+
+const GRAPH_HEIGHT: f32 = 190.0;
+const KNOB: f32 = 6.0;
+/// The lowest and highest frequency drawn, in Hz.
+const LOW: f32 = 20.0;
+const HIGH: f32 = 20_000.0;
+
+#[derive(Default)]
+pub struct State {
+    /// The name being typed for a new preset, while that row is open.
+    naming: Option<String>,
+    /// Saving failed because the preset list is full.
+    full: bool,
+}
+
+/// What changed this frame.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Outcome {
+    /// The sound changed: apply it to the player.
+    pub sound: bool,
+    /// Anything kept in the file changed.
+    pub save: bool,
+}
+
+impl Outcome {
+    fn sound() -> Self {
+        Self {
+            sound: true,
+            save: true,
+        }
+    }
+}
+
+fn frequency_label(freq: f32) -> String {
+    if freq >= 1_000.0 {
+        format!("{}k", (freq / 1_000.0).round())
+    } else {
+        format!("{}", freq.round())
+    }
+}
+
+/// "+3.5", "0", "−2" with a real minus sign.
+pub fn gain_label(gain: f32) -> String {
+    let text = if gain.fract() == 0.0 {
+        format!("{}", gain.abs())
+    } else {
+        format!("{:.1}", gain.abs())
+    };
+    if gain > 0.0 {
+        format!("+{text}")
+    } else if gain < 0.0 {
+        format!("−{text}")
+    } else {
+        text
+    }
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    language: Language,
+    settings: &mut Settings,
+    state: &mut State,
+) -> Outcome {
+    let t = |ru, en| language.text(ru, en);
+    let mut outcome = Outcome::default();
+    if theme::switch(ui, &mut settings.enabled, t("Эквалайзер", "Equalizer")).changed() {
+        outcome = Outcome::sound();
+    }
+    ui.label(
+        RichText::new(t(
+            "Меняет звук только в VK Fast. Тяните точки на графике, двойной щелчок возвращает полосу к нулю. Чтобы звук не хрипел, подъёмы немного снижают общую громкость.",
+            "Changes the sound in VK Fast only. Drag the points on the graph; a double click resets a band. Boosts lower the overall level a little so the sound does not distort.",
+        ))
+        .small()
+        .color(MUTED),
+    );
+    ui.add_space(14.0);
+    if graph(ui, language, settings) {
+        // Shaping the sound means wanting to hear it.
+        settings.enabled = true;
+        outcome = Outcome::sound();
+    }
+    ui.add_space(14.0);
+    let picked = presets(ui, language, settings, state);
+    if picked.sound {
+        settings.enabled = true;
+    }
+    outcome.sound |= picked.sound;
+    outcome.save |= picked.save;
+    outcome
+}
+
+/// The curve with a knob per band; true when a band changed.
+fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, GRAPH_HEIGHT), Sense::hover());
+    let plot = egui::Rect::from_min_max(
+        rect.min + egui::vec2(34.0, 16.0),
+        rect.max - egui::vec2(14.0, 16.0),
+    );
+    let x_of = |freq: f32| plot.left() + plot.width() * (freq / LOW).ln() / (HIGH / LOW).ln();
+    let y_of = |gain: f32| {
+        plot.center().y - gain.clamp(-MAX_DB - 3.0, MAX_DB + 3.0) / MAX_DB * plot.height() * 0.5
+    };
+    let gain_at =
+        |y: f32| equalizer::clean_gain((plot.center().y - y) / (plot.height() * 0.5) * MAX_DB);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 10.0, BACKGROUND);
+    let small = egui::FontId::proportional(11.0);
+    for gain in [-12.0, -6.0, 0.0, 6.0, 12.0] {
+        let y = y_of(gain);
+        let color = if gain == 0.0 {
+            Color32::from_rgb(64, 73, 86)
+        } else {
+            Color32::from_rgb(36, 42, 51)
+        };
+        painter.line_segment(
+            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+            Stroke::new(1.0, color),
+        );
+        painter.text(
+            egui::pos2(rect.left() + 26.0, y),
+            egui::Align2::RIGHT_CENTER,
+            gain_label(gain),
+            small.clone(),
+            MUTED,
+        );
+    }
+    let enabled = settings.enabled;
+    let line = if enabled {
+        ACCENT
+    } else {
+        Color32::from_rgb(88, 98, 112)
+    };
+    // Columns: each band owns the strip around its frequency.
+    let spacing = x_of(BANDS[1]) - x_of(BANDS[0]);
+    let mut changed = false;
+    let mut active = None;
+    for (band, freq) in BANDS.into_iter().enumerate() {
+        let x = x_of(freq);
+        let column =
+            egui::Rect::from_x_y_ranges((x - spacing * 0.5)..=(x + spacing * 0.5), rect.y_range());
+        let id = ui.id().with(("equalizer-band", band));
+        let response = ui.interact(column, id, Sense::click_and_drag());
+        let label = format!("{} {}", frequency_label(freq), language.text("Гц", "Hz"));
+        let gain = settings.gains[band];
+        response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), f64::from(gain), &label));
+        let mut next = gain;
+        if response.double_clicked() {
+            next = 0.0;
+        } else if (response.dragged() || response.clicked())
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            next = gain_at(pointer.y);
+        }
+        if response.has_focus() {
+            ui.input(|input| {
+                if input.key_pressed(egui::Key::ArrowUp) {
+                    next = equalizer::clean_gain(gain + equalizer::STEP_DB);
+                }
+                if input.key_pressed(egui::Key::ArrowDown) {
+                    next = equalizer::clean_gain(gain - equalizer::STEP_DB);
+                }
+            });
+        }
+        if next != gain {
+            settings.gains[band] = next;
+            changed = true;
+        }
+        if response.hovered() || response.dragged() || response.has_focus() {
+            active = Some(band);
+        }
+        response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    }
+    // The curve as it sounds, with a soft fill toward 0 dB.
+    let zero = y_of(0.0);
+    let points: Vec<egui::Pos2> = (0..=160)
+        .map(|step| {
+            let x = plot.left() + plot.width() * step as f32 / 160.0;
+            let freq = LOW * (HIGH / LOW).powf((x - plot.left()) / plot.width());
+            egui::pos2(x, y_of(equalizer::response_db(&settings.gains, freq)))
+        })
+        .collect();
+    let mut fill = egui::Mesh::default();
+    let fill_color = line.gamma_multiply(0.18);
+    for pair in points.windows(2) {
+        let index = fill.vertices.len() as u32;
+        for pos in [
+            pair[0],
+            egui::pos2(pair[0].x, zero),
+            pair[1],
+            egui::pos2(pair[1].x, zero),
+        ] {
+            fill.colored_vertex(pos, fill_color);
+        }
+        fill.add_triangle(index, index + 1, index + 2);
+        fill.add_triangle(index + 1, index + 3, index + 2);
+    }
+    painter.add(fill);
+    painter.add(egui::Shape::line(points, Stroke::new(2.0, line)));
+    for (band, freq) in BANDS.into_iter().enumerate() {
+        let center = egui::pos2(x_of(freq), y_of(settings.gains[band]));
+        let lit = active == Some(band);
+        painter.line_segment(
+            [egui::pos2(center.x, zero), center],
+            Stroke::new(2.0, line.gamma_multiply(if lit { 0.9 } else { 0.45 })),
+        );
+        painter.circle(
+            center,
+            if lit { KNOB + 1.5 } else { KNOB },
+            if enabled {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(170, 178, 190)
+            },
+            Stroke::new(2.0, line),
+        );
+    }
+    if let Some(band) = active {
+        let center = egui::pos2(x_of(BANDS[band]), y_of(settings.gains[band]));
+        let text = format!(
+            "{} {} · {} {}",
+            gain_label(settings.gains[band]),
+            language.text("дБ", "dB"),
+            frequency_label(BANDS[band]),
+            language.text("Гц", "Hz"),
+        );
+        let galley = painter.layout_no_wrap(text, small.clone(), Color32::WHITE);
+        let above = center.y - KNOB - 14.0 > plot.top();
+        let anchor = if above {
+            center - egui::vec2(0.0, KNOB + 12.0)
+        } else {
+            center + egui::vec2(0.0, KNOB + 12.0)
+        };
+        let bubble = egui::Rect::from_center_size(anchor, galley.size() + egui::vec2(12.0, 6.0));
+        let shift = (rect.left() + 4.0 - bubble.left()).max(0.0)
+            + (rect.right() - 4.0 - bubble.right()).min(0.0);
+        let bubble = bubble.translate(egui::vec2(shift, 0.0));
+        painter.rect_filled(bubble, 6.0, Color32::from_rgb(45, 52, 63));
+        painter.galley(
+            bubble.center() - galley.size() * 0.5,
+            galley,
+            Color32::WHITE,
+        );
+    }
+    // Frequencies and their gains under the graph.
+    let (labels, _) = ui.allocate_exact_size(egui::vec2(width, 32.0), Sense::hover());
+    for (band, freq) in BANDS.into_iter().enumerate() {
+        let x = x_of(freq);
+        ui.painter().text(
+            egui::pos2(x, labels.top() + 7.0),
+            egui::Align2::CENTER_CENTER,
+            frequency_label(freq),
+            egui::FontId::proportional(12.0),
+            ui.visuals().text_color(),
+        );
+        let gain = settings.gains[band];
+        ui.painter().text(
+            egui::pos2(x, labels.top() + 23.0),
+            egui::Align2::CENTER_CENTER,
+            gain_label(gain),
+            small.clone(),
+            if gain == 0.0 { MUTED } else { line },
+        );
+    }
+    changed
+}
+
+/// The preset picker, reset, and saving or deleting the user's presets.
+fn presets(
+    ui: &mut egui::Ui,
+    language: Language,
+    settings: &mut Settings,
+    state: &mut State,
+) -> Outcome {
+    let t = |ru, en| language.text(ru, en);
+    let mut outcome = Outcome::default();
+    let builtin = settings.builtin();
+    let custom = settings.custom();
+    let current = builtin.map_or_else(
+        || {
+            custom.map_or_else(
+                || t("Своя настройка", "Custom").to_owned(),
+                |index| settings.presets[index].name.clone(),
+            )
+        },
+        |preset| preset.name(language).to_owned(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t("Пресет", "Preset"));
+        egui::ComboBox::from_id_salt("equalizer-preset")
+            .width(210.0)
+            // Every built-in preset without scrolling.
+            .height(520.0)
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for preset in Builtin::ALL {
+                    if ui
+                        .selectable_label(builtin == Some(preset), preset.name(language))
+                        .clicked()
+                        && builtin != Some(preset)
+                    {
+                        settings.gains = preset.gains();
+                        outcome = Outcome::sound();
+                    }
+                }
+                if !settings.presets.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(t("Мои пресеты", "My presets"))
+                            .small()
+                            .color(MUTED),
+                    );
+                }
+                let mut picked = None;
+                for (index, preset) in settings.presets.iter().enumerate() {
+                    if ui
+                        .selectable_label(custom == Some(index), &preset.name)
+                        .clicked()
+                        && custom != Some(index)
+                    {
+                        picked = Some(preset.gains);
+                    }
+                }
+                if let Some(gains) = picked {
+                    settings.gains = gains;
+                    outcome = Outcome::sound();
+                }
+            });
+        if ui
+            .add_enabled(
+                builtin != Some(Builtin::Flat),
+                egui::Button::new(t("Сбросить", "Reset")),
+            )
+            .clicked()
+        {
+            settings.gains = Builtin::Flat.gains();
+            outcome = Outcome::sound();
+        }
+        if let Some(index) = custom {
+            if ui.button(t("Удалить пресет", "Delete preset")).clicked() {
+                settings.presets.remove(index);
+                state.full = false;
+                outcome.save = true;
+            }
+        } else if builtin.is_none()
+            && state.naming.is_none()
+            && ui
+                .button(t("Сохранить как пресет", "Save as preset"))
+                .clicked()
+        {
+            state.naming = Some(String::new());
+            state.full = false;
+        }
+    });
+    if let Some(name) = &mut state.naming {
+        ui.add_space(8.0);
+        let mut save = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(name)
+                    .hint_text(t("Название пресета", "Preset name"))
+                    .char_limit(equalizer::MAX_NAME)
+                    .desired_width(220.0),
+            );
+            if !field.has_focus() && !field.lost_focus() && name.is_empty() {
+                field.request_focus();
+            }
+            if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                save = true;
+            }
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                cancel = true;
+            }
+            let ready = !equalizer::clean_name(name).is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new(t("Сохранить", "Save")))
+                .clicked()
+            {
+                save = true;
+            }
+            if ui.button(t("Отмена", "Cancel")).clicked() {
+                cancel = true;
+            }
+        });
+        if save {
+            if settings.save_preset(name) {
+                state.naming = None;
+                state.full = false;
+                outcome.save = true;
+            } else if !equalizer::clean_name(name).is_empty() {
+                state.full = true;
+            }
+        } else if cancel {
+            state.naming = None;
+            state.full = false;
+        }
+    }
+    if state.full {
+        ui.colored_label(
+            Color32::from_rgb(255, 158, 153),
+            t(
+                "Больше пресетов не сохранить: удалите ненужные.",
+                "No room for more presets: delete some first.",
+            ),
+        );
+    }
+    // A preset saved or picked closes the naming row.
+    if state.naming.is_some() && (settings.builtin().is_some() || settings.custom().is_some()) {
+        state.naming = None;
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_use_a_real_minus_and_short_frequencies() {
+        assert_eq!(gain_label(3.5), "+3.5");
+        assert_eq!(gain_label(-2.0), "−2");
+        assert_eq!(gain_label(0.0), "0");
+        assert_eq!(frequency_label(31.0), "31");
+        assert_eq!(frequency_label(1_000.0), "1k");
+        assert_eq!(frequency_label(16_000.0), "16k");
+    }
+}
