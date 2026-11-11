@@ -147,6 +147,9 @@ enum Command {
     },
     Stop(Epoch),
     NormalizationChanged,
+    /// Download, decode and measure a track that is about to play, without
+    /// playing it, so its loudness is known before its first sample.
+    Preload(Source),
     Shutdown,
 }
 pub struct Player {
@@ -272,6 +275,35 @@ impl Player {
             offset,
         );
     }
+    /// Readies the track that will most likely play next: its audio is
+    /// cached and its loudness measured in the background, so it starts at
+    /// once and at its normalized level from the first sample. Only while
+    /// normalization is on; a later call replaces it, and any playback
+    /// cancels it.
+    pub fn preload(&mut self, key: CacheKey, url: String) {
+        if !self.normalize.load(Ordering::Relaxed) {
+            return;
+        }
+        let profile = if let Some(index) = self
+            .normalization_profiles
+            .iter()
+            .position(|(stored, _)| *stored == key)
+        {
+            self.normalization_profiles.remove(index).unwrap().1
+        } else {
+            normalization::Profile::new(self.normalize.clone())
+        };
+        self.normalization_profiles
+            .push_front((key, profile.clone()));
+        self.normalization_profiles.truncate(32);
+        self.send(Command::Preload(Source {
+            url: Some(Zeroizing::new(url)),
+            duration: key.duration,
+            key: Some(key),
+            loudness: profile,
+        }));
+    }
+
     fn play_source(&mut self, source: Source, offset: f64) {
         self.source_duration = Some(source.duration);
         let epoch = self.control.new_source();
@@ -1635,6 +1667,83 @@ fn completion_state(
         PlaybackState::Failed(PlaybackError::Decoder)
     }
 }
+/// A track readied ahead in the background: the same full download and
+/// decode as a playing track's prefetch, into the cache, with no output.
+struct Preload {
+    canceled: Arc<AtomicBool>,
+    decoder_slot: DecoderSlot,
+    worker: Option<JoinHandle<()>>,
+}
+impl Preload {
+    fn start(source: Source, cache: &AudioCache, decoder: DecoderFactory) -> Option<Self> {
+        let binding = binding(&source, Some(cache))?;
+        if source.url.is_none() || source.duration == 0 || binding.complete().is_some() {
+            return None;
+        }
+        let (limit, revision) = cache.policy().ok()?;
+        let required = u64::from(source.duration)
+            .saturating_add(2)
+            .saturating_mul(u64::from(SAMPLE_RATE))
+            .saturating_mul(FRAME_BYTES as u64);
+        if limit < required {
+            return None;
+        }
+        let canceled = Arc::new(AtomicBool::new(false));
+        let decoder_slot: DecoderSlot = Arc::new(Mutex::new(None));
+        let (worker_cancel, worker_slot) = (canceled.clone(), decoder_slot.clone());
+        let worker = thread::Builder::new()
+            .name("vk-track-preload".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                // Its own control: a preload is no playing source.
+                let control = Control::default();
+                let result = pump_mode(
+                    &source,
+                    Some(&binding),
+                    0,
+                    None,
+                    &worker_cancel,
+                    &worker_slot,
+                    &control,
+                    Some(revision),
+                    None,
+                    None,
+                    decoder,
+                );
+                if !worker_cancel.load(Ordering::Acquire) {
+                    crate::diagnostics::event(
+                        "playback",
+                        &format!(
+                            "next track readied ok={} gain_known={} ms={}",
+                            result.is_ok(),
+                            source.loudness.measured(),
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+            })
+            .ok()?;
+        Some(Self {
+            canceled,
+            decoder_slot,
+            worker: Some(worker),
+        })
+    }
+}
+impl Drop for Preload {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.decoder_slot.lock()
+            && let Some(process) = guard.as_mut()
+        {
+            process.cancel();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn controller(
     commands: Receiver<Command>,
     state: Arc<Mutex<Snapshot>>,
@@ -1646,6 +1755,8 @@ fn controller(
     let mut running: Option<Running> = None;
     let mut active = Epoch::default();
     let mut pause_intent = false;
+    // Dropping it cancels the readied track.
+    let mut _preload: Option<Preload> = None;
     loop {
         match commands.recv_timeout(TICK) {
             Ok(Command::Play {
@@ -1653,6 +1764,8 @@ fn controller(
                 source: selected,
                 offset,
             }) => {
+                // Two downloads must never write one track's cache at once.
+                _preload = None;
                 if !control.current_source(epoch) {
                     continue;
                 }
@@ -1794,6 +1907,14 @@ fn controller(
                     if let Some(cache) = &running.cache {
                         source.loudness.scan_cache(cache, control.clone());
                     }
+                }
+            }
+            Ok(Command::Preload(next)) => {
+                _preload = None;
+                if source.as_ref().and_then(|source| source.key) != next.key
+                    && let Some(cache) = &cache
+                {
+                    _preload = Preload::start(next, cache, spawn_decoder);
                 }
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
@@ -2750,6 +2871,35 @@ mod tests {
             CacheBinding { cache, key },
             Arc::new(Control::default()),
         )
+    }
+
+    #[test]
+    fn a_readied_track_starts_at_its_measured_loudness_from_the_first_sample() {
+        let directory = CacheDirectory::new();
+        let (mut source, cache, _) = preload_fixture(&directory);
+        let normalize = Arc::new(AtomicBool::new(true));
+        source.loudness = normalization::Profile::new(normalize.clone());
+        let preload = Preload::start(source.clone(), &cache.cache, synthetic_decoder)
+            .expect("a track to ready");
+        let end = 24 * u64::from(SAMPLE_RATE);
+        wait_until(|| cache.complete() == Some(end) && source.loudness.measured());
+        drop(preload);
+        let saved = cache
+            .cache
+            .normalization_gain(&cache.key, -14.0)
+            .unwrap()
+            .expect("the measured gain is kept with the cached track");
+        // Played later, even with a fresh profile, the gain is final before
+        // the first sample: not held at unity and lowered as it plays.
+        let fresh = normalization::Profile::new(normalize);
+        fresh.load_cache(&cache);
+        assert!(fresh.measured());
+        assert_eq!(
+            fresh.running_gain(None),
+            saved.clamp(0.063_095_73, 3.981_071_7)
+        );
+        // Nothing is readied twice, nor beyond the cache's budget.
+        assert!(Preload::start(source, &cache.cache, synthetic_decoder).is_none());
     }
 
     #[test]

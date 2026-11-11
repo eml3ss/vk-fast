@@ -33,6 +33,8 @@ mod library_membership_tests;
 mod lyrics_app;
 #[path = "mix_prepare.rs"]
 mod mix_prepare;
+#[path = "next_preload.rs"]
+mod next_preload;
 #[path = "notice_fade.rs"]
 mod notice_fade;
 #[cfg(test)]
@@ -1297,6 +1299,8 @@ pub struct MusicApp {
     artist_library: Option<ArtistLibrary>,
     /// What the diagnostic log last wrote about the interface.
     frame_log: app_diagnostics::FrameLog,
+    /// The next track, being readied while the current one plays.
+    next_preload: Option<next_preload::NextPreload>,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1680,6 +1684,7 @@ impl MusicApp {
             prepared_mix: None,
             artist_library: None,
             frame_log: Default::default(),
+            next_preload: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -11341,6 +11346,7 @@ impl MusicApp {
         }
         self.poll_mix(ctx);
         self.prepare_queue_end_mix(ctx);
+        self.preload_next_track(ctx);
         if self.mix_active
             && self.mix_has_more
             && !self.unavailable_playback.halted()
@@ -11941,6 +11947,7 @@ mod tests {
             prepared_mix: None,
             artist_library: None,
             frame_log: Default::default(),
+            next_preload: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,

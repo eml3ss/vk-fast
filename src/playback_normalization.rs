@@ -139,6 +139,10 @@ impl Profile {
     pub(super) fn gain(&self) -> f32 {
         f32::from_bits(self.core.gain.load(Ordering::Relaxed))
     }
+    /// Whether the whole track's loudness is known.
+    pub(super) fn measured(&self) -> bool {
+        self.core.final_gain.load(Ordering::Acquire)
+    }
     pub(super) fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
