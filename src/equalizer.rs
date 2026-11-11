@@ -226,51 +226,91 @@ impl Settings {
     }
 }
 
-/// Gain of one band's filter at `freq`, in dB.
-fn band_db(band: usize, gain: f32, freq: f32) -> f32 {
-    if gain == 0.0 {
-        return 0.0;
+/// How far one filter may go to reach its band's setting once its
+/// neighbours' overlap is taken into account.
+const MAX_FILTER_DB: f32 = 24.0;
+
+impl Biquad {
+    /// This filter's gain at `freq`, in dB.
+    fn db(&self, freq: f32) -> f64 {
+        let w = std::f64::consts::TAU * f64::from(freq) / f64::from(SAMPLE_RATE);
+        let (cos1, sin1, cos2, sin2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+        let magnitude = |c0: f64, c1: f64, c2: f64| {
+            let re = c0 + c1 * cos1 + c2 * cos2;
+            let im = -(c1 * sin1 + c2 * sin2);
+            re.hypot(im)
+        };
+        let [b0, b1, b2, a1, a2] = self.coefficients;
+        20.0 * (magnitude(b0, b1, b2) / magnitude(1.0, a1, a2)).log10()
     }
-    let coefficients = Biquad::band(band, gain);
-    let w = std::f64::consts::TAU * f64::from(freq) / f64::from(SAMPLE_RATE);
-    let (cos1, sin1, cos2, sin2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
-    let magnitude = |c0: f64, c1: f64, c2: f64| {
-        let re = c0 + c1 * cos1 + c2 * cos2;
-        let im = -(c1 * sin1 + c2 * sin2);
-        re.hypot(im)
-    };
-    let [b0, b1, b2, a1, a2] = coefficients.coefficients;
-    let response = magnitude(b0, b1, b2) / magnitude(1.0, a1, a2);
-    (20.0 * response.log10()) as f32
 }
 
-/// The whole curve's gain at `freq`, in dB.
-pub fn response_db(gains: &Gains, freq: f32) -> f32 {
+/// Neighbouring bands overlap, so filters set to the bands' values would
+/// add up to more (or less) at each band. These are the filter gains whose
+/// sum lands on every band's value (iterated until it does), so one band
+/// never drags its neighbours along.
+fn filter_gains(targets: &Gains) -> Gains {
+    let targets = clean_gains(*targets);
+    let mut gains = targets;
+    for _ in 0..64 {
+        let filters: [Biquad; BANDS.len()] =
+            std::array::from_fn(|band| Biquad::band(band, gains[band]));
+        let mut worst = 0.0_f64;
+        let mut next = gains;
+        for (band, freq) in BANDS.into_iter().enumerate() {
+            let reached: f64 = filters.iter().map(|filter| filter.db(freq)).sum();
+            let error = f64::from(targets[band]) - reached;
+            worst = worst.max(error.abs());
+            next[band] = (gains[band] + error as f32).clamp(-MAX_FILTER_DB, MAX_FILTER_DB);
+        }
+        if worst < 1e-4 {
+            break;
+        }
+        gains = next;
+    }
     gains
-        .iter()
-        .enumerate()
-        .map(|(band, gain)| band_db(band, *gain, freq))
-        .sum()
 }
 
-/// Level the output is lowered by so the loudest point of the curve stays at
-/// or below 0 dB.
-pub fn headroom_db(gains: &Gains) -> f32 {
-    const POINTS: usize = 240;
-    let (low, high) = (20.0_f32.ln(), 20_000.0_f32.ln());
-    (0..=POINTS)
-        .map(|step| {
-            let freq = (low + (high - low) * step as f32 / POINTS as f32).exp();
-            response_db(gains, freq)
-        })
-        .fold(0.0_f32, f32::max)
+/// The sound of a set of band values: what is played and what is drawn.
+pub struct Curve {
+    filters: [Biquad; BANDS.len()],
+}
+
+impl Curve {
+    pub fn new(gains: &Gains) -> Self {
+        let filters = filter_gains(gains);
+        Self {
+            filters: std::array::from_fn(|band| Biquad::band(band, filters[band])),
+        }
+    }
+
+    /// The curve's gain at `freq`, in dB.
+    pub fn db(&self, freq: f32) -> f32 {
+        self.filters
+            .iter()
+            .map(|filter| filter.db(freq))
+            .sum::<f64>() as f32
+    }
+
+    /// Level the output is lowered by so the loudest point of the curve
+    /// stays at or below 0 dB.
+    pub fn headroom_db(&self) -> f32 {
+        const POINTS: usize = 240;
+        let (low, high) = (20.0_f32.ln(), 20_000.0_f32.ln());
+        (0..=POINTS)
+            .map(|step| self.db((low + (high - low) * step as f32 / POINTS as f32).exp()))
+            .fold(0.0_f32, f32::max)
+    }
 }
 
 /// What the UI thread hands the audio callback.
 pub struct Shared {
     revision: AtomicU64,
     enabled: AtomicBool,
+    /// The bands' values, as set.
     gains: [AtomicU32; BANDS.len()],
+    /// The filter gains that produce them (`filter_gains`).
+    filters: [AtomicU32; BANDS.len()],
     /// Linear output gain that undoes the curve's peak.
     output: AtomicU32,
 }
@@ -281,6 +321,7 @@ impl Default for Shared {
             revision: AtomicU64::new(0),
             enabled: AtomicBool::new(false),
             gains: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+            filters: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             output: AtomicU32::new(1.0_f32.to_bits()),
         }
     }
@@ -300,7 +341,10 @@ impl Shared {
         for (slot, gain) in self.gains.iter().zip(gains) {
             slot.store(gain.to_bits(), Ordering::Relaxed);
         }
-        let output = 10.0_f32.powf(-headroom_db(&gains) / 20.0);
+        for (slot, gain) in self.filters.iter().zip(filter_gains(&gains)) {
+            slot.store(gain.to_bits(), Ordering::Relaxed);
+        }
+        let output = 10.0_f32.powf(-Curve::new(&gains).headroom_db() / 20.0);
         self.output.store(output.to_bits(), Ordering::Relaxed);
         self.enabled.store(enabled, Ordering::Relaxed);
         self.revision.fetch_add(1, Ordering::Release);
@@ -318,8 +362,7 @@ impl Biquad {
         coefficients: [1.0, 0.0, 0.0, 0.0, 0.0],
     };
 
-    /// A peaking filter an octave wide (RBJ audio EQ cookbook), so every
-    /// knob sits on the curve the way it sounds.
+    /// A peaking filter an octave wide (RBJ audio EQ cookbook).
     fn band(band: usize, gain: f32) -> Self {
         if gain == 0.0 {
             return Self::IDENTITY;
@@ -373,9 +416,9 @@ impl Processor {
         self.revision = revision;
         let enabled = shared.enabled.load(Ordering::Relaxed);
         for (band, filter) in self.filters.iter_mut().enumerate() {
-            let gain = f32::from_bits(shared.gains[band].load(Ordering::Relaxed));
-            *filter = if enabled {
-                Biquad::band(band, clean_gain(gain))
+            let gain = f32::from_bits(shared.filters[band].load(Ordering::Relaxed));
+            *filter = if enabled && gain.is_finite() {
+                Biquad::band(band, gain.clamp(-MAX_FILTER_DB, MAX_FILTER_DB))
             } else {
                 Biquad::IDENTITY
             };
@@ -499,7 +542,7 @@ mod tests {
         // A boost is lowered back to 0 dB at its peak, so it never clips.
         gains[5] = 6.0;
         shared.set(true, &gains);
-        assert!((headroom_db(&gains) - 6.0).abs() < 0.2);
+        assert!((Curve::new(&gains).headroom_db() - 6.0).abs() < 0.2);
         let boosted = played(&shared, 1_000.0);
         assert!((20.0 * (boosted / flat).log10()).abs() < 0.3);
         let lowered = played(&shared, 62.0) / played(&Shared::default(), 62.0);
@@ -511,14 +554,39 @@ mod tests {
         for preset in Builtin::ALL {
             let shared = Shared::default();
             shared.set(true, &preset.gains());
-            let headroom = headroom_db(&preset.gains());
+            let curve = Curve::new(&preset.gains());
+            let headroom = curve.headroom_db();
             for freq in [62.0, 250.0, 1_000.0, 4_000.0] {
                 let heard =
                     20.0 * (played(&shared, freq) / played(&Shared::default(), freq)).log10();
-                let drawn = response_db(&preset.gains(), freq) - headroom;
+                let drawn = curve.db(freq) - headroom;
                 assert!(
                     (heard - drawn).abs() < 0.3,
                     "{preset:?} {freq} Hz: {heard} vs {drawn}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_band_sounds_at_its_own_value_whatever_its_neighbours_do() {
+        let mut cases = Builtin::ALL.map(Builtin::gains).to_vec();
+        cases.push([12.0; 10]);
+        cases.push([0.0, 0.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        cases.push([
+            12.0, -12.0, 12.0, -12.0, 12.0, -12.0, 12.0, -12.0, 12.0, -12.0,
+        ]);
+        for gains in cases {
+            let curve = Curve::new(&gains);
+            let wild = gains
+                .windows(2)
+                .any(|pair| (pair[0] - pair[1]).abs() > 12.0);
+            for (band, freq) in BANDS.into_iter().enumerate() {
+                let error = (curve.db(freq) - gains[band]).abs();
+                // Opposite extremes an octave apart cannot be met exactly.
+                assert!(
+                    error < if wild { 3.0 } else { 0.01 },
+                    "{gains:?} band {band}: {error}"
                 );
             }
         }

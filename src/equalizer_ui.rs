@@ -112,8 +112,10 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         rect.max - egui::vec2(14.0, 16.0),
     );
     let x_of = |freq: f32| plot.left() + plot.width() * (freq / LOW).ln() / (HIGH / LOW).ln();
+    // Between bands the curve may pass ±12 dB a little; it stays in the panel.
     let y_of = |gain: f32| {
-        plot.center().y - gain.clamp(-MAX_DB - 3.0, MAX_DB + 3.0) / MAX_DB * plot.height() * 0.5
+        (plot.center().y - gain / MAX_DB * plot.height() * 0.5)
+            .clamp(rect.top() + 3.0, rect.bottom() - 3.0)
     };
     let db_at = |y: f32| (plot.center().y - y) / (plot.height() * 0.5) * MAX_DB;
     let painter = ui.painter_at(rect);
@@ -157,10 +159,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         } else if (response.dragged() || response.clicked())
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            // The knob sits on the curve, which its neighbours lift or lower
-            // by a fixed amount here: take that off so it follows the cursor.
-            let neighbours = equalizer::response_db(&settings.gains, freq) - gain;
-            next = equalizer::clean_gain(db_at(pointer.y) - neighbours);
+            next = equalizer::clean_gain(db_at(pointer.y));
         }
         if response.has_focus() {
             ui.input(|input| {
@@ -183,12 +182,11 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     }
     // The curve as it sounds, with a soft fill toward 0 dB.
     let zero = y_of(0.0);
-    let knob = |band: usize| {
-        egui::pos2(
-            x_of(BANDS[band]),
-            y_of(equalizer::response_db(&settings.gains, BANDS[band])),
-        )
-    };
+    // Each knob shows its own band's value; the filters make up for their
+    // overlap, so the curve passes through every knob and moving one band
+    // never moves another.
+    let curve = equalizer::Curve::new(&settings.gains);
+    let knob = |band: usize| egui::pos2(x_of(BANDS[band]), y_of(settings.gains[band]));
     // The line passes exactly through every knob's centre.
     let bands = BANDS.map(x_of);
     let mut xs: Vec<f32> = (0..=160)
@@ -201,7 +199,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         .into_iter()
         .map(|x| {
             let freq = LOW * (HIGH / LOW).powf((x - plot.left()) / plot.width());
-            egui::pos2(x, y_of(equalizer::response_db(&settings.gains, freq)))
+            egui::pos2(x, y_of(curve.db(freq)))
         })
         .collect();
     let mut fill = egui::Mesh::default();
@@ -383,27 +381,37 @@ fn presets(
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            // Drawn like the music search field: a frameless edit in a
-            // rounded fill (here the page's colour, so it shows on the card),
-            // exactly as tall as the buttons beside it.
-            let row = ui.text_style_height(&egui::TextStyle::Body);
+            // Drawn like the music search field: a rounded fill without an
+            // outline (here the page's colour, so it shows on the card),
+            // exactly as tall as the buttons beside it and spaced like them.
             let height = (ui.text_style_height(&egui::TextStyle::Button)
                 + 2.0 * ui.spacing().button_padding.y)
                 .max(ui.spacing().interact_size.y);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(244.0, height), Sense::hover());
-            ui.painter().rect_filled(rect, 8.0, BACKGROUND);
-            let inner =
-                egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 24.0, row));
-            let field = ui.put(
-                inner,
-                egui::TextEdit::singleline(name)
-                    .id_salt("equalizer-preset-name")
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .hint_text(t("Название пресета", "Preset name"))
-                    .char_limit(equalizer::MAX_NAME)
-                    .desired_width(inner.width()),
-            );
+            let field = ui
+                .scope(|ui| {
+                    let visuals = ui.visuals_mut();
+                    visuals.extreme_bg_color = BACKGROUND;
+                    visuals.selection.stroke = Stroke::NONE;
+                    for widget in [
+                        &mut visuals.widgets.inactive,
+                        &mut visuals.widgets.hovered,
+                        &mut visuals.widgets.active,
+                    ] {
+                        widget.bg_stroke = Stroke::NONE;
+                        widget.corner_radius = egui::CornerRadius::same(8);
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .id_salt("equalizer-preset-name")
+                            .margin(egui::Margin::symmetric(12, 0))
+                            .min_size(egui::vec2(244.0, height))
+                            .desired_width(220.0)
+                            .vertical_align(egui::Align::Center)
+                            .hint_text(t("Название пресета", "Preset name"))
+                            .char_limit(equalizer::MAX_NAME),
+                    )
+                })
+                .inner;
             if focus {
                 field.request_focus();
             }
@@ -528,6 +536,14 @@ mod tests {
         // Within half a decibel step of the cursor.
         assert!((moved.y - to.y).abs() < 4.0, "{moved:?} vs {to:?}");
         assert!((moved.x - to.x).abs() < 0.01);
+        // No other knob moved.
+        let (mut after, _) = frame(Vec::new(), &mut settings);
+        after.sort_by(|a, b| a.x.total_cmp(&b.x));
+        for (band, (before, after)) in knobs.iter().zip(&after).enumerate() {
+            if band != 8 {
+                assert!(before.distance(*after) < 0.01, "band {band} moved");
+            }
+        }
     }
 
     #[test]
