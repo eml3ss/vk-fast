@@ -22,8 +22,9 @@ pub(super) struct Sort {
 /// view revision, list length and filter.
 pub(super) type Cached = (String, Sort, u64, usize, String, Arc<[usize]>);
 
-/// Width of the date column in a track row.
-pub(super) const DATE_WIDTH: f32 = 112.0;
+/// Width of the date column in a track row: wide enough for its Russian
+/// header and sort arrow to stay clear of the row buttons.
+pub(super) const DATE_WIDTH: f32 = 138.0;
 /// The middle of a row's duration, from the row's inner right edge.
 const DURATION_CENTER: f32 = 36.0;
 /// Width the row keeps on the right for mix, dislike, heart and duration.
@@ -409,6 +410,24 @@ mod tests {
         assert_eq!(by(sort), [2, 1, 0], "# lists from the end");
         sort = sort.clicked(Column::Original);
         assert!(!sort.active());
+    }
+
+    #[test]
+    fn the_date_header_and_its_sort_arrow_fit_before_the_row_buttons() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        for label in ["ДАТА ДОБАВЛЕНИЯ", "DATE ADDED"] {
+            let width = ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(label.into(), egui::FontId::proportional(11.5), MUTED)
+                    .size()
+                    .x
+            });
+            // The label, the sort arrow (4 + 7 px) and a clear gap.
+            assert!(width + 11.0 + 10.0 <= DATE_WIDTH, "{label}: {width}");
+        }
     }
 
     #[test]
