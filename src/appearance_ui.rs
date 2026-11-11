@@ -279,12 +279,7 @@ pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language
             .id(popup)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                ui.spacing_mut().slider_width = 275.0;
-                if egui::color_picker::color_picker_color32(
-                    ui,
-                    accent,
-                    egui::color_picker::Alpha::Opaque,
-                ) {
+                if color_picker(ui, accent) {
                     outcome.changed = true;
                 }
             });
@@ -300,6 +295,281 @@ pub fn accent_picker(ui: &mut egui::Ui, accent: &mut Color32, language: Language
         outcome.dragging = ui.ctx().egui_is_using_pointer();
     });
     outcome
+}
+
+const PICKER_WIDTH: f32 = 260.0;
+/// The side of the saturation and value square's texture, in pixels.
+const PLANE: usize = 64;
+
+/// The picker between frames: its hue survives greys and black, which have
+/// none, and a field keeps what is being typed in it.
+#[derive(Clone)]
+struct PickerState {
+    /// The colour the hue and fields below were made for.
+    color: Color32,
+    hsv: [f32; 3],
+    fields: [String; 3],
+}
+
+impl PickerState {
+    fn new(color: Color32, hue: Option<f32>) -> Self {
+        let mut hsv = hsv(color);
+        if hsv[1] == 0.0 || hsv[2] == 0.0 {
+            hsv[0] = hue.unwrap_or(hsv[0]);
+        }
+        Self {
+            color,
+            hsv,
+            fields: channels(color),
+        }
+    }
+}
+
+fn channels(color: Color32) -> [String; 3] {
+    [color.r(), color.g(), color.b()].map(|channel| channel.to_string())
+}
+
+/// Hue (0..1), saturation and value of `color`.
+fn hsv(color: Color32) -> [f32; 3] {
+    let [r, g, b] = [color.r(), color.g(), color.b()].map(|c| f32::from(c) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let delta = max - min;
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        ((g - b) / delta).rem_euclid(6.0) / 6.0
+    } else if max == g {
+        ((b - r) / delta + 2.0) / 6.0
+    } else {
+        ((r - g) / delta + 4.0) / 6.0
+    };
+    let saturation = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
+    [hue, saturation, max]
+}
+
+fn from_hsv([hue, saturation, value]: [f32; 3]) -> Color32 {
+    let sector = hue.rem_euclid(1.0) * 6.0;
+    let chroma = value * saturation;
+    let x = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match sector as u8 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let channel = |c: f32| ((c + value - chroma) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(channel(r), channel(g), channel(b))
+}
+
+/// A whole colour in text: `#6f2fdb`, `6f2fdb`, `111, 47, 219`,
+/// `111 47 219` or `rgb(111, 47, 219)`. One number alone is not a colour.
+fn parse_color(text: &str) -> Option<Color32> {
+    let text = text.trim();
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+        return Some(Color32::from_rgb(channel(0)?, channel(2)?, channel(4)?));
+    }
+    let numbers: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect();
+    let rest = text
+        .trim_start_matches("rgb")
+        .chars()
+        .all(|c| c.is_ascii_digit() || c.is_whitespace() || ",;()".contains(c));
+    if numbers.len() != 3 || !rest {
+        return None;
+    }
+    let channel = |index: usize| numbers[index].parse::<u8>().ok();
+    Some(Color32::from_rgb(channel(0)?, channel(1)?, channel(2)?))
+}
+
+/// The accent's own colour picker, rounded like the rest of the app (egui's
+/// keeps square corners): R, G and B fields, the colour, the saturation and
+/// value square and the hue bar. A whole colour pasted into any field fills
+/// all three.
+fn color_picker(ui: &mut egui::Ui, color: &mut Color32) -> bool {
+    let id = egui::Id::new(PICKER).with("state");
+    let saved = ui.data(|data| data.get_temp::<PickerState>(id));
+    let mut state = match saved {
+        Some(state) if state.color == *color => state,
+        saved => PickerState::new(*color, saved.map(|state| state.hsv[0])),
+    };
+    let before = *color;
+    ui.set_width(PICKER_WIDTH);
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+
+    let mut whole = None;
+    ui.horizontal(|ui| {
+        // Three equal cells across the picker, each a name and its field.
+        let gap = 8.0;
+        ui.spacing_mut().item_spacing.x = gap;
+        let cell = (PICKER_WIDTH - 2.0 * gap) / 3.0;
+        for (index, name) in ["R", "G", "B"].into_iter().enumerate() {
+            ui.allocate_ui_with_layout(
+                egui::vec2(cell, 26.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(egui::RichText::new(name).color(theme::muted()));
+                    let field = id.with(("channel", index));
+                    if ui.memory(|memory| memory.has_focus(field)) {
+                        // Taken before the field sees it: it would hold all of it.
+                        let pasted = ui.input_mut(|input| {
+                            let mut found = None;
+                            input.events.retain(|event| match event {
+                                egui::Event::Paste(text) => match parse_color(text) {
+                                    Some(color) => {
+                                        found = Some(color);
+                                        false
+                                    }
+                                    None => true,
+                                },
+                                _ => true,
+                            });
+                            found
+                        });
+                        whole = whole.or(pasted);
+                    }
+                    let response = ui.add_sized(
+                        egui::vec2(ui.available_width(), 26.0),
+                        egui::TextEdit::singleline(&mut state.fields[index])
+                            .id(field)
+                            .horizontal_align(egui::Align::Center)
+                            .vertical_align(egui::Align::Center),
+                    );
+                    if response.changed() {
+                        let text = state.fields[index].trim().to_owned();
+                        if let Some(full) = parse_color(&text) {
+                            whole = Some(full);
+                        } else if let Ok(value) = text.parse::<u8>() {
+                            let mut channels = [color.r(), color.g(), color.b()];
+                            channels[index] = value;
+                            *color = Color32::from_rgb(channels[0], channels[1], channels[2]);
+                            let hue = state.hsv[0];
+                            let fields = state.fields.clone();
+                            state = PickerState::new(*color, Some(hue));
+                            // The field keeps what is typed in it, such as "007".
+                            state.fields = fields;
+                        }
+                    }
+                    if response.lost_focus() {
+                        state.fields[index] = channels(*color)[index].clone();
+                    }
+                },
+            );
+        }
+    });
+    if let Some(full) = whole {
+        *color = full;
+        state = PickerState::new(full, Some(state.hsv[0]));
+    }
+
+    let (preview, _) = ui.allocate_exact_size(egui::vec2(PICKER_WIDTH, 28.0), Sense::hover());
+    ui.painter().rect_filled(preview, 8.0, *color);
+
+    // Saturation from left to right, value from top to bottom.
+    let (plane, response) = ui.allocate_exact_size(
+        egui::vec2(PICKER_WIDTH, PICKER_WIDTH * 0.8),
+        Sense::click_and_drag(),
+    );
+    if let Some(point) = response.interact_pointer_pos() {
+        state.hsv[1] = ((point.x - plane.left()) / plane.width()).clamp(0.0, 1.0);
+        state.hsv[2] = 1.0 - ((point.y - plane.top()) / plane.height()).clamp(0.0, 1.0);
+        *color = from_hsv(state.hsv);
+    }
+    let texture = plane_texture(ui.ctx(), state.hsv[0]);
+    let texel = 0.5 / PLANE as f32;
+    ui.painter().add(
+        egui::epaint::RectShape::filled(plane, 10.0, Color32::WHITE).with_texture(
+            texture.id(),
+            egui::Rect::from_min_max(
+                egui::pos2(texel, texel),
+                egui::pos2(1.0 - texel, 1.0 - texel),
+            ),
+        ),
+    );
+    knob(
+        ui.painter(),
+        egui::pos2(
+            egui::lerp(plane.x_range(), state.hsv[1]),
+            egui::lerp(plane.y_range(), 1.0 - state.hsv[2]),
+        ),
+        *color,
+    );
+
+    let (bar, response) =
+        ui.allocate_exact_size(egui::vec2(PICKER_WIDTH, 20.0), Sense::click_and_drag());
+    // Knobs at the ends stay inside the rounded bar.
+    let track = bar.x_range().shrink(bar.height() * 0.5);
+    if let Some(point) = response.interact_pointer_pos() {
+        state.hsv[0] = ((point.x - track.min) / track.span()).clamp(0.0, 1.0);
+        *color = from_hsv(state.hsv);
+    }
+    let hues: Vec<Color32> = (0..=6)
+        .map(|step| from_hsv([step as f32 / 6.0, 1.0, 1.0]))
+        .collect();
+    theme::gradient_stops(ui.painter(), bar, bar.height() * 0.5, &hues);
+    knob(
+        ui.painter(),
+        egui::pos2(egui::lerp(track, state.hsv[0]), bar.center().y),
+        from_hsv([state.hsv[0], 1.0, 1.0]),
+    );
+
+    if *color != before {
+        let typing =
+            (0..3).find(|index| ui.memory(|memory| memory.has_focus(id.with(("channel", *index)))));
+        let fields = state.fields.clone();
+        state.fields = channels(*color);
+        // The field being typed in keeps its text.
+        if let Some(index) = typing.filter(|_| whole.is_none()) {
+            state.fields[index] = fields[index].clone();
+        }
+    }
+    state.color = *color;
+    ui.data_mut(|data| data.insert_temp(id, state));
+    *color != before
+}
+
+/// A round handle filled with the colour under it, ringed in white with a
+/// soft dark edge that keeps it visible on white.
+fn knob(painter: &egui::Painter, center: egui::Pos2, fill: Color32) {
+    painter.circle_filled(center, 10.5, Color32::from_black_alpha(70));
+    painter.circle(center, 9.0, fill, Stroke::new(2.0, Color32::WHITE));
+}
+
+/// The saturation and value square of `hue`, made again only when the hue
+/// changes.
+fn plane_texture(ctx: &egui::Context, hue: f32) -> egui::TextureHandle {
+    let id = egui::Id::new(PICKER).with("plane");
+    let key = (hue * 3600.0).round() as u32;
+    if let Some((cached, texture)) =
+        ctx.data(|data| data.get_temp::<(u32, egui::TextureHandle)>(id))
+        && cached == key
+    {
+        return texture;
+    }
+    let pixels = (0..PLANE * PLANE)
+        .map(|index| {
+            let (x, y) = (index % PLANE, index / PLANE);
+            let edge = (PLANE - 1) as f32;
+            from_hsv([hue, x as f32 / edge, 1.0 - y as f32 / edge])
+        })
+        .collect();
+    let texture = ctx.load_texture(
+        "vk-fast-accent-plane",
+        egui::ColorImage::new([PLANE, PLANE], pixels),
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|data| data.insert_temp(id, (key, texture.clone())));
+    texture
 }
 
 #[cfg(test)]
@@ -378,6 +648,108 @@ mod tests {
         page.click(light);
         assert_eq!(page.theme, Theme::Light);
         assert_eq!(crate::palette::active(), Theme::Dark);
+    }
+
+    #[test]
+    fn whole_colours_are_read_from_hex_and_three_numbers_but_not_one_number() {
+        let violet = Some(Color32::from_rgb(111, 47, 219));
+        for text in [
+            "#6f2fdb",
+            "6F2FDB",
+            " #6f2fdb\n",
+            "111, 47, 219",
+            "111 47 219",
+            "111;47;219",
+            "rgb(111, 47, 219)",
+        ] {
+            assert_eq!(parse_color(text), violet, "{text:?}");
+        }
+        for text in [
+            "111",
+            "111 47",
+            "111 47 219 5",
+            "300 47 219",
+            "#6f2fd",
+            "red",
+            "",
+        ] {
+            assert_eq!(parse_color(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn hsv_round_trips_every_channel_value() {
+        for value in (0..=255u8).step_by(5) {
+            for color in [
+                Color32::from_rgb(value, 47, 219),
+                Color32::from_rgb(219, value, 47),
+                Color32::from_gray(value),
+            ] {
+                assert_eq!(from_hsv(hsv(color)), color);
+            }
+        }
+    }
+
+    /// The picker alone in a popup-sized column.
+    fn picker_frame(ctx: &egui::Context, color: &mut Color32, events: Vec<egui::Event>) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 500.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                color_picker(ui, color);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_whole_colour_pasted_into_one_field_fills_all_three() {
+        for (field, text) in [(0, "#6f2fdb"), (1, "111, 47, 219"), (2, "111 47 219")] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut color = Accent::Blue.color();
+            picker_frame(&ctx, &mut color, Vec::new());
+            let id = egui::Id::new(PICKER).with("state").with(("channel", field));
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            picker_frame(&ctx, &mut color, Vec::new());
+            picker_frame(&ctx, &mut color, vec![egui::Event::Paste(text.to_owned())]);
+            assert_eq!(color, Color32::from_rgb(111, 47, 219), "{text}");
+            let state = ctx
+                .data(|data| data.get_temp::<PickerState>(egui::Id::new(PICKER).with("state")))
+                .unwrap();
+            assert_eq!(state.fields, ["111", "47", "219"].map(str::to_owned));
+        }
+    }
+
+    #[test]
+    fn one_number_pasted_or_typed_changes_only_its_own_channel() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut color = Color32::from_rgb(10, 20, 30);
+        picker_frame(&ctx, &mut color, Vec::new());
+        let id = egui::Id::new(PICKER).with("state").with(("channel", 1));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        picker_frame(&ctx, &mut color, Vec::new());
+        // Select the field's text, then paste one number over it.
+        picker_frame(
+            &ctx,
+            &mut color,
+            vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        picker_frame(&ctx, &mut color, vec![egui::Event::Paste("200".to_owned())]);
+        assert_eq!(color, Color32::from_rgb(10, 200, 30));
     }
 
     #[test]
