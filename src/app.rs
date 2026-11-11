@@ -10880,9 +10880,16 @@ impl MusicApp {
                     ui.add_space(4.0);
                     if crate::appearance_ui::theme_cards(ui, &mut self.theme, self.accent, language)
                     {
+                        // A theme with an accent of its own comes with it: an
+                        // accent picked before (blue included) gives way.
+                        let accent = self.theme.palette().accent_on_pick(self.accent);
+                        if accent != self.accent {
+                            self.accent = accent;
+                            self.save_accent_now();
+                        }
                         theme::apply(ui.ctx(), self.theme, self.accent);
-                        self.theme_save_failed =
-                            !cfg!(test) && preferences::save_theme(self.theme).is_err();
+                        self.theme_save_failed = self.theme_save_failed
+                            || (!cfg!(test) && preferences::save_theme(self.theme).is_err());
                     }
                     ui.add_space(4.0);
                     ui.label(

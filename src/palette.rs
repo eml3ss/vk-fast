@@ -414,6 +414,17 @@ impl Palette {
         (!blue_family).then_some(self.accent)
     }
 
+    /// The accent once this theme is picked with `accent` active: a theme
+    /// with an accent of its own comes with it (any accent picked before,
+    /// blue included, gives way); a blue theme keeps `accent`.
+    pub fn accent_on_pick(&self, accent: Color32) -> Color32 {
+        if self.own_accent().is_some() {
+            THEME_ACCENT
+        } else {
+            accent
+        }
+    }
+
     /// This theme with `accent` in place of its own. [`THEME_ACCENT`] keeps
     /// the theme's colours exactly, and so does blue in a blue theme; a
     /// theme with an accent of its own is turned to any picked one, blue too.
@@ -620,6 +631,12 @@ mod tests {
             (hue(green.with_accent(Accent::Red.color()).accent) - hue(Accent::Red.color())).abs()
                 < 0.01
         );
+        // Picked, the green theme comes with its green; a blue one keeps the
+        // accent chosen before.
+        for before in [BLUE, Accent::Red.color(), THEME_ACCENT] {
+            assert_eq!(green.accent_on_pick(before), THEME_ACCENT);
+            assert_eq!(original_dark().accent_on_pick(before), before);
+        }
         assert_eq!(accent_code(THEME_ACCENT), "");
         assert_eq!(accent_code(BLUE), "blue");
         assert_eq!(parse_accent(""), None, "nothing saved: the theme's own");

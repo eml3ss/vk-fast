@@ -68,7 +68,15 @@ fn theme_card(
         return response;
     }
     let preview = egui::Rect::from_min_size(rect.min, CARD);
-    paint_preview(ui.painter(), preview, &choice.palette().with_accent(accent));
+    // Other themes as picking them would show them: one with its own accent
+    // comes with it.
+    let palette = choice.palette();
+    let accent = if selected {
+        accent
+    } else {
+        palette.accent_on_pick(accent)
+    };
+    paint_preview(ui.painter(), preview, &palette.with_accent(accent));
     // The outline keeps a light card apart from a light page, and shows the
     // chosen one in the accent.
     let (width, color) = if selected {
