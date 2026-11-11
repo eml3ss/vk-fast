@@ -2,6 +2,7 @@
 use super::{
     Error, Lyrics, MAX_RESPONSE, Provider, Query, number, parse_plain, same_artist, same_title,
 };
+use crate::diagnostics::SendLogged;
 use serde_json::{Value, json};
 use std::{io::Read, sync::Arc};
 use zeroize::Zeroizing;
@@ -26,7 +27,7 @@ impl Provider {
             .header("Accept", "application/json")
             .header("X-Genius-iOS-Version", "6.21.0")
             .header("X-Genius-Logged-Out", "true")
-            .send()
+            .send_logged("lyrics", "genius request")
             .map_err(|_| Error::Network)?;
         let status = response.status().as_u16();
         let retry = response

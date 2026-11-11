@@ -685,6 +685,22 @@ fn cookie_header(
     Ok(header)
 }
 
+use crate::diagnostics::SendLogged;
+
+/// The `act` of an `al_audio.php` request, for the log.
+fn act_of(params: &[(&'static str, String)]) -> String {
+    let act = params
+        .iter()
+        .find(|(key, _)| *key == "act")
+        .map_or("?", |(_, value)| value.as_str());
+    let act: String = act
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .take(40)
+        .collect();
+    format!("al_audio {act}")
+}
+
 fn network(error: reqwest::Error) -> WebAudioError {
     if error.is_timeout() {
         WebAudioError::Timeout
@@ -1050,7 +1066,7 @@ impl WebAudioClient {
                 .http
                 .get(url.clone())
                 .header(COOKIE, cookie)
-                .send()
+                .send_logged("vk-http", "viewer page")
                 .map_err(network)?;
             let set_cookies = response
                 .headers()
@@ -1399,7 +1415,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner_id))
             .form(&params)
-            .send()
+            .send_logged("vk-http", &act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -1742,7 +1758,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("mix_id", mix_id), ("access_token", session.token.as_str())])
-            .send()
+            .send_logged("vk-http", "audio.getStreamMixSettings")
             .map_err(network)?;
         if response.status().is_redirection() {
             self.forget_mix_session(expected_owner, generation, &session);
@@ -1853,7 +1869,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&form)
-            .send()
+            .send_logged("vk-http", "audio.getStreamMixAudios")
             .map_err(network)?;
         if response.status().is_redirection() {
             return Err(WebAudioError::TokenExpired);
@@ -3186,7 +3202,7 @@ impl WebAudioClient {
                     .header(ORIGIN, format!("https://{}", self.host))
                     .header(REFERER, format!("https://{}/", self.host))
                     .form(&form)
-                    .send()
+                    .send_logged("vk-http", &format!("api {method}"))
                     .map_err(network)?;
                 detail_response(&token_body(response)?)
             },
@@ -3339,7 +3355,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("app_id", "6287487"), ("version", "1")])
-            .send()
+            .send_logged("vk-http", "web_token")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3449,7 +3465,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner))
             .form(&params)
-            .send()
+            .send_logged("vk-http", &act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3593,7 +3609,7 @@ impl WebAudioClient {
                 ("al", "1"),
                 ("audio_ids", id.as_str()),
             ])
-            .send()
+            .send_logged("vk-http", "al_audio reload_audios")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3652,7 +3668,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, viewer))
             .form(&[("act", "reload_audio"), ("al", "1"), ("ids", ids.as_str())])
-            .send()
+            .send_logged("vk-http", "al_audio reload_audio")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {

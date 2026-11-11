@@ -28,6 +28,7 @@ impl Language {
     }
 
     pub fn text(self, russian: &'static str, english: &'static str) -> &'static str {
+        crate::diagnostics::note_ui_text(russian, english);
         match self {
             Self::Russian => russian,
             Self::English => english,

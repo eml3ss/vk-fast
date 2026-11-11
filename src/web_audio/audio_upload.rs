@@ -1,6 +1,7 @@
 //! VK's native audio upload API: request server, stream MP3, save once.
 use super::*;
 use crate::audio_upload::{self, Error, Source};
+use crate::diagnostics::SendLogged;
 use std::io::{self, Cursor};
 
 impl WebAudioClient {
@@ -29,7 +30,7 @@ impl WebAudioClient {
                 let upload_body=Cursor::new(header).chain(reader).chain(Cursor::new(footer));
                 let response=self.http.post(url).timeout(Duration::from_secs(600))
                     .header(CONTENT_TYPE,format!("multipart/form-data; boundary={boundary}"))
-                    .body(reqwest::blocking::Body::sized(upload_body,length)).send().map_err(network)?;
+                    .body(reqwest::blocking::Body::sized(upload_body,length)).send_logged("vk-http","audio upload").map_err(network)?;
                 let text=body(response)?;
                 self.commit_home_streams(owner,generation,HashMap::new(),canceled)?;
                 source.unchanged()?;

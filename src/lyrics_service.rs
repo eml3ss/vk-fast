@@ -349,6 +349,34 @@ fn fetch_source(
     if canceled() {
         return Err(Error::Canceled);
     }
+    let started = Instant::now();
+    let result = fetch_source_now(provider, config, source, request, canceled, shutdown);
+    if crate::diagnostics::enabled() {
+        let outcome = match &result {
+            Ok(lyrics) if lyrics.instrumental => "instrumental".into(),
+            Ok(lyrics) if lyrics.synced => format!("synced, {} lines", lyrics.lines.len()),
+            Ok(lyrics) => format!("plain, {} lines", lyrics.lines.len()),
+            Err(error) => format!("{error:?}"),
+        };
+        crate::diagnostics::event(
+            "lyrics",
+            &format!(
+                "source={source:?} {outcome} ms={}",
+                started.elapsed().as_millis()
+            ),
+        );
+    }
+    result
+}
+
+fn fetch_source_now(
+    provider: &Provider,
+    config: &mut store::Config,
+    source: Source,
+    request: &Fetch,
+    canceled: &impl Fn() -> bool,
+    shutdown: &impl Fn() -> bool,
+) -> Result<Arc<Lyrics>, Error> {
     let now = store::now();
     let retry = match source {
         Source::Genius => config.genius_retry_after,

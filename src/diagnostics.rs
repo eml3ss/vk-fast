@@ -66,7 +66,11 @@ pub fn init(active: bool) -> io::Result<()> {
                     .unwrap_or("source");
                 event(
                     "panic",
-                    &format!("panic at {file}:{} (payload omitted)", location.line()),
+                    &format!(
+                        "panic at {file}:{} thread={} (payload omitted)",
+                        location.line(),
+                        thread::current().name().unwrap_or("unnamed")
+                    ),
                 );
             } else {
                 event("panic", "panic (payload omitted)");
@@ -79,6 +83,40 @@ pub fn init(active: bool) -> io::Result<()> {
 
 pub fn enabled() -> bool {
     logger().enabled.load(Ordering::Acquire)
+}
+
+/// The interface's own words (labels, buttons, notices), learned as the app
+/// shows them while logging is on. A widget label among them is logged as
+/// is; any other text (a track, playlist or artist name) is not.
+fn ui_texts() -> &'static Mutex<std::collections::HashSet<&'static str>> {
+    static TEXTS: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+    TEXTS.get_or_init(Default::default)
+}
+
+/// Called by `Language::text` for both of its translations.
+pub fn note_ui_text(russian: &'static str, english: &'static str) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut texts) = ui_texts().lock() {
+        texts.insert(russian);
+        texts.insert(english);
+    }
+}
+
+/// A widget's label for the log: the interface's own words as they are,
+/// anything else, such as a track's title, as `[content]`.
+pub fn ui_label(label: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        return "[no label]".into();
+    }
+    let known = ui_texts().lock().is_ok_and(|texts| texts.contains(label));
+    if known {
+        format!("«{label}»")
+    } else {
+        "[content]".into()
+    }
 }
 
 pub fn set_enabled(active: bool) -> io::Result<()> {
@@ -98,13 +136,43 @@ pub fn set_enabled(active: bool) -> io::Result<()> {
     event(
         "app",
         &format!(
-            "diagnostics enabled version={} os={} arch={}",
+            "diagnostics enabled version={} os={} arch={}{}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
+            desktop()
         ),
     );
     Ok(())
+}
+
+/// The desktop session on Linux: Wayland or X11, and which desktop. These
+/// are names of software, not of the person.
+fn desktop() -> String {
+    if !cfg!(target_os = "linux") {
+        return String::new();
+    }
+    let value = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|character| {
+                        character.is_ascii_alphanumeric() || ":._-".contains(*character)
+                    })
+                    .take(40)
+                    .collect::<String>()
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "-".into())
+    };
+    format!(
+        " session={} desktop={} wayland_display={}",
+        value("XDG_SESSION_TYPE"),
+        value("XDG_CURRENT_DESKTOP"),
+        std::env::var_os("WAYLAND_DISPLAY").is_some()
+    )
 }
 
 fn start(state: &Logger, path: &Path) -> io::Result<()> {
@@ -129,6 +197,41 @@ fn start(state: &Logger, path: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::other("Diagnostic queue unavailable"))? = Some(sender);
     state.enabled.store(true, Ordering::Release);
     Ok(())
+}
+
+/// Sends an HTTP request and, when logging is on, writes what kind of
+/// request it was (`what`, a fixed name), how it ended and how long it
+/// took. Never its address, parameters or answer.
+pub trait SendLogged {
+    fn send_logged(
+        self,
+        component: &str,
+        what: &str,
+    ) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+impl SendLogged for reqwest::blocking::RequestBuilder {
+    fn send_logged(
+        self,
+        component: &str,
+        what: &str,
+    ) -> reqwest::Result<reqwest::blocking::Response> {
+        let started = std::time::Instant::now();
+        let result = self.send();
+        if enabled() {
+            let outcome = match &result {
+                Ok(response) => format!("status={}", response.status().as_u16()),
+                Err(error) if error.is_timeout() => "timed out".into(),
+                Err(error) if error.is_connect() => "no connection".into(),
+                Err(_) => "failed".into(),
+            };
+            event(
+                component,
+                &format!("{what} {outcome} ms={}", started.elapsed().as_millis()),
+            );
+        }
+        result
+    }
 }
 
 /// Not for audio callbacks. This never waits for disk or for a full queue.
@@ -409,6 +512,36 @@ impl LogWriter {
         }
         Ok(())
     }
+}
+
+/// Runs `run` with the shared log written to a temporary file, and returns
+/// what it wrote. Capturing tests take turns; other tests' records may show
+/// up too.
+#[cfg(test)]
+pub fn capture_for_test<R>(run: impl FnOnce() -> R) -> (R, String) {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes).unwrap();
+    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let directory = std::env::temp_dir().join(format!("vk-fast-capture-{suffix}"));
+    let path = directory.join("logs/vk-fast.log");
+    let state = logger();
+    {
+        let _control = state.control.lock().unwrap();
+        stop(state).unwrap();
+        start(state, &path).unwrap();
+    }
+    let result = run();
+    {
+        let _control = state.control.lock().unwrap();
+        stop(state).unwrap();
+    }
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_dir_all(&directory);
+    (result, text)
 }
 
 #[cfg(test)]

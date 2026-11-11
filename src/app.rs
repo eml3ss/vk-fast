@@ -14,6 +14,8 @@ use zeroize::Zeroize;
 
 #[path = "album_titles.rs"]
 mod album_titles;
+#[path = "app_diagnostics.rs"]
+mod app_diagnostics;
 #[path = "audio_upload_app.rs"]
 mod audio_upload_app;
 
@@ -867,6 +869,7 @@ impl SettingsSection {
     }
 }
 
+#[derive(Debug)]
 enum UiError {
     Music(WebAudioError),
     MusicStorage,
@@ -1292,6 +1295,8 @@ pub struct MusicApp {
     /// An artist page's tracks from My music, kept while the library and
     /// the artist stay the same.
     artist_library: Option<ArtistLibrary>,
+    /// What the diagnostic log last wrote about the interface.
+    frame_log: app_diagnostics::FrameLog,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1674,6 +1679,7 @@ impl MusicApp {
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
             artist_library: None,
+            frame_log: Default::default(),
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -3002,6 +3008,7 @@ impl MusicApp {
                 .is_some_and(|request| request.start)
         {
             self.finished_handled = true;
+            crate::diagnostics::event("playback", "track ended; advancing");
             self.advance_track(ctx, true);
         }
     }
@@ -9429,6 +9436,13 @@ impl MusicApp {
                     &response,
                 ) {
                     position = target;
+                    crate::diagnostics::event(
+                        "playback",
+                        &format!(
+                            "seek to {:.0}% of the track",
+                            target / f64::from(duration.max(1)) * 100.0
+                        ),
+                    );
                     self.cancel_mix_start();
                     self.mix_advance = false;
                     self.home_autoplay = None;
@@ -10922,11 +10936,13 @@ impl MusicApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        let started = Instant::now();
         theme::set_explicit_badges(ui.ctx(), self.explicit_badge);
         self.render_frame(ui);
         self.autoscroll.show_cursor(ui.ctx());
         // Rows drawn this frame that still miss their album's name.
         self.request_album_titles(ui.ctx());
+        self.log_frame(ui.ctx(), started);
     }
 
     fn render_frame(&mut self, ui: &mut egui::Ui) {
@@ -11924,6 +11940,7 @@ mod tests {
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
             artist_library: None,
+            frame_log: Default::default(),
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,

@@ -29,6 +29,22 @@ pub(super) struct State {
 }
 
 impl State {
+    /// For the diagnostic log: what the lyrics panel holds, by kind only.
+    pub(super) fn diagnostic(&self) -> String {
+        if self.pending.is_some() {
+            return "loading".into();
+        }
+        if let Some(error) = self.error {
+            return format!("error {error:?}");
+        }
+        match &self.data {
+            None => "none".into(),
+            Some(data) if data.instrumental => "instrumental".into(),
+            Some(data) if data.synced => format!("synced, {} lines", data.lines.len()),
+            Some(data) => format!("plain, {} lines", data.lines.len()),
+        }
+    }
+
     fn cancel_pending(&mut self) {
         if let Some(service) = &self.service {
             service.cancel_fetch();

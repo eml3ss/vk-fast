@@ -2,6 +2,7 @@
 //! Protocol: public qrAuth-web entry.b9595b4b.js and
 //! static.vk.ru/vkid/1.1.1427/185.js, checked 2026-10-29.
 
+use crate::diagnostics::SendLogged;
 use crate::{
     i18n::Language,
     model::{Profile, profile_avatar_from_object},
@@ -261,7 +262,7 @@ fn call(
         .header(ORIGIN, "https://id.vk.ru")
         .header(REFERER, "https://id.vk.ru/")
         .form(parameters)
-        .send()
+        .send_logged("qr-login", &format!("api {method}"))
         .map_err(network)?;
     decode_api(&read(response)?)
 }
@@ -304,7 +305,7 @@ fn bootstrap(client: &Client) -> Result<Value, Error> {
             ("response_type", "silent_token"),
         ])
         .header(REFERER, "https://vk.ru/")
-        .send()
+        .send_logged("qr-login", "bootstrap")
         .map_err(network)?;
     parse_init(&read(response)?)
 }
@@ -530,7 +531,7 @@ fn finish(
         .header(ORIGIN, "https://id.vk.ru")
         .header(REFERER, "https://id.vk.ru/")
         .form(&parameters)
-        .send()
+        .send_logged("qr-login", "connect code")
         .map_err(network);
     for (key, value) in &mut parameters {
         if *key == "token" {
@@ -584,7 +585,7 @@ fn finish(
             .get(RETURN_URI)
             .query(&[("payload", payload.as_str())])
             .header(REFERER, "https://id.vk.ru/")
-            .send()
+            .send_logged("qr-login", "return page")
             .map_err(network)?,
     )?;
     control.check()?;

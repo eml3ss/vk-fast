@@ -1,4 +1,5 @@
 //! Musixmatch lyrics. Requests contain track metadata, never VK credentials.
+use crate::diagnostics::SendLogged;
 use crate::{i18n::Language, model::Track};
 use reqwest::{blocking::Client, redirect::Policy};
 use serde_json::Value;
@@ -188,7 +189,7 @@ impl Provider {
             .get(format!("{base}{method}"))
             .query(params)
             .header("Accept", "application/json")
-            .send()
+            .send_logged("lyrics", &format!("musixmatch {method}"))
             .map_err(|_| Error::Network)?;
         let http = response.status().as_u16();
         let wait = response
