@@ -353,10 +353,16 @@ pub fn show(
             } else {
                 18.0
             };
+            // Fullscreen: the scrollbar ends as far above the bottom as it
+            // starts below the header.
+            let mut area = content;
+            if view.fullscreen {
+                area.max.y -= 12.0;
+            }
             if let Some(at) = lines(
                 ui,
                 state,
-                content,
+                area,
                 lyrics,
                 view.position,
                 size,
@@ -629,7 +635,8 @@ fn lines(
                         });
                         state.height += height;
                     }
-                    state.height += rect.height() * 0.4;
+                    // Room after the last line; fullscreen keeps less of it.
+                    state.height += rect.height() * if fullscreen { 0.16 } else { 0.4 };
                     state.stamp = Some(stamp);
                 }
                 let (whole, _) = ui.allocate_exact_size(
@@ -971,6 +978,66 @@ mod tests {
         assert!(!idle.is_empty(), "the handle stays visible");
         assert!(!track(&idle), "no track away from the bar: {idle:?}");
         assert!(track(&hovered), "the track shows on the bar: {hovered:?}");
+    }
+
+    #[test]
+    fn fullscreen_scrollbar_ends_as_far_from_the_bottom_as_it_starts_below_the_top_row() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(80, true);
+        let size = egui::vec2(1000.0, 600.0);
+        let mut output = egui::FullOutput::default();
+        for tick in 0..20 {
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(f64::from(tick) * 0.1),
+                    events: vec![egui::Event::PointerMoved(egui::pos2(size.x - 43.0, 300.0))],
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        &mut state,
+                        &mut covers,
+                        None,
+                        View {
+                            language: Language::English,
+                            track: None,
+                            lyrics: Some(&data),
+                            error: None,
+                            loading: false,
+                            position: 0.0,
+                            playing: false,
+                            fullscreen: true,
+                            retry_allowed: true,
+                            show_track: true,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        // The bar's full-height track, shown under the pointer.
+        let track = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.width() < 20.0 && rect.rect.height() > size.y * 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.height().total_cmp(&b.height()))
+            .expect("the scrollbar track");
+        // The top row (title and buttons) ends 54 points down.
+        let above = track.top() - 54.0;
+        let below = size.y - track.bottom();
+        assert!((above - below).abs() < 0.5, "{above} vs {below}");
     }
 
     #[test]
