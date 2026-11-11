@@ -426,6 +426,8 @@ enum MusicPage {
     Playlist(AlbumRef),
     Owner(crate::web_audio::PlaylistCreator),
     TrackAlbum((i64, i64), String),
+    /// An artist's tracks in My music, opened from the artist's page.
+    ArtistLibrary(ArtistRef),
 }
 
 impl MusicPage {
@@ -798,6 +800,32 @@ fn random_mix_session() -> u64 {
             .map_or(0, |elapsed| elapsed.as_nanos() as u64)
     });
     1_000_000_000_000 + random % 9_000_000_000_000
+}
+
+struct ArtistLibrary {
+    artist: String,
+    stamp: (usize, usize, u64),
+    tracks: Arc<[Track]>,
+}
+
+/// Whether `track` is by `artist`: by VK's artist ID, or by name where the
+/// track carries no artist list yet.
+fn track_by_artist(track: &Track, artist: &ArtistRef) -> bool {
+    let name = artist.name.trim().to_lowercase();
+    if !track.artists.is_empty() {
+        return track.artists.iter().any(|credited| {
+            (!artist.id.is_empty() && credited.id == artist.id)
+                || (!name.is_empty() && credited.name.trim().to_lowercase() == name)
+        });
+    }
+    if name.is_empty() {
+        return false;
+    }
+    let credits = track.artist.to_lowercase();
+    let credits = [" feat. ", " ft. ", " feat ", " & ", " x "]
+        .iter()
+        .fold(credits, |credits, joiner| credits.replace(joiner, ","));
+    credits.split(',').any(|credited| credited.trim() == name)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1261,6 +1289,9 @@ pub struct MusicApp {
     mix_track_seeds: HashSet<(i64, i64)>,
     /// The mix that follows the queue, fetched while its last track plays.
     prepared_mix: Option<mix_prepare::PreparedMix>,
+    /// An artist page's tracks from My music, kept while the library and
+    /// the artist stay the same.
+    artist_library: Option<ArtistLibrary>,
     mix_has_more: bool,
     mix_advance: bool,
     mix_error: Option<WebAudioError>,
@@ -1642,6 +1673,7 @@ impl MusicApp {
             mix_seed: None,
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
+            artist_library: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -2458,6 +2490,7 @@ impl MusicApp {
             | MusicPage::Owner(_)
             | MusicPage::TrackAlbum(_, _) => self.page.detail_key().unwrap_or_default(),
             MusicPage::Home | MusicPage::Library => "library".into(),
+            MusicPage::ArtistLibrary(artist) => format!("artist-library:{}", artist.id),
         }
     }
 
@@ -2595,7 +2628,7 @@ impl MusicApp {
                     }
                 }
             }
-            MusicPage::Library => {
+            MusicPage::Library | MusicPage::ArtistLibrary(_) => {
                 if self.pending.is_none() && self.home_request.is_none() {
                     self.load_page(ctx, true);
                 }
@@ -3992,6 +4025,11 @@ impl MusicApp {
 
     fn view_tracks(&self) -> &[Track] {
         match &self.page {
+            MusicPage::ArtistLibrary(artist) => self
+                .artist_library
+                .as_ref()
+                .filter(|cached| cached.artist == artist.id)
+                .map_or(&[], |cached| &cached.tracks),
             MusicPage::Recent => &self.recent,
             MusicPage::Search(query) => self
                 .search
@@ -4022,6 +4060,34 @@ impl MusicApp {
         }
     }
 
+    /// The artist's tracks in My music, in its order.
+    fn library_tracks_by(&mut self, artist: &ArtistRef) -> Arc<[Track]> {
+        let stamp = (
+            self.library.tracks.as_ptr() as usize,
+            self.library.tracks.len(),
+            self.track_view_cache.revision(),
+        );
+        if let Some(cached) = &self.artist_library
+            && cached.artist == artist.id
+            && cached.stamp == stamp
+        {
+            return cached.tracks.clone();
+        }
+        let tracks: Arc<[Track]> = self
+            .library
+            .tracks
+            .iter()
+            .filter(|track| track_by_artist(track, artist))
+            .cloned()
+            .collect();
+        self.artist_library = Some(ArtistLibrary {
+            artist: artist.id.clone(),
+            stamp,
+            tracks: tracks.clone(),
+        });
+        tracks
+    }
+
     fn play_from_view(&mut self, ctx: &egui::Context, key: (i64, i64)) {
         self.unavailable_playback.clear();
         self.leave_mix();
@@ -4041,6 +4107,7 @@ impl MusicApp {
                 | MusicPage::Playlist(_)
                 | MusicPage::Owner(_)
                 | MusicPage::TrackAlbum(_, _)
+                | MusicPage::ArtistLibrary(_)
         ) {
             Some(self.view_tracks().to_vec())
         } else {
@@ -6968,8 +7035,13 @@ impl MusicApp {
         let artist_follow = artist
             .as_ref()
             .and_then(|artist| self.artist_follow_view(artist));
+        let library_tracks = artist
+            .as_ref()
+            .map(|artist| self.library_tracks_by(artist))
+            .filter(|tracks| !tracks.is_empty());
         let mut action = None;
         let mut track_action = None;
+        let mut open_library = false;
         theme::scroll_area(
             ui,
             egui::ScrollArea::vertical()
@@ -7144,6 +7216,19 @@ impl MusicApp {
                     ui.ctx()
                         .request_discard("popular tracks expanded or hidden");
                 }
+                // The artist's tracks the account keeps in My music, one entry
+                // that opens them as a list.
+                if let (Some(library_tracks), Some(artist)) = (&library_tracks, &artist)
+                    && self.artist_library_entry(
+                        ui,
+                        language,
+                        artist,
+                        artist_image.as_deref(),
+                        library_tracks,
+                    )
+                {
+                    open_library = true;
+                }
                 if let Some(DetailPage::Artist(artist_page)) = data
                     && let Some(intent) = detail_ui::artist_releases(
                         ui,
@@ -7167,6 +7252,10 @@ impl MusicApp {
         );
         if let Some(action) = track_action {
             self.handle_track_action(&ctx, action);
+            return;
+        }
+        if open_library && let Some(artist) = &artist {
+            self.navigate_music(&ctx, MusicPage::ArtistLibrary(artist.clone()));
             return;
         }
         match action {
@@ -7224,6 +7313,99 @@ impl MusicApp {
             }
             _ => {}
         }
+    }
+
+    /// "You liked" on an artist page: the artist's photo with a heart, and
+    /// how many of their tracks and releases are in My music. A click opens
+    /// those tracks. Returns whether it was clicked.
+    fn artist_library_entry(
+        &mut self,
+        ui: &mut egui::Ui,
+        language: Language,
+        artist: &ArtistRef,
+        image_url: Option<&str>,
+        tracks: &[Track],
+    ) -> bool {
+        const PHOTO: f32 = 52.0;
+        ui.add_space(16.0);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), Sense::click());
+        let title = language.text("Вам понравилось", "You liked");
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(rect, 8.0, SURFACE);
+        }
+        let photo = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 8.0, rect.center().y - PHOTO * 0.5),
+            egui::vec2(PHOTO, PHOTO),
+        );
+        let mut art = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(photo)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        self.covers
+            .show_rounded(&mut art, image_url, PHOTO, (PHOTO * 0.5) as u8);
+        // The heart in a ring of the page's background, at the photo's corner.
+        let badge = photo.right_bottom() - egui::vec2(7.0, 7.0);
+        ui.painter().circle_filled(badge, 12.0, BACKGROUND);
+        icons::paint(
+            ui.painter(),
+            egui::Rect::from_center_size(badge, egui::Vec2::splat(18.0)),
+            Icon::HeartFilled,
+            theme::ACCENT,
+        );
+        let releases: HashSet<_> = tracks
+            .iter()
+            .filter_map(|track| track.album.as_ref())
+            .map(|album| (album.owner_id, album.id))
+            .collect();
+        let mut subtitle = vec![crate::release_info::counted(
+            tracks.len() as u64,
+            language,
+            ["трек", "трека", "треков"],
+            ["song", "songs"],
+        )];
+        if !releases.is_empty() {
+            subtitle.push(crate::release_info::counted(
+                releases.len() as u64,
+                language,
+                ["релиз", "релиза", "релизов"],
+                ["release", "releases"],
+            ));
+        }
+        subtitle.push(artist.name.clone());
+        let left = photo.right() + 14.0;
+        let width = (rect.right() - 8.0 - left).max(0.0);
+        let line = |text: String, font: egui::FontId, color: Color32| {
+            let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+            ui.painter().layout_job(job)
+        };
+        let heading = line(
+            title.to_owned(),
+            egui::FontId::new(17.0, theme::semibold()),
+            ui.visuals().text_color(),
+        );
+        let details = line(
+            subtitle.join(" · "),
+            egui::FontId::proportional(13.0),
+            MUTED,
+        );
+        let height = heading.size().y + 3.0 + details.size().y;
+        let top = rect.center().y - height * 0.5;
+        ui.painter()
+            .galley(egui::pos2(left, top), heading, Color32::WHITE);
+        ui.painter().galley(
+            egui::pos2(left, top + height - details.size().y),
+            details,
+            Color32::WHITE,
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title)
+        });
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
     }
 
     fn owner_content(&mut self, ui: &mut egui::Ui, creator: &crate::web_audio::PlaylistCreator) {
@@ -7741,8 +7923,14 @@ impl MusicApp {
         let pagination_id = ui.make_persistent_id("track-autopage");
         let is_library = self.page == MusicPage::Library;
         let rendered_page = self.page.clone();
+        if let MusicPage::ArtistLibrary(artist) = &rendered_page {
+            self.library_tracks_by(artist);
+        }
         let heading = match &self.page {
             MusicPage::Recent => t("Недавнее", "Recent").to_owned(),
+            MusicPage::ArtistLibrary(artist) => {
+                format!("{} · {}", t("Вам понравилось", "You liked"), artist.name)
+            }
             MusicPage::Collection(id) => self
                 .home_collections
                 .iter()
@@ -7754,8 +7942,10 @@ impl MusicApp {
             _ => t("Моя музыка", "My music").to_owned(),
         };
         ui.horizontal(|ui| {
-            if matches!(self.page, MusicPage::Recent | MusicPage::Collection(_))
-                && !self.back_history.is_empty()
+            if matches!(
+                self.page,
+                MusicPage::Recent | MusicPage::Collection(_) | MusicPage::ArtistLibrary(_)
+            ) && !self.back_history.is_empty()
                 && icons::compact_button(ui, Icon::ArrowLeft, t("Назад", "Back"), true, false)
                     .clicked()
             {
@@ -7928,26 +8118,35 @@ impl MusicApp {
                 });
             ui.add_space(6.0);
         }
-        if !is_library && let Some(error) = &self.home_error {
+        let artist_library = matches!(self.page, MusicPage::ArtistLibrary(_));
+        if !is_library
+            && !artist_library
+            && let Some(error) = &self.home_error
+        {
             theme::inset_heading(ui, |ui| {
                 ui.colored_label(Color32::from_rgb(255, 158, 153), error.localized(language))
             });
         }
         if self.view_tracks().is_empty() && !is_library {
             ui.add_space(28.0);
-            if self.home_request.is_some() {
+            if self.home_request.is_some() && !artist_library {
                 theme::inset_heading(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(t("Загружаем треки…", "Loading tracks…"));
                         ui.spinner();
                     })
                 });
-            } else if self.home_error.is_none() {
+            } else if self.home_error.is_none() || artist_library {
                 theme::inset_heading(ui, |ui| {
                     ui.label(if self.page == MusicPage::Recent {
                         t(
                             "Здесь появятся треки, которые вы слушаете в VK Fast.",
                             "Tracks you listen to in VK Fast will appear here.",
+                        )
+                    } else if matches!(self.page, MusicPage::ArtistLibrary(_)) {
+                        t(
+                            "В вашей музыке больше нет треков этого исполнителя.",
+                            "My music has no more tracks by this artist.",
                         )
                     } else {
                         t(
@@ -8066,8 +8265,10 @@ impl MusicApp {
                             match &self.page {
                                 MusicPage::Recent => "recent",
                                 MusicPage::Collection(id) => id,
+                                MusicPage::ArtistLibrary(artist) => artist.id.as_str(),
                                 _ => "library",
                             },
+                            matches!(self.page, MusicPage::ArtistLibrary(_)),
                         ))
                         .max_height(ui.available_height().max(row_height))
                         .auto_shrink([false, false]),
@@ -11722,6 +11923,7 @@ mod tests {
             mix_seed: None,
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
+            artist_library: None,
             mix_has_more: false,
             mix_advance: false,
             mix_error: None,
@@ -17045,6 +17247,106 @@ mod tests {
             assert!(account_ui_text_rect(&output, "3 tracks").is_none());
             assert!(account_ui_text_rect(&output, "861 plays").is_none());
         }
+    }
+
+    #[test]
+    fn an_artist_page_opens_its_tracks_from_my_music_from_a_you_liked_entry() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        let artist = ArtistRef {
+            id: "liked-artist".into(),
+            name: "Liked Artist".into(),
+        };
+        let mut popular = page(1, &[900]).items;
+        popular[0].title = "Popular one".into();
+        app.details.insert(
+            MusicPage::Artist(artist.clone()).detail_key().unwrap(),
+            Arc::new(DetailPage::Artist(crate::web_audio::ArtistPage {
+                artist: artist.clone(),
+                image_url: None,
+                tracks: popular,
+                latest_releases: Vec::new(),
+                discography: Vec::new(),
+                releases_error: None,
+                releases_pending: false,
+                related: Vec::new(),
+            })),
+        );
+        let ids: Vec<i64> = (1..=9).collect();
+        let mut library = page(9, &ids).items;
+        for (index, track) in library.iter_mut().enumerate() {
+            track.title = format!("Mine {index}");
+            track.artists = vec![ArtistRef {
+                id: "liked-artist".into(),
+                name: "Liked Artist".into(),
+            }];
+        }
+        // Another artist's track, and one credited only by name.
+        library[7].title = "Not theirs".into();
+        library[7].artists = vec![ArtistRef {
+            id: "someone-else".into(),
+            name: "Someone Else".into(),
+        }];
+        library[8].title = "By name".into();
+        library[8].artists = Vec::new();
+        library[8].artist = "Someone Else feat. Liked Artist".into();
+        app.library.tracks = library.clone();
+        app.library.exhausted = true;
+        app.navigate_music(&ctx, MusicPage::Artist(artist));
+        let size = egui::vec2(1040.0, 1100.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let popular = account_ui_text_rect(&output, "Popular").unwrap();
+        let entry = account_ui_text_rect(&output, "You liked").expect("the entry");
+        assert!(entry.top() > popular.bottom(), "under Popular");
+        assert!(
+            account_ui_text_rect(&output, "8 songs · Liked Artist").is_some(),
+            "what it holds"
+        );
+        assert!(
+            account_ui_text_rect(&output, "Mine 0").is_none(),
+            "no list here"
+        );
+        account_ui_click(&ctx, &mut app, size, &mut frame, entry.center());
+        assert!(
+            matches!(&app.page, MusicPage::ArtistLibrary(opened) if opened.id == "liked-artist")
+        );
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert!(account_ui_text_rect(&output, "You liked · Liked Artist").is_some());
+        assert!(account_ui_text_rect(&output, "Not theirs").is_none());
+        for title in ["Mine 0", "Mine 6", "By name"] {
+            assert!(account_ui_text_rect(&output, title).is_some(), "{title}");
+        }
+        let row = account_ui_text_rect(&output, "Mine 1").unwrap();
+        account_ui_click(&ctx, &mut app, size, &mut frame, row.center());
+        // The page is the queue; this test has no session to play with.
+        let queue: Vec<_> = app
+            .play_queue
+            .as_ref()
+            .expect("the page's queue")
+            .iter()
+            .map(|track| track.title.clone())
+            .collect();
+        assert_eq!(
+            queue,
+            [
+                "Mine 0", "Mine 1", "Mine 2", "Mine 3", "Mine 4", "Mine 5", "Mine 6", "By name"
+            ]
+        );
+        assert_eq!(
+            app.queue_origin.as_deref(),
+            Some("artist-library:liked-artist")
+        );
+        app.go_back(&ctx);
+        assert!(
+            matches!(app.page, MusicPage::Artist(_)),
+            "back to the artist"
+        );
     }
 
     #[test]

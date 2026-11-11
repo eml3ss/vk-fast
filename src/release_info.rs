@@ -62,7 +62,7 @@ pub fn show(ui: &mut egui::Ui, language: Language, tracks: &[Track], stats: &Alb
     ui.add_space(20.0);
 }
 
-fn counted(value: u64, language: Language, russian: [&str; 3], english: [&str; 2]) -> String {
+pub fn counted(value: u64, language: Language, russian: [&str; 3], english: [&str; 2]) -> String {
     let noun = if language == Language::Russian {
         if (11..=14).contains(&(value % 100)) {
             russian[2]
