@@ -292,8 +292,8 @@ impl MusicApp {
                     ui.add(
                         egui::Label::new(
                             RichText::new(t(
-                                "Добавляйте треки через контекстное меню.",
-                                "Add tracks from their context menu.",
+                                "Добавляйте треки через контекстное меню или перетаскивайте их сюда из списка.",
+                                "Add tracks from their context menu, or drag them here from a list.",
                             ))
                             .small()
                             .color(MUTED),
