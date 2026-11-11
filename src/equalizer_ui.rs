@@ -11,9 +11,10 @@ use crate::{
 
 const GRAPH_HEIGHT: f32 = 190.0;
 const KNOB: f32 = 6.0;
-/// The lowest and highest frequency drawn, in Hz.
-const LOW: f32 = 20.0;
-const HIGH: f32 = 20_000.0;
+/// The lowest and highest frequency drawn, in Hz: half an octave beyond the
+/// outer bands on both sides, so the end knobs sit as far from either edge.
+const LOW: f32 = BANDS[0] * std::f32::consts::FRAC_1_SQRT_2;
+const HIGH: f32 = BANDS[BANDS.len() - 1] * std::f32::consts::SQRT_2;
 
 #[derive(Default)]
 pub struct State {
@@ -527,6 +528,44 @@ mod tests {
         // Within half a decibel step of the cursor.
         assert!((moved.y - to.y).abs() < 4.0, "{moved:?} vs {to:?}");
         assert!((moved.x - to.x).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_end_knobs_sit_as_far_from_either_edge_of_the_graph() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                graph(ui, Language::English, &mut settings);
+            },
+        );
+        output.textures_delta.clear();
+        let mut panel = None;
+        let mut knobs = Vec::new();
+        for shape in output.shapes {
+            let mut stack = vec![shape.shape];
+            while let Some(shape) = stack.pop() {
+                match shape {
+                    egui::Shape::Vec(shapes) => stack.extend(shapes),
+                    egui::Shape::Circle(circle) => knobs.push(circle.center.x),
+                    egui::Shape::Rect(rect) if rect.fill == BACKGROUND => panel = Some(rect.rect),
+                    _ => {}
+                }
+            }
+        }
+        let panel = panel.unwrap();
+        let (first, last) = (
+            knobs.iter().copied().fold(f32::MAX, f32::min),
+            knobs.iter().copied().fold(f32::MIN, f32::max),
+        );
+        assert!(((first - panel.left()) - (panel.right() - last)).abs() < 0.5);
     }
 
     #[test]
