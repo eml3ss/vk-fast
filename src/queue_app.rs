@@ -53,6 +53,11 @@ enum Action {
     Track(Box<TrackAction>),
     /// A row of the mix that follows the queue: the mix starts there.
     PlayPrepared((i64, i64)),
+    /// A row of the mix that follows the queue dragged to another place in it.
+    MovePrepared {
+        from: usize,
+        to: usize,
+    },
 }
 
 impl MusicApp {
@@ -212,6 +217,8 @@ impl MusicApp {
             };
             panel.stamp = Some(stamp);
         }
+        // Captions and rows of the queue are not text to select.
+        ui.style_mut().interaction.selectable_labels = false;
         // The mix that follows the queue, once it is ready: listed after it.
         let extra: Vec<Track> = if panel.open {
             self.prepared_mix_tracks().to_vec()
@@ -339,7 +346,11 @@ impl MusicApp {
                             let source_movable = self.play_order.source_reorderable(current)
                                 && len > source_start + 1;
                             let group = |index: usize| {
-                                if (queued_start..source_start).contains(&index) && added > 1 {
+                                if index >= len {
+                                    // The mix after the queue, among itself.
+                                    (extra.len() > 1).then(|| len..=len + extra.len() - 1)
+                                } else if (queued_start..source_start).contains(&index) && added > 1
+                                {
                                     Some(queued_start..=source_start - 1)
                                 } else if index >= source_start && source_movable {
                                     Some(source_start..=len - 1)
@@ -488,7 +499,12 @@ impl MusicApp {
                                 }
                             }
                             if let Some(moved) = lane.moved {
-                                if moved.from < source_start {
+                                if moved.from >= len {
+                                    action = Some(Action::MovePrepared {
+                                        from: moved.from - len,
+                                        to: moved.to - len,
+                                    });
+                                } else if moved.from < source_start {
                                     action = Some(Action::Move {
                                         from: moved.from - queued_start,
                                         to: moved.to - queued_start,
@@ -506,20 +522,24 @@ impl MusicApp {
                                 }
                             }
                             if let Some((from, rect)) = lane.finish(ui) {
-                                let entry = panel.upcoming[from];
-                                if let Some(track) = self
-                                    .queue_track(
+                                let lifted = if from >= len {
+                                    extra.get(from - len).cloned().map(|track| (track, None))
+                                } else {
+                                    let entry = panel.upcoming[from];
+                                    self.queue_track(
                                         entry.key,
                                         panel.source_indices.get(&entry.key).copied(),
                                     )
                                     .cloned()
-                                {
+                                    .map(|track| (track, entry.queued_id))
+                                };
+                                if let Some((track, queued_id)) = lifted {
                                     ui.scope_builder(
                                         egui::UiBuilder::new()
                                             .max_rect(rect)
                                             .id_salt("queue-drag-ghost"),
                                         |ui| {
-                                            self.queue_row(ui, &track, entry.queued_id, false);
+                                            self.queue_row(ui, &track, queued_id, false);
                                         },
                                     );
                                 }
@@ -580,6 +600,7 @@ impl MusicApp {
             Some(Action::PlayPrepared(key)) => {
                 self.start_prepared_mix(ctx, Some(key));
             }
+            Some(Action::MovePrepared { from, to }) => self.move_prepared_mix(from, to),
             _ => {}
         }
         close

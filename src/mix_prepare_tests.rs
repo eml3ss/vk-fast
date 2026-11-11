@@ -144,3 +144,51 @@ fn only_the_last_track_without_repeat_and_with_the_setting_gets_a_mix_ahead() {
     assert!(app.prepared_mix.is_none());
     assert!(app.workers.is_empty());
 }
+
+#[test]
+fn mix_rows_in_the_queue_reorder_among_themselves_and_play_in_that_order() {
+    let ctx = egui::Context::default();
+    let mut app = last_track_playing(&ctx);
+    app.queue_ui.open = true;
+    let mix = mix_tracks();
+    app.set_prepared_mix_for_test(mix.clone());
+    let size = egui::vec2(1200.0, 760.0);
+    let mut frame = 0;
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..2 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    let first = account_ui_text_rect(&output, "Mix A").unwrap();
+    let last = account_ui_text_rect(&output, "Mix C").unwrap();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let start = egui::pos2(last.right() + 30.0, last.center().y);
+    let to = egui::pos2(start.x, first.center().y - 4.0);
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        vec![egui::Event::PointerMoved(start), button(start, true)],
+    );
+    for step in 1..=10 {
+        let at = start + (to - start) * (step as f32 / 10.0);
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::PointerMoved(at)],
+        );
+    }
+    account_ui_frame(&ctx, &mut app, size, &mut frame, vec![button(to, false)]);
+    let order: Vec<_> = app.prepared_mix_tracks().iter().map(Track::key).collect();
+    assert_eq!(order, [mix[2].key(), mix[0].key(), mix[1].key()]);
+    app.advance_track(&ctx, true);
+    assert_eq!(app.playing.as_ref().unwrap().key(), mix[2].key());
+    only_local_resolvers(&mut app);
+}

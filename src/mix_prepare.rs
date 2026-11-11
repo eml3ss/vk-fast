@@ -122,6 +122,22 @@ impl MusicApp {
         }
     }
 
+    /// Moves a track of the ready queue-end mix to another place in it; the
+    /// mix plays in that order once it starts.
+    pub(super) fn move_prepared_mix(&mut self, from: usize, to: usize) {
+        if self.prepared_mix_tracks().is_empty() {
+            return;
+        }
+        if let Some(prepared) = &mut self.prepared_mix
+            && from != to
+            && from < prepared.tracks.len()
+            && to < prepared.tracks.len()
+        {
+            let track = prepared.tracks.remove(from);
+            prepared.tracks.insert(to, track);
+        }
+    }
+
     /// Starts the ready queue-end mix, from `first` or its first track.
     /// Returns false when none is ready, for the caller to fetch one.
     pub(super) fn start_prepared_mix(
