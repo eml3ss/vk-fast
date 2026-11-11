@@ -527,6 +527,129 @@ mod drag_tests {
     }
 
     #[test]
+    fn the_wheel_scrolls_the_list_while_a_row_is_dragged() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        let client = WebAudioClient::new(vec![crate::web_session::SessionCookie {
+            domain: ".vk.ru".into(),
+            path: "/".into(),
+            name: "remixsid".into(),
+            value: "synthetic-wheel-test".into(),
+            secure: true,
+            expires_unix: None,
+        }])
+        .unwrap();
+        app.session = Some(Session {
+            profile: Profile {
+                id: 42,
+                first_name: "Test".into(),
+                last_name: "Account".into(),
+                avatar_url: None,
+            },
+            cache_warning: false,
+            music: Some(client),
+        });
+        let ids: Vec<i64> = (1..=40).collect();
+        let mut tracks = page(40, &ids).items;
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.owner_id = 42;
+            track.title = format!("Wheel {index}");
+            track.subtitle = Some(String::new());
+            track.library_liked = Some(true);
+            if track.artists.is_empty() {
+                track.artists = vec![crate::model::ArtistRef {
+                    id: "synthetic".into(),
+                    name: "Artist".into(),
+                }];
+            }
+        }
+        app.library.tracks = tracks;
+        app.library.exhausted = true;
+        app.page = MusicPage::Library;
+        assert!(app.library_reorderable());
+        let size = egui::vec2(1100.0, 760.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let row = |output: &egui::FullOutput, title: &str| account_ui_text_rect(output, title);
+        let first = row(&output, "Wheel 0").unwrap();
+        let before = row(&output, "Wheel 4").unwrap();
+        let start = egui::pos2(first.right() + 40.0, first.center().y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        // Lifted a little, in the middle of the list, away from its edges.
+        let held = start + egui::vec2(0.0, 150.0);
+        for step in 1..=6 {
+            account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![egui::Event::PointerMoved(
+                    start + (held - start) * (step as f32 / 6.0),
+                )],
+            );
+        }
+        assert!(ctx.dragged_id().is_some(), "a row is being dragged");
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -240.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for _ in 0..20 {
+            output = account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![egui::Event::PointerMoved(held)],
+            );
+        }
+        let after = row(&output, "Wheel 4").map_or(f32::NEG_INFINITY, |rect| rect.top());
+        assert!(
+            after < before.top() - 100.0,
+            "the list scrolled under the dragged row: {} -> {after}",
+            before.top()
+        );
+        // Escape first: letting go here would ask VK to move the row.
+        account_ui_frame(
+            &ctx,
+            &mut app,
+            size,
+            &mut frame,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        account_ui_frame(&ctx, &mut app, size, &mut frame, vec![button(held, false)]);
+        assert!(app.reorder_request.is_none() && app.workers.is_empty());
+    }
+
+    #[test]
     fn my_music_rows_lift_and_slide_and_escape_cancels_without_vk() {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, Language::English);

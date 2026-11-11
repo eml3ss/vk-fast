@@ -360,6 +360,25 @@ fn scrollbar_scope<R>(
     .inner
 }
 
+/// egui gives the wheel to nothing while a widget is dragged. A dragged row
+/// (moved within a list or carried to a playlist or the queue) still lets
+/// the wheel scroll the list under the pointer. Call it after the contents,
+/// so a list inside another one scrolls first.
+fn wheel_while_dragging(ui: &mut egui::Ui) {
+    if ui.ctx().dragged_id().is_none() {
+        return;
+    }
+    let over = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|point| ui.clip_rect().contains(point));
+    let delta = ui.input(|input| input.smooth_scroll_delta.y);
+    if !over || delta == 0.0 {
+        return;
+    }
+    ui.scroll_with_delta_animation(egui::vec2(0.0, delta), egui::style::ScrollAnimation::none());
+    ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+}
+
 pub fn scroll_area<R>(
     ui: &mut egui::Ui,
     area: egui::ScrollArea,
@@ -369,7 +388,9 @@ pub fn scroll_area<R>(
         area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
                 ui.set_style(content_style);
-                contents(ui)
+                let inner = contents(ui);
+                wheel_while_dragging(ui);
+                inner
             })
     })
 }
@@ -385,7 +406,9 @@ pub fn scroll_rows<R>(
         area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show_rows(ui, row_height, rows, |ui, range| {
                 ui.set_style(content_style);
-                contents(ui, range)
+                let inner = contents(ui, range);
+                wheel_while_dragging(ui);
+                inner
             })
     })
 }
@@ -399,7 +422,9 @@ pub fn scroll_viewport<R>(
         area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show_viewport(ui, |ui, viewport| {
                 ui.set_style(content_style);
-                contents(ui, viewport)
+                let inner = contents(ui, viewport);
+                wheel_while_dragging(ui);
+                inner
             })
     })
 }
