@@ -1,4 +1,4 @@
-name: 🐞 Ошибка (Bug)
+name: Ошибка (Bug)
 description: Что-то работает не так, вылетает или зависает. / Something is broken, crashes or hangs.
 labels: [bug]
 body:

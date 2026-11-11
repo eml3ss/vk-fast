@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 📦 Скачать последнюю версию (Download)
+  - name: Скачать последнюю версию (Download)
     url: https://github.com/eml3ss/vk-fast/releases/latest
     about: Возможно, ошибку уже исправили — проверьте свежий релиз. / The bug may already be fixed in the latest release.
-  - name: 📖 Что изменилось (Changelog)
+  - name: Что изменилось (Changelog)
     url: https://github.com/eml3ss/vk-fast/blob/main/CHANGELOG.md
     about: Список изменений по версиям. / What changed in each version.
