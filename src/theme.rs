@@ -275,7 +275,8 @@ pub fn slider<N: egui::emath::Numeric>(
         let half = egui::vec2(radius * aspect, radius) + egui::Vec2::splat(grow);
         ui.painter().rect_filled(
             egui::Rect::from_center_size(egui::pos2(x, response.rect.center().y), half * 2.0),
-            egui::CornerRadius::same((half.x * 0.5).round() as u8),
+            // egui's rounding: the widgets' 8 points, at most half the width.
+            egui::CornerRadius::same(half.x.min(8.0).floor() as u8),
             Color32::WHITE,
         );
         response
