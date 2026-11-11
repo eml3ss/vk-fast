@@ -102,9 +102,9 @@ impl State {
             rect,
             8,
             if response.hovered() {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::PRIMARY
+                theme::primary()
             },
         );
         icons::paint(
@@ -390,7 +390,7 @@ impl State {
                     RichText::new(
                         language.text("Установлена последняя версия.", "You are up to date."),
                     )
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 );
             }
             Phase::Available | Phase::Ready => {
@@ -432,7 +432,7 @@ impl State {
         let modal = egui::Modal::new(egui::Id::new("application-update-dialog"))
             .frame(
                 egui::Frame::popup(&ctx.global_style())
-                    .fill(theme::SURFACE)
+                    .fill(theme::surface())
                     .inner_margin(20)
                     .corner_radius(14),
             )
@@ -469,7 +469,7 @@ impl State {
                         env!("CARGO_PKG_VERSION")
                     ))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 );
                 ui.add_space(12.0);
                 self.status(ui, language);
@@ -487,7 +487,7 @@ impl State {
                             "Your sign-in, settings and cache will be retained.",
                         ))
                         .small()
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                     );
                 }
                 ui.add_space(14.0);
@@ -505,7 +505,7 @@ impl State {
                         ui.add_sized(
                             egui::vec2(width, 38.0),
                             egui::Button::new(label)
-                                .fill(theme::PRIMARY)
+                                .fill(theme::primary())
                                 .corner_radius(8),
                         )
                     })

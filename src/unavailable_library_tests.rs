@@ -191,22 +191,28 @@ fn explicitly_unavailable_rows_are_muted_even_when_selected_while_unknown_rows_k
             let artist = text_shape(&output, &track.artist);
             let title_color = title.galley.job.sections[0].format.color;
             if unavailable == Some(true) {
-                assert_eq!(title_color, MUTED);
+                assert_eq!(title_color, theme::muted());
                 // Painter::set_opacity adjusts mesh/override colors in gamma
                 // space; TextShape.opacity_factor itself remains unchanged.
-                assert_eq!(painted_text_color(title), MUTED.gamma_multiply(0.65));
-                assert_eq!(painted_text_color(artist), MUTED.gamma_multiply(0.65));
+                assert_eq!(
+                    painted_text_color(title),
+                    theme::muted().gamma_multiply(0.65)
+                );
+                assert_eq!(
+                    painted_text_color(artist),
+                    theme::muted().gamma_multiply(0.65)
+                );
             } else {
                 assert_eq!(title.opacity_factor, 1.0);
                 assert_eq!(artist.opacity_factor, 1.0);
                 if selected {
-                    assert_eq!(title_color, ACCENT);
-                    assert_eq!(painted_text_color(title), ACCENT);
+                    assert_eq!(title_color, theme::accent());
+                    assert_eq!(painted_text_color(title), theme::accent());
                 } else {
-                    assert_ne!(title_color, MUTED);
+                    assert_ne!(title_color, theme::muted());
                     assert_eq!(painted_text_color(title), title_color);
                 }
-                assert_eq!(painted_text_color(artist), MUTED);
+                assert_eq!(painted_text_color(artist), theme::muted());
             }
         }
     }

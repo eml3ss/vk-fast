@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::Language;
+use crate::palette::{Accent, Theme};
 use crate::play_order::RepeatMode;
 
 const MAX_BYTES: u64 = 4096;
@@ -45,6 +46,18 @@ struct Preferences {
     cache_limit_mb: u32,
     #[serde(deserialize_with = "deserialize_language")]
     language: String,
+    /// The appearance theme's code; empty for the default dark theme.
+    #[serde(
+        deserialize_with = "deserialize_theme",
+        skip_serializing_if = "String::is_empty"
+    )]
+    theme: String,
+    /// The accent colour's code; empty for the original blue.
+    #[serde(
+        deserialize_with = "deserialize_accent",
+        skip_serializing_if = "String::is_empty"
+    )]
+    accent: String,
     #[serde(deserialize_with = "deserialize_compact_seek_bar")]
     compact_seek_bar: bool,
     #[serde(deserialize_with = "deserialize_system_titlebar")]
@@ -99,6 +112,8 @@ impl Default for Preferences {
             volume: DEFAULT_VOLUME,
             cache_limit_mb: DEFAULT_CACHE_MB,
             language: String::new(),
+            theme: String::new(),
+            accent: String::new(),
             compact_seek_bar: DEFAULT_COMPACT_SEEK_BAR,
             system_titlebar: DEFAULT_SYSTEM_TITLEBAR,
             double_click_to_play: DEFAULT_DOUBLE_CLICK_TO_PLAY,
@@ -119,6 +134,26 @@ impl Default for Preferences {
             extra: serde_json::Map::new(),
         }
     }
+}
+
+fn deserialize_theme<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .filter(|code| Theme::from_code(code).is_some())
+        .unwrap_or_default()
+        .to_owned())
+}
+
+fn deserialize_accent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .filter(|code| Accent::from_code(code).is_some())
+        .unwrap_or_default()
+        .to_owned())
 }
 
 fn deserialize_link_browser<'de, D: serde::Deserializer<'de>>(
@@ -744,6 +779,36 @@ pub fn save_language(language: Language) -> io::Result<()> {
     save_language_at(&preferences_path()?, language)
 }
 
+/// The appearance theme; the original dark one unless another was chosen.
+pub fn load_theme() -> Theme {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .and_then(|preferences| Theme::from_code(&preferences.theme))
+        .unwrap_or_default()
+}
+
+pub fn save_theme(theme: Theme) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.theme = theme.code().to_owned()
+    })
+}
+
+/// The accent colour; the original blue unless another was chosen.
+pub fn load_accent() -> Accent {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .and_then(|preferences| Accent::from_code(&preferences.accent))
+        .unwrap_or_default()
+}
+
+pub fn save_accent(accent: Accent) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.accent = accent.code().to_owned()
+    })
+}
+
 pub fn load_compact_seek_bar() -> bool {
     preferences_path()
         .ok()
@@ -1127,6 +1192,69 @@ mod tests {
         let restored = load_preferences_at(&path).unwrap().unwrap();
         assert!(!restored.animated_backdrop);
         assert_eq!(restored.volume, 0.375);
+    }
+
+    #[test]
+    fn theme_defaults_to_dark_and_a_chosen_theme_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [
+            r#"{}"#,
+            r#"{"theme":"light"}"#,
+            r#"{"theme":7}"#,
+            r#"{"theme":null}"#,
+        ] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert_eq!(Theme::from_code(&preferences.theme), None);
+        }
+        // The default theme writes nothing new to an old file.
+        assert!(
+            !serde_json::to_string(&Preferences::default())
+                .unwrap()
+                .contains("theme")
+        );
+        for theme in Theme::ALL {
+            update_at(&path, |preferences| {
+                preferences.theme = theme.code().to_owned()
+            })
+            .unwrap();
+            save_at(&path, 0.375).unwrap();
+            let restored = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(Theme::from_code(&restored.theme), Some(theme));
+            assert_eq!(restored.volume, 0.375);
+        }
+        let restored: Preferences = serde_json::from_str(r#"{"theme":"oled"}"#).unwrap();
+        assert_eq!(Theme::from_code(&restored.theme), Some(Theme::Oled));
+    }
+
+    #[test]
+    fn accent_defaults_to_blue_and_a_chosen_accent_survives_theme_and_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [r#"{}"#, r#"{"accent":"gold"}"#, r#"{"accent":3}"#] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert_eq!(Accent::from_code(&preferences.accent), None);
+        }
+        assert!(
+            !serde_json::to_string(&Preferences::default())
+                .unwrap()
+                .contains("accent")
+        );
+        update_at(&path, |preferences| {
+            preferences.theme = Theme::Oled.code().to_owned()
+        })
+        .unwrap();
+        for accent in Accent::ALL {
+            update_at(&path, |preferences| {
+                preferences.accent = accent.code().to_owned()
+            })
+            .unwrap();
+            save_at(&path, 0.375).unwrap();
+            let restored = load_preferences_at(&path).unwrap().unwrap();
+            assert_eq!(Accent::from_code(&restored.accent), Some(accent));
+            assert_eq!(Theme::from_code(&restored.theme), Some(Theme::Oled));
+            assert_eq!(restored.volume, 0.375);
+        }
     }
 
     #[test]

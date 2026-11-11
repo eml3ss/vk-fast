@@ -259,7 +259,7 @@ impl MusicApp {
                     ui.label(
                         RichText::new(t("Сейчас играет", "Now playing"))
                             .small()
-                            .color(MUTED),
+                            .color(theme::muted()),
                     );
                     ui.add_space(4.0);
                     if let Some(row_action) = self.queue_row(ui, &track, None, true) {
@@ -276,7 +276,7 @@ impl MusicApp {
                         ui.label(
                             RichText::new(t("затем микс по треку", "then a track mix"))
                                 .small()
-                                .color(MUTED),
+                                .color(theme::muted()),
                         );
                     }
                     if !self.play_order.queued().is_empty() {
@@ -286,7 +286,7 @@ impl MusicApp {
                                     egui::Button::new(
                                         RichText::new(t("Очистить добавленные", "Clear added"))
                                             .small()
-                                            .color(MUTED),
+                                            .color(theme::muted()),
                                     )
                                     .frame(false),
                                 )
@@ -305,7 +305,8 @@ impl MusicApp {
                 if panel.upcoming.is_empty() && extra.is_empty() {
                     ui.add(
                         egui::Label::new(
-                            RichText::new(t("Очередь пуста", "The queue is empty")).color(MUTED),
+                            RichText::new(t("Очередь пуста", "The queue is empty"))
+                                .color(theme::muted()),
                         )
                         .wrap()
                         .selectable(false),
@@ -318,7 +319,7 @@ impl MusicApp {
                                 "Add tracks from their context menu, or drag them here from a list.",
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(theme::muted()),
                         )
                         .wrap()
                         .selectable(false),
@@ -651,7 +652,7 @@ impl MusicApp {
         }
         let hovered = response.contains_pointer();
         if hovered {
-            ui.painter().rect_filled(rect, 8.0, theme::SELECTED);
+            ui.painter().rect_filled(rect, 8.0, theme::selected());
         }
         let cover = egui::Rect::from_center_size(
             rect.left_center() + egui::vec2(22.0, 0.0),
@@ -690,7 +691,12 @@ impl MusicApp {
             let response = ui.interact(remove, ui.id().with("queue-row-remove"), Sense::click());
             remove_hovered = response.contains_pointer();
             if hovered || response.hovered() || response.has_focus() {
-                icons::paint(ui.painter(), remove.shrink(7.0), Icon::Close, MUTED);
+                icons::paint(
+                    ui.painter(),
+                    remove.shrink(7.0),
+                    Icon::Close,
+                    theme::muted(),
+                );
             }
             if response
                 .on_hover_text(self.language.text("Убрать из очереди", "Remove from queue"))
@@ -712,9 +718,13 @@ impl MusicApp {
         );
         ui.put(
             duration,
-            egui::Label::new(RichText::new(track.duration_label()).small().color(MUTED))
-                .truncate()
-                .selectable(false),
+            egui::Label::new(
+                RichText::new(track.duration_label())
+                    .small()
+                    .color(theme::muted()),
+            )
+            .truncate()
+            .selectable(false),
         );
         let metadata = egui::Rect::from_min_max(
             egui::pos2(cover.right() + 8.0, rect.top() + 7.0),
@@ -732,9 +742,9 @@ impl MusicApp {
                     egui::Label::new(theme::track_title(
                         track,
                         if track.unavailable == Some(true) {
-                            MUTED
+                            theme::muted()
                         } else if current {
-                            ACCENT
+                            theme::accent()
                         } else {
                             ui.visuals().text_color()
                         },

@@ -151,13 +151,13 @@ pub fn show_sidebar(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(4.0);
-            icons::show(ui, Icon::Library, theme::MUTED, 16.0);
+            icons::show(ui, Icon::Library, theme::muted(), 16.0);
             ui.add_space(3.0);
             ui.add(
                 egui::Label::new(
                     RichText::new(language.text("Библиотека", "Library"))
                         .family(theme::semibold())
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 )
                 .truncate()
                 .selectable(false),
@@ -207,14 +207,14 @@ pub fn show_sidebar(
     ui.add_space(4.0);
     if search.open {
         egui::Frame::new()
-            .fill(Color32::from_rgb(37, 42, 50))
+            .fill(theme::tone(Color32::from_rgb(37, 42, 50)))
             .corner_radius(8)
             .inner_margin(8)
             .show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = 22.0;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    icons::show(ui, Icon::Search, theme::MUTED, 16.0);
+                    icons::show(ui, Icon::Search, theme::muted(), 16.0);
                     let input = ui.add(
                         egui::TextEdit::singleline(&mut search.query)
                             .id_salt("library-search-input")
@@ -267,7 +267,7 @@ pub fn show_sidebar(
             ui.label(
                 RichText::new(language.text("Ничего не найдено", "No results"))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             );
         } else if loading {
             ui.horizontal(|ui| {
@@ -275,7 +275,7 @@ pub fn show_sidebar(
                 ui.label(
                     RichText::new(language.text("Загружаем библиотеку…", "Loading library…"))
                         .small()
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 );
             });
         } else if error.is_none() {
@@ -283,7 +283,7 @@ pub fn show_sidebar(
                 egui::Label::new(
                     RichText::new(language.text("Библиотека пока пуста", "Your library is empty"))
                         .small()
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 )
                 .wrap()
                 .selectable(false),
@@ -650,7 +650,7 @@ fn playlist_rows(
             egui::pos2(left + 6.0, target - 2.0),
             egui::vec2((width - 12.0).max(0.0), 2.0),
         );
-        ui.painter().rect_filled(marker, 1.0, theme::ACCENT);
+        ui.painter().rect_filled(marker, 1.0, theme::accent());
         let ghost = egui::Rect::from_min_size(
             egui::pos2(left, drag_top(pointer.y, drag.grab_y, clip)),
             egui::vec2(width, ROW_HEIGHT),
@@ -795,12 +795,12 @@ fn menu_row(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+            ui.painter().rect_filled(rect, 6.0, theme::selected());
         }
         let color = if ui.is_enabled() {
             ui.visuals().text_color()
         } else {
-            theme::MUTED
+            theme::muted()
         };
         icons::paint(
             ui.painter(),
@@ -812,7 +812,7 @@ fn menu_row(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::
             if response.hovered() || response.has_focus() {
                 color
             } else {
-                theme::MUTED
+                theme::muted()
             },
         );
         let text = ui.painter().layout_no_wrap(
@@ -944,10 +944,10 @@ const CHIP_HEIGHT: f32 = 28.0;
 fn chip_paint(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, selected: bool) {
     let hovered = response.hovered() || response.has_focus();
     let fill = match (selected, hovered) {
-        (true, false) => theme::ACCENT,
-        (true, true) => Color32::from_rgb(72, 132, 216),
-        (false, false) => Color32::from_rgb(35, 41, 50),
-        (false, true) => Color32::from_rgb(45, 53, 65),
+        (true, false) => theme::accent(),
+        (true, true) => theme::accent_tone(Color32::from_rgb(72, 132, 216)),
+        (false, false) => theme::tone(Color32::from_rgb(35, 41, 50)),
+        (false, true) => theme::tone(Color32::from_rgb(45, 53, 65)),
     };
     ui.painter().rect_filled(rect, rect.height() * 0.5, fill);
 }
@@ -999,9 +999,9 @@ fn header_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> e
     ui.add_enabled_ui(enabled, |ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+            ui.painter().rect_filled(rect, 6.0, theme::selected());
         }
-        icons::paint(ui.painter(), rect.shrink(4.0), icon, theme::MUTED);
+        icons::paint(ui.painter(), rect.shrink(4.0), icon, theme::muted());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
         });
@@ -1071,9 +1071,9 @@ fn paint_entry(
             rect,
             8.0,
             if state.selected {
-                theme::SELECTED
+                theme::selected()
             } else {
-                Color32::from_rgb(31, 38, 49)
+                theme::tone(Color32::from_rgb(31, 38, 49))
             },
         );
     }
@@ -1083,8 +1083,8 @@ fn paint_entry(
     let art = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 8.0), egui::vec2(32.0, 32.0));
     if entry.artist && entry.image.is_none() {
         ui.painter()
-            .circle_filled(art.center(), 16.0, theme::SELECTED);
-        icons::paint(ui.painter(), art.shrink(7.0), Icon::Account, theme::MUTED);
+            .circle_filled(art.center(), 16.0, theme::selected());
+        icons::paint(ui.painter(), art.shrink(7.0), Icon::Account, theme::muted());
     } else {
         let mut image = ui.new_child(
             egui::UiBuilder::new()
@@ -1110,7 +1110,7 @@ fn paint_entry(
         entry.title,
         FontId::new(14.0, theme::semibold()),
         if state.selected {
-            theme::ACCENT
+            theme::accent()
         } else {
             ui.visuals().text_color()
         },
@@ -1123,7 +1123,7 @@ fn paint_entry(
             egui::pos2(subtitle.left() + 6.0, subtitle.center().y),
             egui::vec2(12.0, 12.0),
         );
-        icons::paint(ui.painter(), pin, Icon::Pin, theme::MUTED);
+        icons::paint(ui.painter(), pin, Icon::Pin, theme::muted());
         subtitle.min.x = pin.right() + 4.0;
     }
     paint_line(
@@ -1131,7 +1131,7 @@ fn paint_entry(
         subtitle,
         entry.subtitle,
         egui::TextStyle::Small.resolve(ui.style()),
-        theme::MUTED,
+        theme::muted(),
     );
 }
 
@@ -2159,7 +2159,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == theme::SELECTED && rect.rect.contains(plus) =>
+                            if rect.fill == theme::selected() && rect.rect.contains(plus) =>
                         {
                             Some(rect.rect)
                         }
@@ -2309,7 +2309,8 @@ mod tests {
             .iter()
             .find_map(|shape| match &shape.shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == theme::SELECTED && (rect.rect.height() - 48.0).abs() < 0.5 =>
+                    if rect.fill == theme::selected()
+                        && (rect.rect.height() - 48.0).abs() < 0.5 =>
                 {
                     Some(rect.rect)
                 }

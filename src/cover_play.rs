@@ -101,11 +101,11 @@ pub fn button(
         response.surrender_focus();
     }
     let fill = if response.is_pointer_button_down_on() {
-        theme::PRIMARY
+        theme::primary()
     } else if response.hovered() || response.has_focus() {
-        Color32::from_rgb(72, 132, 216)
+        theme::accent_tone(Color32::from_rgb(72, 132, 216))
     } else {
-        theme::ACCENT
+        theme::accent()
     };
     let painter = ui.painter();
     painter.circle_filled(
@@ -125,7 +125,7 @@ pub fn button(
         ui.painter().circle_stroke(
             center,
             radius + 2.0,
-            Stroke::new(1.5, Color32::from_rgb(170, 200, 240)),
+            Stroke::new(1.5, theme::accent_tone(Color32::from_rgb(170, 200, 240))),
         );
     }
     response.widget_info(|| {

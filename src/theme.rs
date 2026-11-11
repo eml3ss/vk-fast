@@ -1,12 +1,69 @@
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
-pub const ACCENT: Color32 = Color32::from_rgb(54, 112, 196);
-pub const MUTED: Color32 = Color32::from_rgb(156, 166, 181);
-pub const BACKGROUND: Color32 = Color32::from_rgb(15, 17, 21);
-pub const SURFACE: Color32 = Color32::from_rgb(23, 27, 33);
-pub const PRIMARY: Color32 = Color32::from_rgb(34, 77, 139);
-pub const SELECTED: Color32 = Color32::from_rgb(27, 44, 67);
-pub const SCROLL_HANDLE: Color32 = Color32::from_rgb(57, 65, 77);
+pub use crate::palette::{Accent, Theme};
+
+// The colours of the active theme (`crate::palette`), read on every paint so
+// a theme switch shows at once.
+pub fn accent() -> Color32 {
+    crate::palette::current().accent
+}
+pub fn muted() -> Color32 {
+    crate::palette::current().muted
+}
+/// The page behind everything.
+pub fn background() -> Color32 {
+    crate::palette::current().background
+}
+/// Cards, fields, menus and dialogs.
+pub fn surface() -> Color32 {
+    crate::palette::current().surface
+}
+/// The sidebar, player bar and the lyrics/queue panel.
+pub fn panel() -> Color32 {
+    crate::palette::current().panel
+}
+pub fn primary() -> Color32 {
+    crate::palette::current().primary
+}
+pub fn selected() -> Color32 {
+    crate::palette::current().selected
+}
+/// A hovered item in a panel: darker than the panel, or lighter where the
+/// panel is already as dark as the page.
+pub fn panel_hover() -> Color32 {
+    let palette = crate::palette::current();
+    if palette.panel == palette.background {
+        palette.surface
+    } else {
+        palette.background
+    }
+}
+/// `color`, a grey of the original dark look, in the active theme.
+pub fn tone(color: Color32) -> Color32 {
+    crate::palette::current().tone(color)
+}
+
+/// `color`, a shade of the original blue accent, in the active accent.
+pub fn accent_tone(color: Color32) -> Color32 {
+    crate::palette::current().accent_tone(color)
+}
+
+/// The line between a panel and the page, in themes whose panels are as dark
+/// as the page.
+pub fn panel_line() -> Option<egui::Stroke> {
+    crate::palette::current()
+        .panel_line
+        .map(|color| egui::Stroke::new(1.0, color))
+}
+
+/// Draw the app in `theme` with `accent` from this frame on, with egui's own
+/// widgets.
+pub fn apply(ctx: &egui::Context, theme: Theme, accent: Accent) {
+    crate::palette::set_active(theme);
+    crate::palette::set_accent(accent);
+    install_style(ctx);
+    ctx.request_repaint();
+}
 
 pub fn wrapped_body(
     ui: &egui::Ui,
@@ -199,9 +256,9 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
         egui::vec2(38.0, 22.0),
     );
     let fill = if *value {
-        PRIMARY
+        primary()
     } else {
-        Color32::from_rgb(49, 56, 67)
+        tone(Color32::from_rgb(49, 56, 67))
     };
     ui.painter().rect_filled(pill, 11.0, fill);
     let progress = ui.ctx().animate_bool_responsive(response.id, *value);
@@ -246,7 +303,7 @@ pub fn slider<N: egui::emath::Numeric>(
     const HEIGHT: f32 = 28.0;
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = HEIGHT;
-        ui.visuals_mut().selection.bg_fill = ACCENT;
+        ui.visuals_mut().selection.bg_fill = accent();
         let response = ui.add(
             egui::Slider::new(value, range.clone())
                 .step_by(step)
@@ -313,17 +370,17 @@ pub fn paint_explicit_badge(painter: &egui::Painter, rect: egui::Rect) {
         egui::pos2(snap(rect.left()), snap(rect.top())),
         egui::vec2(snap(rect.width()), snap(rect.height())),
     );
-    painter.rect_filled(rect, 3.0, MUTED);
+    painter.rect_filled(rect, 3.0, muted());
     let galley = painter.layout_no_wrap(
         "E".into(),
         FontId::new((rect.height() * 0.7).round(), semibold()),
-        BACKGROUND,
+        background(),
     );
     let offset = rect.center() - galley.mesh_bounds.center();
     painter.galley(
         egui::pos2(snap(offset.x), snap(offset.y)),
         galley,
-        BACKGROUND,
+        background(),
     );
 }
 
@@ -385,7 +442,7 @@ pub fn track_title(
             0.0,
             egui::TextFormat {
                 font_id: font,
-                color: MUTED,
+                color: muted(),
                 ..Default::default()
             },
         );
@@ -401,9 +458,10 @@ fn scrollbar_scope<R>(
     let content_style = ui.style().clone();
     ui.scope(|ui| {
         let visuals = ui.visuals_mut();
-        visuals.widgets.inactive.bg_fill = SCROLL_HANDLE;
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(75, 85, 99);
-        visuals.widgets.active.bg_fill = Color32::from_rgb(91, 104, 122);
+        let palette = crate::palette::current();
+        visuals.widgets.inactive.bg_fill = palette.scroll_handle;
+        visuals.widgets.hovered.bg_fill = palette.scroll_hovered;
+        visuals.widgets.active.bg_fill = palette.scroll_active;
         render(ui, content_style)
     })
     .inner
@@ -518,7 +576,7 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 fn install_style(ctx: &egui::Context) {
-    ctx.set_visuals(egui::Visuals::dark());
+    ctx.set_visuals(visuals(&crate::palette::current()));
     ctx.global_style_mut(|style| {
         style
             .text_styles
@@ -545,39 +603,117 @@ fn install_style(ctx: &egui::Context) {
             handle_min_length: 28.0,
             ..egui::style::ScrollStyle::solid()
         };
-        style.visuals.panel_fill = BACKGROUND;
-        style.visuals.window_fill = SURFACE;
-        style.visuals.extreme_bg_color = Color32::from_rgb(18, 21, 27);
-        style.visuals.faint_bg_color = SURFACE;
-        style.visuals.override_text_color = Some(Color32::from_rgb(231, 235, 242));
-        style.visuals.selection.bg_fill = SELECTED;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-        style.visuals.hyperlink_color = Color32::from_rgb(98, 148, 219);
-        style.visuals.window_corner_radius = egui::CornerRadius::same(12);
-        style.visuals.menu_corner_radius = egui::CornerRadius::same(8);
-        for visual in [
-            &mut style.visuals.widgets.noninteractive,
-            &mut style.visuals.widgets.inactive,
-            &mut style.visuals.widgets.hovered,
-            &mut style.visuals.widgets.active,
-            &mut style.visuals.widgets.open,
-        ] {
-            visual.corner_radius = egui::CornerRadius::same(8);
-        }
-        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(32, 38, 47);
-        style.visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(43, 50, 61));
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(42, 50, 63);
-        style.visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(69, 87, 112));
-        style.visuals.widgets.active.bg_fill = SELECTED;
-        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
     });
+}
+
+/// egui's widget colours in `palette`: its dark look with the app's own
+/// colours, and every other grey toned to the theme.
+pub fn visuals(palette: &crate::palette::Palette) -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    let tone = |color: &mut Color32| *color = palette.tone(*color);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        tone(&mut widget.bg_fill);
+        tone(&mut widget.weak_bg_fill);
+        tone(&mut widget.bg_stroke.color);
+        tone(&mut widget.fg_stroke.color);
+        widget.corner_radius = egui::CornerRadius::same(8);
+    }
+    tone(&mut visuals.window_stroke.color);
+    tone(&mut visuals.code_bg_color);
+    if let Some(line) = palette.panel_line {
+        // Separators, such as the player bar's top edge.
+        visuals.widgets.noninteractive.bg_stroke.color = line;
+    }
+    visuals.panel_fill = palette.background;
+    visuals.window_fill = palette.surface;
+    visuals.extreme_bg_color = palette.field;
+    visuals.faint_bg_color = palette.surface;
+    visuals.override_text_color = Some(palette.text);
+    visuals.selection.bg_fill = palette.selected;
+    visuals.selection.stroke = egui::Stroke::new(1.0, palette.accent);
+    visuals.hyperlink_color = palette.link;
+    visuals.window_corner_radius = egui::CornerRadius::same(12);
+    visuals.menu_corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.inactive.bg_fill = palette.control;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, palette.control_stroke);
+    visuals.widgets.hovered.bg_fill = palette.control_hovered;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, palette.control_hovered_stroke);
+    visuals.widgets.active.bg_fill = palette.selected;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, palette.accent);
+    visuals
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_theme_draws_egui_widgets_exactly_as_before_themes() {
+        // The visuals the app always installed, written out as they were.
+        let mut original = egui::Visuals::dark();
+        original.panel_fill = Color32::from_rgb(15, 17, 21);
+        original.window_fill = Color32::from_rgb(23, 27, 33);
+        original.extreme_bg_color = Color32::from_rgb(18, 21, 27);
+        original.faint_bg_color = Color32::from_rgb(23, 27, 33);
+        original.override_text_color = Some(Color32::from_rgb(231, 235, 242));
+        original.selection.bg_fill = Color32::from_rgb(27, 44, 67);
+        original.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(54, 112, 196));
+        original.hyperlink_color = Color32::from_rgb(98, 148, 219);
+        original.window_corner_radius = egui::CornerRadius::same(12);
+        original.menu_corner_radius = egui::CornerRadius::same(8);
+        for visual in [
+            &mut original.widgets.noninteractive,
+            &mut original.widgets.inactive,
+            &mut original.widgets.hovered,
+            &mut original.widgets.active,
+            &mut original.widgets.open,
+        ] {
+            visual.corner_radius = egui::CornerRadius::same(8);
+        }
+        original.widgets.inactive.bg_fill = Color32::from_rgb(32, 38, 47);
+        original.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(43, 50, 61));
+        original.widgets.hovered.bg_fill = Color32::from_rgb(42, 50, 63);
+        original.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(69, 87, 112));
+        original.widgets.active.bg_fill = Color32::from_rgb(27, 44, 67);
+        original.widgets.active.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(54, 112, 196));
+        assert_eq!(visuals(Theme::Dark.palette()), original);
+        assert_eq!(visuals(Theme::default().palette()), original);
+        // Tests never switch the global theme, so this is the default too.
+        let context = egui::Context::default();
+        install(&context);
+        assert_eq!(context.global_style().visuals, original);
+        assert_eq!(panel_line(), None);
+        assert_eq!(panel_hover(), Color32::from_rgb(15, 17, 21));
+    }
+
+    #[test]
+    fn oled_theme_paints_page_and_panels_black_and_separates_them_by_lines() {
+        let oled = Theme::Oled.palette();
+        let visuals = visuals(oled);
+        assert_eq!(visuals.panel_fill, Color32::BLACK);
+        assert_eq!(oled.panel, Color32::BLACK);
+        // Separators (the player bar's edge) use the panel line.
+        assert_eq!(
+            Some(visuals.widgets.noninteractive.bg_stroke.color),
+            oled.panel_line
+        );
+        // Menus, cards and controls still stand out from the black page.
+        assert_ne!(visuals.window_fill, Color32::BLACK);
+        assert_ne!(visuals.widgets.inactive.bg_fill, Color32::BLACK);
+        assert_ne!(visuals.widgets.inactive.weak_bg_fill, Color32::BLACK);
+        for theme in Theme::ALL {
+            let visuals = super::visuals(theme.palette());
+            assert_eq!(visuals.panel_fill, theme.palette().background);
+            assert_eq!(visuals.window_fill, theme.palette().surface);
+            assert_eq!(visuals.override_text_color, Some(theme.palette().text));
+        }
+    }
 
     #[test]
     fn gradient_card_edges_fade_all_around_like_other_rounded_shapes() {
@@ -708,7 +844,7 @@ mod tests {
                     ui.with_layout(
                         egui::Layout::centered_and_justified(egui::Direction::TopDown),
                         |ui| {
-                            ui.add(wrapped_body(ui, text, 240.0, align, MUTED));
+                            ui.add(wrapped_body(ui, text, 240.0, align, muted()));
                         },
                     );
                 },

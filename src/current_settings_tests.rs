@@ -47,7 +47,7 @@ fn settings_heading_shares_the_music_page_top_and_keeps_its_search_below() {
                 .into_iter()
                 .filter_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == SURFACE
+                        if rect.fill == theme::surface()
                             && rect.rect.left() > 252.0
                             && rect.rect.width() > 500.0
                             && (30.0..=40.0).contains(&rect.rect.height())
@@ -270,7 +270,7 @@ fn every_settings_title_has_balanced_space_between_search_and_its_card() {
                 .into_iter()
                 .filter_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == SURFACE
+                        if rect.fill == theme::surface()
                             && rect.rect.left() > 252.0
                             && rect.rect.width() > 500.0 =>
                     {
@@ -360,7 +360,7 @@ fn settings_navigation_uses_main_tab_colors_icons_and_retains_36_point_rows() {
                 .into_iter()
                 .filter_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == theme::SELECTED
+                        if rect.fill == theme::selected()
                             && rect.rect.right() < 252.0
                             && (rect.rect.width() - 216.0).abs() < 0.1 =>
                     {
@@ -551,7 +551,9 @@ fn explicit_tracks_show_a_badge_before_their_artists_until_settings_turn_it_off(
     let boxed = account_ui_shapes(&output)
         .into_iter()
         .find_map(|shape| match shape {
-            egui::Shape::Rect(rect) if rect.fill == MUTED && rect.rect.contains_rect(badge) => {
+            egui::Shape::Rect(rect)
+                if rect.fill == theme::muted() && rect.rect.contains_rect(badge) =>
+            {
                 Some(rect.rect)
             }
             _ => None,
@@ -758,7 +760,7 @@ fn the_equalizer_is_shaped_on_its_graph_and_keeps_presets_of_its_own() {
         .into_iter()
         .find_map(|shape| match shape {
             egui::Shape::Rect(rect)
-                if rect.fill == crate::theme::BACKGROUND
+                if rect.fill == crate::theme::background()
                     && (rect.rect.height() - 190.0).abs() < 0.5 =>
             {
                 Some(rect.rect)

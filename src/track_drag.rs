@@ -98,7 +98,7 @@ pub fn paint_target(ctx: &egui::Context, rect: egui::Rect, radius: f32) {
     .rect_stroke(
         rect,
         radius,
-        egui::Stroke::new(2.0, theme::ACCENT),
+        egui::Stroke::new(2.0, theme::accent()),
         egui::StrokeKind::Inside,
     );
 }
@@ -160,8 +160,8 @@ fn paint_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, rect: e
     painter.rect(
         rect,
         10.0,
-        Color32::from_rgb(31, 38, 49),
-        egui::Stroke::new(1.0, theme::PRIMARY),
+        theme::tone(Color32::from_rgb(31, 38, 49)),
+        egui::Stroke::new(1.0, theme::primary()),
         egui::StrokeKind::Inside,
     );
     let size = (rect.height() - 12.0).clamp(24.0, 40.0);
@@ -190,7 +190,7 @@ fn paint_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, rect: e
     let artist = line(
         &track.artist,
         egui::FontId::proportional(12.0),
-        theme::MUTED,
+        theme::muted(),
     );
     let height = title.size().y + 2.0 + artist.size().y;
     let top = rect.center().y - height * 0.5;

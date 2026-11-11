@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 use crate::{
     equalizer::{self, BANDS, Builtin, MAX_DB, Settings},
     i18n::Language,
-    theme::{self, ACCENT, BACKGROUND, MUTED},
+    theme,
 };
 
 const GRAPH_HEIGHT: f32 = 190.0;
@@ -85,7 +85,7 @@ pub fn show(
             "Changes the sound in VK Fast only. Drag the points on the graph; a double click resets a band. Boosts lower the overall level a little so the sound does not distort.",
         ))
         .small()
-        .color(MUTED),
+        .color(theme::muted()),
     );
     ui.add_space(14.0);
     if graph(ui, language, settings) {
@@ -119,14 +119,14 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     };
     let db_at = |y: f32| (plot.center().y - y) / (plot.height() * 0.5) * MAX_DB;
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 10.0, BACKGROUND);
+    painter.rect_filled(rect, 10.0, theme::background());
     let small = egui::FontId::proportional(11.0);
     for gain in [-12.0, -6.0, 0.0, 6.0, 12.0] {
         let y = y_of(gain);
         let color = if gain == 0.0 {
-            Color32::from_rgb(64, 73, 86)
+            theme::tone(Color32::from_rgb(64, 73, 86))
         } else {
-            Color32::from_rgb(36, 42, 51)
+            theme::tone(Color32::from_rgb(36, 42, 51))
         };
         // No scale labels: every band's value is written under the graph.
         painter.line_segment(
@@ -136,9 +136,9 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
     }
     let enabled = settings.enabled;
     let line = if enabled {
-        ACCENT
+        theme::accent()
     } else {
-        Color32::from_rgb(88, 98, 112)
+        theme::tone(Color32::from_rgb(88, 98, 112))
     };
     // Columns: each band owns the strip around its frequency.
     let spacing = x_of(BANDS[1]) - x_of(BANDS[0]);
@@ -232,7 +232,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
             if enabled {
                 Color32::WHITE
             } else {
-                Color32::from_rgb(170, 178, 190)
+                theme::tone(Color32::from_rgb(170, 178, 190))
             },
             Stroke::new(2.0, line),
         );
@@ -257,7 +257,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
         let shift = (rect.left() + 4.0 - bubble.left()).max(0.0)
             + (rect.right() - 4.0 - bubble.right()).min(0.0);
         let bubble = bubble.translate(egui::vec2(shift, 0.0));
-        painter.rect_filled(bubble, 6.0, Color32::from_rgb(45, 52, 63));
+        painter.rect_filled(bubble, 6.0, theme::tone(Color32::from_rgb(45, 52, 63)));
         painter.galley(
             bubble.center() - galley.size() * 0.5,
             galley,
@@ -281,7 +281,7 @@ fn graph(ui: &mut egui::Ui, language: Language, settings: &mut Settings) -> bool
             egui::Align2::CENTER_CENTER,
             gain_label(gain),
             small.clone(),
-            if gain == 0.0 { MUTED } else { line },
+            if gain == 0.0 { theme::muted() } else { line },
         );
     }
     changed
@@ -330,7 +330,7 @@ fn presets(
                     ui.label(
                         RichText::new(t("Мои пресеты", "My presets"))
                             .small()
-                            .color(MUTED),
+                            .color(theme::muted()),
                     );
                 }
                 let mut picked = None;
@@ -390,7 +390,7 @@ fn presets(
             let field = ui
                 .scope(|ui| {
                     let visuals = ui.visuals_mut();
-                    visuals.extreme_bg_color = BACKGROUND;
+                    visuals.extreme_bg_color = theme::background();
                     visuals.selection.stroke = Stroke::NONE;
                     for widget in [
                         &mut visuals.widgets.inactive,
@@ -571,7 +571,9 @@ mod tests {
                 match shape {
                     egui::Shape::Vec(shapes) => stack.extend(shapes),
                     egui::Shape::Circle(circle) => knobs.push(circle.center.x),
-                    egui::Shape::Rect(rect) if rect.fill == BACKGROUND => panel = Some(rect.rect),
+                    egui::Shape::Rect(rect) if rect.fill == theme::background() => {
+                        panel = Some(rect.rect)
+                    }
                     _ => {}
                 }
             }

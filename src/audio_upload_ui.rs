@@ -36,7 +36,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
     let modal = egui::Modal::new(egui::Id::new("audio-upload-dialog"))
         .frame(
             egui::Frame::popup(&ctx.global_style())
-                .fill(theme::SURFACE)
+                .fill(theme::surface())
                 .inner_margin(20)
                 .corner_radius(14),
         )
@@ -56,7 +56,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                     "MP3 up to 200 MB · to your VK music",
                 ))
                 .small()
-                .color(theme::MUTED),
+                .color(theme::muted()),
             );
             ui.add_space(4.0);
             if let Some(source) = view.source {
@@ -101,7 +101,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                     view.artist,
                 ),
             ] {
-                ui.label(RichText::new(label).small().color(theme::MUTED));
+                ui.label(RichText::new(label).small().color(theme::muted()));
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.add_sized(
                         egui::vec2(width, 38.0),
@@ -151,7 +151,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                         } else {
                             language.text("Загрузить в VK", "Upload to VK")
                         })
-                        .fill(theme::PRIMARY)
+                        .fill(theme::primary())
                         .corner_radius(8),
                     )
                 })

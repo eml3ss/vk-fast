@@ -348,7 +348,7 @@ impl MusicApp {
                     egui::Stroke::new(
                         1.0,
                         if response.hovered() || response.dragged() {
-                            theme::ACCENT
+                            theme::accent()
                         } else {
                             ui.visuals().widgets.noninteractive.bg_stroke.color
                         },
@@ -516,7 +516,7 @@ impl MusicApp {
                         "VK and Musixmatch support timing when available. Genius provides plain lyrics.",
                     ))
                     .small()
-                    .color(MUTED),
+                    .color(theme::muted()),
                 );
                 egui::ComboBox::from_id_salt("lyrics-source")
                     .selected_text(source.name())
@@ -590,7 +590,7 @@ impl MusicApp {
                     )
                 })
                 .small()
-                .color(MUTED),
+                .color(theme::muted()),
             );
             if ui
                 .add_enabled(
@@ -611,7 +611,7 @@ impl MusicApp {
                         "The token can be renewed again later.",
                     ))
                     .small()
-                    .color(MUTED),
+                    .color(theme::muted()),
                 );
             }
         }

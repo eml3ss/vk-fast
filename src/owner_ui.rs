@@ -102,7 +102,7 @@ pub fn show(
                     .add(
                         egui::Button::new(
                             RichText::new(language.text("Показать все", "Show all"))
-                                .color(theme::ACCENT),
+                                .color(theme::accent()),
                         )
                         .frame(false),
                     )
@@ -172,7 +172,7 @@ pub fn show(
 
 /// A list message, aligned with the section headings above it.
 fn message(ui: &mut egui::Ui, text: String) {
-    theme::inset_heading(ui, |ui| ui.label(RichText::new(text).color(theme::MUTED)));
+    theme::inset_heading(ui, |ui| ui.label(RichText::new(text).color(theme::muted())));
 }
 
 fn closed_message(closed: OwnerClosed, language: Language) -> String {
@@ -223,12 +223,12 @@ fn header(
         covers.show_rounded(&mut avatar, image, art_size, (art_size * 0.5) as u8);
     } else {
         ui.painter()
-            .circle_filled(art.center(), art_size * 0.5, theme::SURFACE);
+            .circle_filled(art.center(), art_size * 0.5, theme::surface());
         icons::paint(
             ui.painter(),
             art.shrink(art_size * 0.22),
             Icon::Account,
-            theme::MUTED,
+            theme::muted(),
         );
     }
     let text_rect = egui::Rect::from_min_max(
@@ -250,7 +250,7 @@ fn header(
             language.text("ПОЛЬЗОВАТЕЛЬ VK", "VK USER")
         })
         .small()
-        .color(theme::MUTED),
+        .color(theme::muted()),
     );
     text.add_space(12.0);
     let name = if creator.name.trim().is_empty() {
@@ -276,7 +276,7 @@ fn header(
                 language.text("Плейлисты", "Playlists")
             ))
             .small()
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
     }
 }
@@ -337,9 +337,9 @@ fn grid(
                 rect,
                 12,
                 if response.hovered() || response.has_focus() {
-                    theme::SELECTED
+                    theme::selected()
                 } else {
-                    theme::SURFACE
+                    theme::surface()
                 },
             );
             let art = egui::Rect::from_min_size(
@@ -384,7 +384,7 @@ fn grid(
                     22.0,
                     search_ui::playlist_caption(language, playlist),
                     FontId::proportional(12.0),
-                    theme::MUTED,
+                    theme::muted(),
                 ),
             ] {
                 let mut job = egui::text::LayoutJob::simple_singleline(label, font, color);

@@ -100,21 +100,21 @@ pub fn artist_links_with_font(
         if index != 0 {
             let separator = ui
                 .painter()
-                .layout_no_wrap(", ".into(), font.clone(), theme::MUTED);
+                .layout_no_wrap(", ".into(), font.clone(), theme::muted());
             if left + separator.size().x >= line.right() {
                 break;
             }
             ui.painter().galley(
                 egui::pos2(left, line.center().y - separator.size().y * 0.5),
                 separator.clone(),
-                theme::MUTED,
+                theme::muted(),
             );
             left += separator.size().x;
         }
         let mut job = egui::text::LayoutJob::simple_singleline(
             artist.name.clone(),
             font.clone(),
-            theme::MUTED,
+            theme::muted(),
         );
         job.wrap = egui::text::TextWrapping::truncate_at_width(line.right() - left);
         let galley = ui.painter().layout_job(job);
@@ -135,7 +135,7 @@ pub fn artist_links_with_font(
         let color = if response.hovered() || response.has_focus() {
             ui.visuals().text_color()
         } else {
-            theme::MUTED
+            theme::muted()
         };
         ui.painter()
             .with_clip_rect(ui.clip_rect().intersect(line))
@@ -215,7 +215,7 @@ pub fn artist_header(
                 view.language
                     .text("Популярные треки и релизы", "Popular tracks and releases"),
             )
-            .color(theme::MUTED),
+            .color(theme::muted()),
         )
         .truncate()
         .selectable(false),
@@ -270,7 +270,7 @@ pub fn playlist_description(ui: &mut egui::Ui, description: &str) {
             .layout(Layout::top_down(Align::Min)),
         |ui| {
             ui.add(
-                egui::Label::new(RichText::new(description).size(14.0).color(theme::MUTED))
+                egui::Label::new(RichText::new(description).size(14.0).color(theme::muted()))
                     .wrap()
                     .selectable(false),
             );
@@ -287,15 +287,15 @@ fn playlist_creator(
         return None;
     }
     let width = ui.available_width().max(0.0);
-    let chevron = ui
-        .painter()
-        .layout_no_wrap("›".into(), FontId::proportional(18.0), theme::MUTED);
+    let chevron =
+        ui.painter()
+            .layout_no_wrap("›".into(), FontId::proportional(18.0), theme::muted());
     let gap = 5.0;
     let name_width = (width - chevron.size().x - gap).max(0.0);
     let mut job = egui::text::LayoutJob::simple_singleline(
         creator.name.clone(),
         FontId::proportional(14.0),
-        theme::MUTED,
+        theme::muted(),
     );
     job.wrap = egui::text::TextWrapping::truncate_at_width(name_width);
     let name = ui.painter().layout_job(job);
@@ -304,7 +304,7 @@ fn playlist_creator(
     let color = if response.hovered() || response.has_focus() {
         ui.visuals().text_color()
     } else {
-        theme::MUTED
+        theme::muted()
     };
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
     painter.galley_with_override_text_color(
@@ -399,7 +399,7 @@ fn collection_header(
     };
     if !view.subtitle.is_empty() {
         text.add(
-            egui::Label::new(RichText::new(view.subtitle).small().color(theme::MUTED))
+            egui::Label::new(RichText::new(view.subtitle).small().color(theme::muted()))
                 .truncate()
                 .selectable(false),
         );
@@ -435,7 +435,7 @@ fn collection_header(
                     Sense::click(),
                 );
                 if response.hovered() || response.has_focus() {
-                    ui.painter().rect_filled(edit_rect, 8.0, theme::SELECTED);
+                    ui.painter().rect_filled(edit_rect, 8.0, theme::selected());
                 }
                 icons::paint(
                     ui.painter(),
@@ -444,7 +444,7 @@ fn collection_header(
                     if response.hovered() || response.has_focus() {
                         ui.visuals().text_color()
                     } else {
-                        theme::MUTED
+                        theme::muted()
                     },
                 );
                 response.widget_info(|| {
@@ -529,7 +529,7 @@ pub fn artist_releases(
                         "Could not load the full discography.",
                     ))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 );
                 if ui
                     .add_enabled(
@@ -566,7 +566,7 @@ pub fn artist_releases(
                         .language
                         .text("Синглов и EP пока нет", "No singles or EPs yet"),
                 })
-                .color(theme::MUTED),
+                .color(theme::muted()),
             )
         });
     }
@@ -627,7 +627,7 @@ pub fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> b
             language.text("Показать все", "Show all")
         };
         let response = ui.add(
-            egui::Label::new(RichText::new(label).color(theme::ACCENT))
+            egui::Label::new(RichText::new(label).color(theme::accent()))
                 .sense(Sense::click())
                 .selectable(false),
         );
@@ -704,16 +704,16 @@ fn related_card(
         rect,
         12.0,
         if hovered {
-            Color32::from_rgb(31, 38, 49)
+            theme::tone(Color32::from_rgb(31, 38, 49))
         } else {
-            theme::SURFACE
+            theme::surface()
         },
     );
     if response.has_focus() {
         ui.painter().rect_stroke(
             rect,
             12.0,
-            Stroke::new(1.0, theme::ACCENT),
+            Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
@@ -848,16 +848,16 @@ fn release_card(
     ui.push_id(("release", album.owner_id, album.id), |ui| {
         let response = ui.interact(rect, ui.id().with("card"), Sense::click());
         let fill = if response.hovered() || response.has_focus() {
-            Color32::from_rgb(31, 38, 49)
+            theme::tone(Color32::from_rgb(31, 38, 49))
         } else {
-            theme::SURFACE
+            theme::surface()
         };
         ui.painter().rect_filled(rect, 12.0, fill);
         if response.has_focus() {
             ui.painter().rect_stroke(
                 rect,
                 12.0,
-                Stroke::new(1.0, theme::ACCENT),
+                Stroke::new(1.0, theme::accent()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -901,7 +901,7 @@ fn release_card(
             egui::Label::new(
                 RichText::new(release.caption(language))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             )
             .truncate()
             .selectable(false),
@@ -990,7 +990,7 @@ fn kicker(ui: &mut egui::Ui, text: &str) {
         egui::Label::new(
             RichText::new(text)
                 .small()
-                .color(Color32::from_rgb(151, 181, 220)),
+                .color(theme::accent_tone(Color32::from_rgb(151, 181, 220))),
         )
         .selectable(false),
     );
@@ -998,16 +998,19 @@ fn kicker(ui: &mut egui::Ui, text: &str) {
 
 fn backdrop(color: Option<Color32>) -> (Color32, Color32) {
     let Some(color) = color else {
-        return (Color32::from_rgb(26, 49, 79), Color32::from_rgb(20, 29, 43));
+        return (
+            theme::accent_tone(Color32::from_rgb(26, 49, 79)),
+            theme::accent_tone(Color32::from_rgb(20, 29, 43)),
+        );
     };
     let tint = |weight: f32| {
         let channel = |base, accent| {
             (f32::from(base) * (1.0 - weight) + f32::from(accent) * weight).round() as u8
         };
         Color32::from_rgb(
-            channel(theme::BACKGROUND.r(), color.r()),
-            channel(theme::BACKGROUND.g(), color.g()),
-            channel(theme::BACKGROUND.b(), color.b()),
+            channel(theme::background().r(), color.r()),
+            channel(theme::background().g(), color.g()),
+            channel(theme::background().b(), color.b()),
         )
     };
     (tint(0.23), tint(0.07))
@@ -1026,7 +1029,7 @@ pub(crate) fn fade(painter: &egui::Painter, rect: egui::Rect, color: Option<Colo
 
 /// The shade's color at the left edge; it thins out to nothing at the right.
 pub(crate) fn fade_color(color: Option<Color32>) -> Color32 {
-    let tint = color.map_or(Color32::from_rgb(22, 36, 57), |color| {
+    let tint = color.map_or(theme::accent_tone(Color32::from_rgb(22, 36, 57)), |color| {
         backdrop(Some(color)).0
     });
     Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 245)
@@ -1053,9 +1056,9 @@ fn controls(
         let icon = if playing { Icon::Pause } else { Icon::Play };
         let play = ui
             .scope(|ui| {
-                ui.style_mut().visuals.widgets.inactive.bg_fill = theme::PRIMARY;
+                ui.style_mut().visuals.widgets.inactive.bg_fill = theme::primary();
                 ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-                ui.style_mut().visuals.widgets.hovered.bg_fill = theme::ACCENT;
+                ui.style_mut().visuals.widgets.hovered.bg_fill = theme::accent();
                 ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
                 icons::button(ui, icon, label, track_count > 0)
             })
@@ -1147,7 +1150,7 @@ fn controls(
                             Icon::Heart
                         },
                         if follow.saved {
-                            theme::ACCENT
+                            theme::accent()
                         } else {
                             visual.fg_stroke.color
                         },
@@ -1319,7 +1322,7 @@ mod tests {
                 "Description escaped the right gutter at {width}: {bounds:?}"
             );
             assert_eq!(text.galley.job.sections[0].format.font_id.size, 14.0);
-            assert_eq!(text.galley.job.sections[0].format.color, theme::MUTED);
+            assert_eq!(text.galley.job.sections[0].format.color, theme::muted());
             assert!(output.viewport_output.values().all(|viewport| {
                 viewport
                     .commands
@@ -1426,7 +1429,7 @@ mod tests {
                         _ => None,
                     })
                     .unwrap();
-                assert_eq!(creator_color, theme::MUTED);
+                assert_eq!(creator_color, theme::muted());
                 for (tick, target) in [(4, name.center()), (8, arrow.center())] {
                     render(tick, pointer(target, true));
                     let (_, action) = render(tick + 1, pointer(target, false));
@@ -1630,7 +1633,7 @@ mod tests {
             };
             assert!(contains(language.text("ПЛЕЙЛИСТ", "PLAYLIST")));
             assert!(!contains(language.text("АЛЬБОМ", "ALBUM")));
-            assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Rect(rect) if rect.fill==theme::PRIMARY && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
+            assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Rect(rect) if rect.fill==theme::primary() && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
         }
     }
 
@@ -1662,7 +1665,7 @@ mod tests {
                 let hovered = render(vec![egui::Event::PointerMoved(point)]);
                 let edit_rect = hovered.shapes.iter().find_map(|shape| match &shape.shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == theme::SELECTED
+                        if rect.fill == theme::selected()
                             && rect.rect.size() == egui::vec2(30.0, 30.0)
                             && rect.rect.contains(point) =>
                     {
@@ -1783,7 +1786,7 @@ mod tests {
                     "Header must stay dark enough for its text"
                 );
                 assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
-                    egui::Shape::Rect(rect) if rect.fill==theme::PRIMARY && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
+                    egui::Shape::Rect(rect) if rect.fill==theme::primary() && rect.rect.height()>30.0 && rect.rect.height()<45.0 && rect.rect.width()>70.0)));
             }
         }
     }
@@ -2237,7 +2240,9 @@ mod tests {
         };
         let blue = |output: &egui::FullOutput| {
             output.shapes.iter().find_map(|shape| match &shape.shape {
-                egui::Shape::Circle(circle) if circle.fill == theme::ACCENT => Some(circle.center),
+                egui::Shape::Circle(circle) if circle.fill == theme::accent() => {
+                    Some(circle.center)
+                }
                 _ => None,
             })
         };
@@ -2273,7 +2278,7 @@ mod tests {
             .iter()
             .filter_map(|shape| match &shape.shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == theme::SURFACE && rect.rect.bottom() <= link.top() =>
+                    if rect.fill == theme::surface() && rect.rect.bottom() <= link.top() =>
                 {
                     Some(rect.rect.bottom())
                 }

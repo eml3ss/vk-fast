@@ -186,7 +186,7 @@ pub fn show(ctx: &egui::Context, covers: &mut CoverCache, mut view: View<'_>) ->
                             ui.add_sized(
                                 egui::vec2(104.0, 34.0),
                                 egui::Button::new(language.text("Сохранить", "Save"))
-                                    .fill(theme::PRIMARY)
+                                    .fill(theme::primary())
                                     .corner_radius(8),
                             )
                         },
@@ -230,7 +230,7 @@ pub fn show_delete(ctx: &egui::Context, view: DeleteView<'_>) -> Option<DeleteAc
             ui.label(RichText::new(if view.remove_saved { language.text("Убрать плейлист?", "Remove playlist?") } else { language.text("Удалить плейлист?", "Delete playlist?") }).size(22.0).family(theme::semibold()));
             ui.add(egui::Label::new(RichText::new(view.title).family(theme::semibold())).wrap().selectable(false));
             if view.remove_saved {
-                ui.add(egui::Label::new(RichText::new(language.text("Плейлист исчезнет из вашей коллекции. Оригинал останется у автора.", "The playlist will be removed from your collection. Its creator keeps the original.")).color(theme::MUTED)).wrap().selectable(false));
+                ui.add(egui::Label::new(RichText::new(language.text("Плейлист исчезнет из вашей коллекции. Оригинал останется у автора.", "The playlist will be removed from your collection. Its creator keeps the original.")).color(theme::muted())).wrap().selectable(false));
             }
             if let Some(error) = view.error { error_label(ui, error); }
             if view.loading { status(ui, language.text("Загружаем плейлист…", "Loading playlist…")); }
@@ -238,7 +238,7 @@ pub fn show_delete(ctx: &egui::Context, view: DeleteView<'_>) -> Option<DeleteAc
             ui.add_space(4.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add_enabled_ui(!view.removing && !view.loading && view.can_delete, |ui| {
-                    ui.add_sized(egui::vec2(104.0, 34.0), egui::Button::new(if view.remove_saved { language.text("Убрать", "Remove") } else { language.text("Удалить", "Delete") }).fill(theme::PRIMARY).corner_radius(8))
+                    ui.add_sized(egui::vec2(104.0, 34.0), egui::Button::new(if view.remove_saved { language.text("Убрать", "Remove") } else { language.text("Удалить", "Delete") }).fill(theme::primary()).corner_radius(8))
                 }).inner.clicked() { action = Some(DeleteAction::Confirm); }
                 if ui.add_enabled_ui(!view.removing, |ui| {
                     ui.add_sized(egui::vec2(96.0, 34.0), egui::Button::new(language.text("Отмена", "Cancel")).corner_radius(8))
@@ -253,14 +253,17 @@ pub fn show_delete(ctx: &egui::Context, view: DeleteView<'_>) -> Option<DeleteAc
 
 fn frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::popup(&ctx.global_style())
-        .fill(theme::SURFACE)
+        .fill(theme::surface())
         .inner_margin(20)
         .corner_radius(14)
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 51, 62)))
+        .stroke(egui::Stroke::new(
+            1.0,
+            theme::tone(Color32::from_rgb(44, 51, 62)),
+        ))
 }
 
 fn label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).small().color(theme::MUTED));
+    ui.label(RichText::new(text).small().color(theme::muted()));
 }
 fn error_label(ui: &mut egui::Ui, error: &str) {
     ui.add(

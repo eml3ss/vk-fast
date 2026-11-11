@@ -399,7 +399,7 @@ impl Lane {
                 egui::pos2(self.left + 6.0, target - gap - 1.0),
                 egui::vec2((self.width - 12.0).max(0.0), 2.0),
             );
-            ui.painter().rect_filled(marker, 1.0, theme::ACCENT);
+            ui.painter().rect_filled(marker, 1.0, theme::accent());
             let rect = egui::Rect::from_min_size(
                 egui::pos2(self.left, self.ghost_top(drag)),
                 egui::vec2(self.width, self.height),
@@ -415,7 +415,7 @@ impl Lane {
                 Color32::from_black_alpha(90),
             );
             ui.painter()
-                .rect_filled(rect, 8.0, Color32::from_rgb(31, 38, 49));
+                .rect_filled(rect, 8.0, theme::tone(Color32::from_rgb(31, 38, 49)));
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             let clip = self.clip;
             let edge = 32.0_f32.min(clip.height() * 0.25);

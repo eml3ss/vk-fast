@@ -176,7 +176,11 @@ fn control(
     if ui.is_rect_visible(rect) {
         let opacity = if ui.is_enabled() { 1.0 } else { 0.4 };
         let painter = ui.painter();
-        painter.rect_filled(track, TRACK_HEIGHT * 0.5, REMAINING.gamma_multiply(opacity));
+        painter.rect_filled(
+            track,
+            TRACK_HEIGHT * 0.5,
+            theme::tone(REMAINING).gamma_multiply(opacity),
+        );
         if fraction > 0.0 {
             let end = track.left() + track.width() * fraction;
             let cap_width = TRACK_HEIGHT.min(track.width());
@@ -197,7 +201,7 @@ fn control(
             played_painter.rect_filled(
                 prefix,
                 TRACK_HEIGHT * 0.5,
-                theme::ACCENT.gamma_multiply(opacity),
+                theme::accent().gamma_multiply(opacity),
             );
         }
         let show_knob = ui.is_enabled()
@@ -500,21 +504,21 @@ mod tests {
         let center = response.rect.center();
         assert_eq!(
             color_at(&primitives, center - egui::vec2(1.0, 0.0)),
-            theme::ACCENT
+            theme::accent()
         );
         for offset in [-2.0, 2.0] {
             // The rounded blue cap leaves the solid remaining color visible
             // beside its upper/lower tip, rather than a transparent notch.
             let corner = color_at(&primitives, center + egui::vec2(-0.1, offset));
-            assert_ne!(corner, theme::ACCENT);
+            assert_ne!(corner, theme::accent());
             assert_eq!(
                 corner.a(),
                 255,
                 "The remaining layer must fill the rounded tip"
             );
-            assert!((REMAINING.r()..=theme::ACCENT.r()).contains(&corner.r()));
-            assert!((REMAINING.g()..=theme::ACCENT.g()).contains(&corner.g()));
-            assert!((REMAINING.b()..=theme::ACCENT.b()).contains(&corner.b()));
+            assert!((REMAINING.r()..=theme::accent().r()).contains(&corner.r()));
+            assert!((REMAINING.g()..=theme::accent().g()).contains(&corner.g()));
+            assert!((REMAINING.b()..=theme::accent().b()).contains(&corner.b()));
         }
         for offset in [-1.0, 0.0, 1.0] {
             assert_eq!(

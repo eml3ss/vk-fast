@@ -315,7 +315,7 @@ fn navigation_and_queue_panels_resize_by_dragging_their_edges_and_stay_open() {
         .into_iter()
         .find_map(|shape| match shape {
             egui::Shape::Rect(rect)
-                if rect.fill == BACKGROUND
+                if rect.fill == theme::background()
                     && rect.rect.top() == 0.0
                     && rect.rect.width() > 300.0 =>
             {
@@ -337,7 +337,7 @@ fn navigation_and_queue_panels_resize_by_dragging_their_edges_and_stay_open() {
         .into_iter()
         .find_map(|shape| match shape {
             egui::Shape::Rect(rect)
-                if rect.fill == BACKGROUND
+                if rect.fill == theme::background()
                     && rect.rect.top() == 0.0
                     && rect.rect.width() > 300.0 =>
             {

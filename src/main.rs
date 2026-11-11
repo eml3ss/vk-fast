@@ -38,6 +38,7 @@ mod mix_settings_ui;
 mod model;
 mod music_session_store;
 mod owner_ui;
+mod palette;
 mod play_order;
 mod playback;
 mod playback_modes;
@@ -326,6 +327,8 @@ fn main() -> eframe::Result {
             if args.iter().any(|arg| arg == "--settings") {
                 app.open_settings(&cc.egui_ctx);
             }
+            #[cfg(feature = "screenshot")]
+            app.screenshot_scene(&cc.egui_ctx, &args);
             #[cfg(feature = "screenshot")]
             let app = app.with_screenshot(screenshot_path.clone());
             #[cfg(windows)]

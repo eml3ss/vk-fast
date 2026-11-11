@@ -148,19 +148,19 @@ fn arrow(ui: &egui::Ui, rect: egui::Rect, next: bool, hovered: bool) {
     let painter = ui.painter();
     let center = rect.center();
     let fill = if hovered {
-        Color32::from_rgb(52, 60, 74)
+        crate::theme::tone(Color32::from_rgb(52, 60, 74))
     } else {
-        Color32::from_rgba_unmultiplied(36, 42, 52, 238)
+        crate::theme::tone(Color32::from_rgba_unmultiplied(36, 42, 52, 238))
     };
     painter.circle_filled(center, 13.0, fill);
     painter.circle_stroke(
         center,
         13.0,
-        Stroke::new(1.0, Color32::from_rgb(64, 73, 88)),
+        Stroke::new(1.0, crate::theme::tone(Color32::from_rgb(64, 73, 88))),
     );
     let direction = if next { 1.0 } else { -1.0 };
     let tip = center + egui::vec2(2.5 * direction, 0.0);
-    let stroke = Stroke::new(1.8, Color32::from_rgb(226, 232, 240));
+    let stroke = Stroke::new(1.8, crate::theme::tone(Color32::from_rgb(226, 232, 240)));
     painter.line_segment([tip + egui::vec2(-4.5 * direction, -5.0), tip], stroke);
     painter.line_segment([tip, tip + egui::vec2(-4.5 * direction, 5.0)], stroke);
 }

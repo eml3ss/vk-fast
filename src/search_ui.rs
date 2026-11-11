@@ -28,7 +28,7 @@ pub fn preferred_input_width(ui: &egui::Ui) -> f32 {
     let hint = ui.painter().layout_no_wrap(
         input_hint(Language::Russian).into(),
         egui::FontSelection::Default.resolve(ui.style()),
-        theme::MUTED,
+        theme::muted(),
     );
     (hint.size().x + f32::from(INPUT_PADDING_X) * 2.0 + INPUT_ICON_SIZE + INPUT_ICON_GAP) * 1.5
 }
@@ -57,7 +57,7 @@ pub struct SearchInput {
 pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> SearchInput {
     let mut state = SearchInput::default();
     egui::Frame::new()
-        .fill(theme::SURFACE)
+        .fill(theme::surface())
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(INPUT_PADDING_X, 7))
         .show(ui, |ui| {
@@ -65,7 +65,7 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Searc
             ui.spacing_mut().interact_size.y = 24.0;
             ui.spacing_mut().item_spacing.x = INPUT_ICON_GAP;
             ui.horizontal(|ui| {
-                icons::show(ui, Icon::Search, theme::MUTED, INPUT_ICON_SIZE);
+                icons::show(ui, Icon::Search, theme::muted(), INPUT_ICON_SIZE);
                 let show_clear = !query.is_empty();
                 let width = (ui.available_width() - if show_clear { 32.0 } else { 0.0 }).max(0.0);
                 let edit = ui.add(
@@ -86,7 +86,7 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Searc
                     let color = if clear.hovered() {
                         ui.visuals().text_color()
                     } else {
-                        theme::MUTED
+                        theme::muted()
                     };
                     icons::paint(ui.painter(), rect.shrink(2.0), Icon::Close, color);
                     clear.widget_info(|| {
@@ -166,7 +166,7 @@ pub fn queries(
                             "Press Enter to search for music.",
                         )
                     })
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 )
                 .wrap()
                 .selectable(false),
@@ -210,9 +210,9 @@ fn query_item(ui: &mut egui::Ui, query: &str, width: f32, selected: bool) -> Res
         response.request_focus();
     }
     let fill = if selected || response.hovered() || response.has_focus() {
-        theme::SELECTED
+        theme::selected()
     } else {
-        theme::SURFACE
+        theme::surface()
     };
     ui.painter().rect_filled(rect, 8.0, fill);
     icons::paint(
@@ -222,7 +222,7 @@ fn query_item(ui: &mut egui::Ui, query: &str, width: f32, selected: bool) -> Res
             egui::vec2(15.0, 15.0),
         ),
         Icon::Search,
-        theme::MUTED,
+        theme::muted(),
     );
     let text = egui::Rect::from_min_max(
         rect.min + egui::vec2(34.0, 0.0),
@@ -286,7 +286,7 @@ pub fn results_metadata_sections(
                             egui::vec2(44.0, 44.0),
                         );
                         ui.painter()
-                            .circle_filled(art.center(), 22.0, theme::SELECTED);
+                            .circle_filled(art.center(), 22.0, theme::selected());
                         if let Some(url) = artist_images.get(&artist.id) {
                             let mut image = ui.new_child(
                                 egui::UiBuilder::new()
@@ -308,7 +308,7 @@ pub fn results_metadata_sections(
                                 egui::Align2::CENTER_CENTER,
                                 initials,
                                 egui::FontId::new(16.0, theme::semibold()),
-                                theme::MUTED,
+                                theme::muted(),
                             );
                         }
                         caption(
@@ -478,9 +478,9 @@ fn card(ui: &mut egui::Ui, width: f32, label: &str) -> (egui::Rect, Response) {
         rect,
         10.0,
         if response.hovered() || response.has_focus() {
-            Color32::from_rgb(31, 38, 49)
+            theme::tone(Color32::from_rgb(31, 38, 49))
         } else {
-            theme::SURFACE
+            theme::surface()
         },
     );
     response.widget_info(|| {
@@ -512,7 +512,7 @@ fn caption(ui: &egui::Ui, rect: egui::Rect, title: &str, subtitle: &str) {
         ),
         subtitle,
         egui::TextStyle::Small.resolve(ui.style()),
-        theme::MUTED,
+        theme::muted(),
     );
 }
 
@@ -617,7 +617,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == theme::SURFACE && rect.rect.width() > 100.0 =>
+                            if rect.fill == theme::surface() && rect.rect.width() > 100.0 =>
                         {
                             Some(rect.rect)
                         }
@@ -794,7 +794,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match &shape.shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == theme::SURFACE && rect.rect.height() == 64.0 =>
+                        if rect.fill == theme::surface() && rect.rect.height() == 64.0 =>
                     {
                         Some(rect.rect)
                     }
@@ -861,7 +861,7 @@ mod tests {
                     .iter()
                     .filter(|shape| {
                         matches!(&shape.shape,egui::Shape::Rect(rect)
-                    if rect.fill==theme::SURFACE && rect.rect.height()==64.0)
+                    if rect.fill==theme::surface() && rect.rect.height()==64.0)
                     })
                     .count();
                 assert_eq!(cards, if overview { 6 } else { 10 });
@@ -1020,7 +1020,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == theme::SURFACE && rect.rect.height() == 64.0 =>
+                            if rect.fill == theme::surface() && rect.rect.height() == 64.0 =>
                         {
                             Some(rect.rect)
                         }

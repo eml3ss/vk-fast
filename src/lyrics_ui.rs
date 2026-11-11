@@ -290,7 +290,7 @@ pub fn show(
                 ),
                 reason,
                 FontId::proportional(14.0),
-                theme::MUTED,
+                theme::muted(),
             );
         }
         content.min.x = artwork.right() + gap;
@@ -381,7 +381,7 @@ pub fn show(
                 let response = ui.put(
                     follow,
                     egui::Button::new(t("К текущей строке", "Follow current line"))
-                        .fill(theme::PRIMARY)
+                        .fill(theme::primary())
                         .corner_radius(8),
                 );
                 if response.clicked() {
@@ -396,7 +396,7 @@ pub fn show(
         let center = content.center();
         ui.put(
             Rect::from_center_size(center - egui::vec2(0.0, 22.0), egui::vec2(24.0, 24.0)),
-            egui::Spinner::new().color(theme::ACCENT),
+            egui::Spinner::new().color(theme::accent()),
         );
         ui.put(
             Rect::from_center_size(
@@ -408,7 +408,7 @@ pub fn show(
                 t("Загружаем текст…", "Loading lyrics…"),
                 content.width(),
                 Align::Center,
-                theme::MUTED,
+                theme::muted(),
             ),
         );
     } else if let Some(error) = view.error {
@@ -423,7 +423,7 @@ pub fn show(
                 error.message(view.language),
                 content.width(),
                 Align::Center,
-                theme::MUTED,
+                theme::muted(),
             ),
         );
         if !matches!(error, Error::Auth | Error::Storage)
@@ -435,7 +435,7 @@ pub fn show(
                             egui::vec2(content.width().min(220.0), 36.0),
                         ),
                         egui::Button::new(t("Повторить", "Retry"))
-                            .fill(theme::PRIMARY)
+                            .fill(theme::primary())
                             .corner_radius(8),
                     )
                 })
@@ -472,7 +472,7 @@ pub fn show(
 fn centered(ui: &mut egui::Ui, rect: Rect, text: &str) {
     ui.put(
         Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 72.0)),
-        theme::wrapped_body(ui, text, rect.width(), Align::Center, theme::MUTED),
+        theme::wrapped_body(ui, text, rect.width(), Align::Center, theme::muted()),
     );
 }
 
@@ -715,7 +715,7 @@ fn lines(
                     } else {
                         Color32::from_gray(124)
                     };
-                    let color = resting.lerp_to_gamma(theme::ACCENT, current);
+                    let color = resting.lerp_to_gamma(theme::accent(), current);
                     let scale = 1.0 + (ACTIVE_SCALE - 1.0) * current;
                     if row.gap {
                         let animated = data.synced && active == Some(index);
@@ -778,7 +778,7 @@ fn lines(
 }
 
 fn background(painter: &egui::Painter, rect: Rect, color: Option<Color32>) {
-    let tint = color.unwrap_or(Color32::from_rgb(61, 91, 132));
+    let tint = color.unwrap_or_else(|| theme::accent_tone(Color32::from_rgb(61, 91, 132)));
     let mix = |base: Color32, ratio: f32| {
         Color32::from_rgb(
             (f32::from(base.r()) * (1.0 - ratio) + f32::from(tint.r()) * ratio) as u8,
@@ -789,9 +789,9 @@ fn background(painter: &egui::Painter, rect: Rect, color: Option<Color32>) {
     let mut mesh = egui::Mesh::default();
     for (pos, color) in [
         (rect.left_top(), mix(Color32::from_rgb(43, 49, 61), 0.22)),
-        (rect.right_top(), mix(theme::BACKGROUND, 0.24)),
-        (rect.right_bottom(), mix(theme::BACKGROUND, 0.07)),
-        (rect.left_bottom(), mix(theme::BACKGROUND, 0.18)),
+        (rect.right_top(), mix(theme::background(), 0.24)),
+        (rect.right_bottom(), mix(theme::background(), 0.07)),
+        (rect.left_bottom(), mix(theme::background(), 0.18)),
     ] {
         mesh.colored_vertex(pos, color);
     }
@@ -934,8 +934,8 @@ mod tests {
         };
         let (_, current_rect, current_color, _) = find("Synthetic lyric line 3");
         let (_, other_rect, other_color, _) = find("Synthetic lyric line 5");
-        assert_eq!(current_color, theme::ACCENT);
-        assert_ne!(other_color, theme::ACCENT);
+        assert_eq!(current_color, theme::accent());
+        assert_ne!(other_color, theme::accent());
         let grown = current_rect.width() / other_rect.width();
         assert!((grown - ACTIVE_SCALE).abs() < 0.01, "{grown}");
         assert!(
@@ -1530,7 +1530,7 @@ mod tests {
             assert_eq!(
                 colors[0],
                 if synced {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
                     Color32::from_rgb(238, 241, 247)
                 }

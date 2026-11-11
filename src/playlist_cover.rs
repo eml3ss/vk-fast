@@ -8,12 +8,15 @@ use std::{
 use eframe::egui;
 use image::{ImageFormat, ImageReader, Limits, imageops::FilterType};
 
-use crate::{i18n::Language, theme};
+use crate::i18n::Language;
 
 const MAX_INPUT: u64 = 20 * 1024 * 1024;
 const MAX_DECODE: u64 = 64 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 8192;
 const EDGE: u32 = 512;
+/// What shows through transparent parts of an uploaded cover: the colour of
+/// the original dark cards.
+const UPLOAD_BACKDROP: egui::Color32 = egui::Color32::from_rgb(23, 27, 33);
 
 pub struct ChosenCover {
     pub jpeg: Vec<u8>,
@@ -103,7 +106,8 @@ fn from_bytes(bytes: &[u8]) -> Result<ChosenCover, CoverError> {
         edge,
     );
     let resized = image::imageops::resize(&*square, EDGE, EDGE, FilterType::Lanczos3);
-    let background = theme::SURFACE.to_array();
+    // A fixed backdrop, whatever the theme: the cover is uploaded to VK.
+    let background = UPLOAD_BACKDROP.to_array();
     let mut rgb = Vec::with_capacity((EDGE * EDGE * 3) as usize);
     for pixel in resized.pixels() {
         let alpha = u32::from(pixel[3]);
@@ -173,7 +177,7 @@ mod tests {
                 .image
                 .pixels
                 .iter()
-                .all(|pixel| *pixel == theme::SURFACE)
+                .all(|pixel| *pixel == UPLOAD_BACKDROP)
         );
         let thin = from_bytes(&png(image::RgbaImage::from_pixel(
             8192,

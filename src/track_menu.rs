@@ -127,7 +127,7 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                     ui.add(egui::Spinner::new().size(14.0));
                     ui.label(
                         RichText::new(language.text("Загружаем плейлисты…", "Loading playlists…"))
-                            .color(theme::MUTED),
+                            .color(theme::muted()),
                     );
                 });
             } else if view.playlists.is_empty() {
@@ -145,7 +145,7 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                         ),
                         (ui.available_width() - 4.0).max(1.0),
                         egui::Align::Min,
-                        theme::MUTED,
+                        theme::muted(),
                     ));
                 });
             } else {
@@ -372,12 +372,12 @@ fn plain_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), Sense::click());
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+            ui.painter().rect_filled(rect, 6.0, theme::selected());
         }
         let color = if ui.is_enabled() {
             ui.visuals().text_color()
         } else {
-            theme::MUTED
+            theme::muted()
         };
         let galley = ui.painter().layout(
             label.into(),
@@ -411,12 +411,12 @@ fn row(
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), Sense::click());
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 6.0, theme::SELECTED);
+            ui.painter().rect_filled(rect, 6.0, theme::selected());
         }
         let color = if ui.is_enabled() {
             ui.visuals().text_color()
         } else {
-            theme::MUTED
+            theme::muted()
         };
         // The playlist glyph's bars sit at its left edge; 1 px aligns it
         // optically with the other menu icons.
@@ -433,11 +433,11 @@ fn row(
             ui.put(icon_rect, egui::Spinner::new().size(14.0));
         } else {
             let glyph_color = if matches!(icon, Icon::HeartFilled | Icon::DislikeFilled) {
-                theme::ACCENT
+                theme::accent()
             } else if response.hovered() || response.has_focus() {
                 color
             } else {
-                theme::MUTED
+                theme::muted()
             };
             icons::paint(ui.painter(), icon_rect, icon, glyph_color);
         }

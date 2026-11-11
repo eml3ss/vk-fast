@@ -72,14 +72,14 @@ fn button(
             rect,
             egui::Button::new(RichText::new(text).size(14.0).family(theme::semibold()))
                 .fill(if primary {
-                    theme::PRIMARY
+                    theme::primary()
                 } else {
-                    Color32::from_rgb(31, 38, 48)
+                    theme::tone(Color32::from_rgb(31, 38, 48))
                 })
                 .stroke(if primary {
                     Stroke::NONE
                 } else {
-                    Stroke::new(1.0, BORDER)
+                    Stroke::new(1.0, theme::tone(BORDER))
                 })
                 .corner_radius(10),
         )
@@ -93,7 +93,7 @@ fn cancel_button(ui: &mut egui::Ui, rect: Rect, language: Language) -> egui::Res
         egui::Button::new(
             RichText::new(language.text("Отмена", "Cancel"))
                 .size(14.0)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         )
         .frame(false)
         .corner_radius(10),
@@ -102,13 +102,13 @@ fn cancel_button(ui: &mut egui::Ui, rect: Rect, language: Language) -> egui::Res
 
 fn step(ui: &mut egui::Ui, rect: Rect, number: &str, title: &str, detail: &str) {
     let badge = Rect::from_min_size(rect.min, Vec2::splat(26.0));
-    ui.painter().rect_filled(badge, 9, theme::SELECTED);
+    ui.painter().rect_filled(badge, 9, theme::selected());
     ui.painter().text(
         badge.center(),
         Align2::CENTER_CENTER,
         number,
         FontId::new(13.0, theme::semibold()),
-        SOFT_BLUE,
+        theme::accent_tone(SOFT_BLUE),
     );
     let left = rect.left() + 38.0;
     label(
@@ -127,7 +127,7 @@ fn step(ui: &mut egui::Ui, rect: Rect, number: &str, title: &str, detail: &str) 
         Rect::from_min_max(egui::pos2(left, rect.top() + 29.0), rect.max),
         detail,
         13.0,
-        theme::MUTED,
+        theme::muted(),
         false,
     );
 }
@@ -135,17 +135,17 @@ fn step(ui: &mut egui::Ui, rect: Rect, number: &str, title: &str, detail: &str) 
 fn phone(ui: &egui::Ui, center: egui::Pos2) {
     let body = Rect::from_center_size(center, egui::vec2(26.0, 42.0));
     ui.painter()
-        .rect_filled(body.expand2(egui::vec2(17.0, 9.0)), 18, theme::SELECTED);
+        .rect_filled(body.expand2(egui::vec2(17.0, 9.0)), 18, theme::selected());
     ui.painter().rect_stroke(
         body,
         6,
-        Stroke::new(2.0, SOFT_BLUE),
+        Stroke::new(2.0, theme::accent_tone(SOFT_BLUE)),
         egui::StrokeKind::Inside,
     );
     ui.painter().rect_filled(
         Rect::from_center_size(center + egui::vec2(0.0, 14.0), egui::vec2(8.0, 2.0)),
         1,
-        SOFT_BLUE,
+        theme::accent_tone(SOFT_BLUE),
     );
 }
 
@@ -159,8 +159,8 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
     let modal = egui::Modal::new(egui::Id::new("vk-fast-qr-login"))
         .frame(
             egui::Frame::popup(&ctx.global_style())
-                .fill(theme::SURFACE)
-                .stroke(Stroke::new(1.0, BORDER))
+                .fill(theme::surface())
+                .stroke(Stroke::new(1.0, theme::tone(BORDER)))
                 .corner_radius(20)
                 .inner_margin(24),
         )
@@ -183,7 +183,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                 Vec2::splat(28.0),
             );
             let response = ui.put(close, egui::Button::new("").frame(false).corner_radius(8));
-            icons::paint(ui.painter(), close.shrink(7.0), Icon::Close, theme::MUTED);
+            icons::paint(ui.painter(), close.shrink(7.0), Icon::Close, theme::muted());
             if response.on_hover_text(t("Закрыть", "Close")).clicked() {
                 action = Some(Action::Cancel);
             }
@@ -210,9 +210,9 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     pill,
                     9,
                     if active {
-                        theme::SELECTED
+                        theme::selected()
                     } else {
-                        theme::SURFACE
+                        theme::surface()
                     },
                 );
                 ui.painter().text(
@@ -220,7 +220,11 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     Align2::CENTER_CENTER,
                     title,
                     FontId::proportional(12.0),
-                    if active { SOFT_BLUE } else { theme::MUTED },
+                    if active {
+                        theme::accent_tone(SOFT_BLUE)
+                    } else {
+                        theme::muted()
+                    },
                 );
             }
             let body = Rect::from_min_max(canvas.min + egui::vec2(0.0, 96.0), canvas.max);
@@ -253,7 +257,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                         "Approve sign-in on your phone. If VK shows a code, enter it here.",
                     ),
                     13.0,
-                    theme::MUTED,
+                    theme::muted(),
                     true,
                 );
                 let controls = 216.0;
@@ -273,7 +277,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                         .char_limit(16)
                         .frame(
                             egui::Frame::new()
-                                .fill(theme::BACKGROUND)
+                                .fill(theme::background())
                                 .inner_margin(8)
                                 .corner_radius(10)
                                 .stroke(Stroke::new(
@@ -281,7 +285,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                                     if view.error.is_some() {
                                         Color32::from_rgb(170, 91, 92)
                                     } else {
-                                        BORDER
+                                        theme::tone(BORDER)
                                     },
                                 )),
                         ),
@@ -354,7 +358,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
             } else if finishing {
                 let center = body.center();
                 ui.painter()
-                    .circle_filled(center - egui::vec2(0.0, 55.0), 34.0, theme::SELECTED);
+                    .circle_filled(center - egui::vec2(0.0, 55.0), 34.0, theme::selected());
                 let check = center - egui::vec2(0.0, 55.0);
                 let points = [
                     check + egui::vec2(-12.0, 0.0),
@@ -362,11 +366,14 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     check + egui::vec2(13.0, -9.0),
                 ];
                 for edge in points.windows(2) {
-                    ui.painter()
-                        .line_segment([edge[0], edge[1]], Stroke::new(3.0, SOFT_BLUE));
+                    ui.painter().line_segment(
+                        [edge[0], edge[1]],
+                        Stroke::new(3.0, theme::accent_tone(SOFT_BLUE)),
+                    );
                 }
                 for point in points {
-                    ui.painter().circle_filled(point, 1.5, SOFT_BLUE);
+                    ui.painter()
+                        .circle_filled(point, 1.5, theme::accent_tone(SOFT_BLUE));
                 }
                 label(
                     ui,
@@ -381,12 +388,14 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     Rect::from_center_size(center + egui::vec2(0.0, 34.0), egui::vec2(width, 24.0)),
                     t("Подключаем вашу музыку…", "Connecting your music…"),
                     14.0,
-                    theme::MUTED,
+                    theme::muted(),
                     true,
                 );
                 ui.put(
                     Rect::from_center_size(center + egui::vec2(0.0, 72.0), Vec2::splat(18.0)),
-                    egui::Spinner::new().size(18.0).color(SOFT_BLUE),
+                    egui::Spinner::new()
+                        .size(18.0)
+                        .color(theme::accent_tone(SOFT_BLUE)),
                 );
                 let cancel = cancel_button(
                     ui,
@@ -415,7 +424,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                     if usable && view.texture.is_some() {
                         Color32::WHITE
                     } else {
-                        theme::BACKGROUND
+                        theme::background()
                     },
                 );
                 if let Some(texture) = view.texture.filter(|_| usable) {
@@ -425,14 +434,16 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                 } else if view.pending && view.error.is_none() && !expired {
                     ui.put(
                         Rect::from_center_size(qr_rect.center(), Vec2::splat(28.0)),
-                        egui::Spinner::new().size(28.0).color(SOFT_BLUE),
+                        egui::Spinner::new()
+                            .size(28.0)
+                            .color(theme::accent_tone(SOFT_BLUE)),
                     );
                 } else {
                     icons::paint(
                         ui.painter(),
                         Rect::from_center_size(qr_rect.center(), Vec2::splat(42.0)),
                         Icon::Refresh,
-                        theme::MUTED,
+                        theme::muted(),
                     );
                 }
                 let timer = Rect::from_center_size(
@@ -453,7 +464,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                 } else {
                     t("Создаём QR-код…", "Creating QR code…").into()
                 };
-                label(ui, timer, &status, 12.0, theme::MUTED, true);
+                label(ui, timer, &status, 12.0, theme::muted(), true);
                 let right = Rect::from_min_max(
                     egui::pos2(qr_rect.right() + gap, top),
                     egui::pos2(canvas.right(), top + cluster_height),
@@ -506,7 +517,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Output {
                             "Refresh the code and scan it again.",
                         )),
                         14.0,
-                        theme::MUTED,
+                        theme::muted(),
                         false,
                     );
                 }

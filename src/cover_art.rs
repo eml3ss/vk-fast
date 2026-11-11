@@ -344,12 +344,12 @@ impl CoverCache {
                 }
             }
         }
-        ui.painter().rect_filled(rect, radius, theme::SELECTED);
+        ui.painter().rect_filled(rect, radius, theme::selected());
         icons::paint(
             ui.painter(),
             rect.shrink(size * 0.27),
             Icon::Headphones,
-            theme::MUTED,
+            theme::muted(),
         );
         response
     }
@@ -525,7 +525,7 @@ pub(crate) fn avatar_button(
 
     let visuals = ui.style().interact(&response);
     let fill = if response.is_pointer_button_down_on() {
-        theme::SELECTED
+        theme::selected()
     } else {
         visuals.bg_fill
     };
@@ -557,9 +557,9 @@ pub(crate) fn avatar_button(
         }
     }
     let stroke = if response.has_focus() {
-        egui::Stroke::new(2.0, theme::ACCENT)
+        egui::Stroke::new(2.0, theme::accent())
     } else if response.hovered() {
-        egui::Stroke::new(1.5, theme::ACCENT)
+        egui::Stroke::new(1.5, theme::accent())
     } else {
         visuals.bg_stroke
     };

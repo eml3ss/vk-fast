@@ -34,10 +34,10 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
     let modal = egui::Modal::new(egui::Id::new("vk-mix-settings"))
         .frame(
             egui::Frame::popup(&ctx.global_style())
-                .fill(theme::SURFACE)
+                .fill(theme::surface())
                 .inner_margin(24)
                 .corner_radius(20)
-                .stroke(Stroke::new(1.0, Color32::from_rgb(44, 53, 67))),
+                .stroke(Stroke::new(1.0, theme::tone(Color32::from_rgb(44, 53, 67)))),
         )
         .backdrop_color(Color32::from_black_alpha(180))
         .show(ctx, |ui| {
@@ -53,7 +53,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                         RichText::new(title)
                             .size(20.0)
                             .family(theme::semibold())
-                            .color(Color32::from_rgb(230, 235, 244)),
+                            .color(theme::tone(Color32::from_rgb(230, 235, 244))),
                     )
                     .truncate()
                     .selectable(false),
@@ -62,9 +62,9 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                     let (rect, response) =
                         ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
                     if response.hovered() || response.has_focus() {
-                        ui.painter().rect_filled(rect, 8.0, theme::SELECTED);
+                        ui.painter().rect_filled(rect, 8.0, theme::selected());
                     }
-                    icons::paint(ui.painter(), rect.shrink(7.0), Icon::Close, theme::MUTED);
+                    icons::paint(ui.painter(), rect.shrink(7.0), Icon::Close, theme::muted());
                     let label = t("Закрыть", "Close");
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
@@ -83,7 +83,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                 .map(|settings| settings.subtitle.as_str())
                 .filter(|subtitle| !subtitle.is_empty())
             {
-                ui.label(RichText::new(subtitle).color(theme::MUTED));
+                ui.label(RichText::new(subtitle).color(theme::muted()));
             }
             ui.add_space(8.0);
             match (view.settings, view.loading) {
@@ -100,7 +100,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                             RichText::new(category.title.to_uppercase())
                                 .small()
                                 .family(theme::semibold())
-                                .color(theme::MUTED),
+                                .color(theme::muted()),
                         );
                         ui.add_space(6.0);
                         let chosen = selection
@@ -163,7 +163,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                         .color(if view.error.is_some() {
                             Color32::from_rgb(255, 158, 153)
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         }),
                     );
                 }
@@ -177,7 +177,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                     .add_enabled(
                         ready,
                         egui::Button::new(t("Применить", "Apply"))
-                            .fill(theme::PRIMARY)
+                            .fill(theme::primary())
                             .corner_radius(10)
                             .min_size(egui::vec2(120.0, 36.0)),
                     )
@@ -220,10 +220,10 @@ fn option_chip(ui: &mut egui::Ui, title: &str, selected: bool) -> egui::Response
     );
     let hovered = response.hovered() || response.has_focus();
     let fill = match (selected, hovered) {
-        (true, false) => theme::ACCENT,
-        (true, true) => Color32::from_rgb(72, 132, 216),
-        (false, false) => Color32::from_rgb(35, 41, 50),
-        (false, true) => Color32::from_rgb(45, 53, 65),
+        (true, false) => theme::accent(),
+        (true, true) => theme::accent_tone(Color32::from_rgb(72, 132, 216)),
+        (false, false) => theme::tone(Color32::from_rgb(35, 41, 50)),
+        (false, true) => theme::tone(Color32::from_rgb(45, 53, 65)),
     };
     ui.painter().rect_filled(rect, 8.0, fill);
     let galley = ui.painter().layout_no_wrap(

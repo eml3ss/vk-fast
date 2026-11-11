@@ -905,7 +905,7 @@ pub fn compact_button(
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::click());
         let visuals = ui.style().interact(&response);
         let fill = if primary {
-            crate::theme::PRIMARY
+            crate::theme::primary()
         } else {
             visuals.bg_fill
         };
@@ -963,7 +963,7 @@ pub fn toggle_button_sized(
             ui.painter().rect_filled(rect, size * 0.5, visuals.bg_fill);
         }
         let color = if selected {
-            crate::theme::ACCENT
+            crate::theme::accent()
         } else {
             visuals.fg_stroke.color
         };
@@ -1009,7 +1009,7 @@ pub fn panel_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, label: &str) -> R
         if response.hovered() {
             Color32::WHITE
         } else {
-            crate::theme::MUTED
+            crate::theme::muted()
         },
     );
     response.widget_info(|| {
@@ -1052,9 +1052,9 @@ pub fn track_button(
     ui.add_enabled_ui(enabled && !pending, |ui| {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
         let base = if selected {
-            crate::theme::ACCENT
+            crate::theme::accent()
         } else {
-            crate::theme::MUTED
+            crate::theme::muted()
         };
         // A clear step towards white on hover: the muted gray turns nearly
         // white, the accent of a selected action lightens.
@@ -1721,9 +1721,9 @@ mod tests {
             assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.rect.size()==Vec2::splat(22.0))));
             if !pending {
                 let expected_color = if liked {
-                    crate::theme::ACCENT
+                    crate::theme::accent()
                 } else {
-                    crate::theme::MUTED
+                    crate::theme::muted()
                 };
                 let primitives = context.tessellate(output.shapes, output.pixels_per_point);
                 assert!(primitives.iter().any(|primitive| matches!(&primitive.primitive,egui::epaint::Primitive::Mesh(mesh) if mesh.vertices.iter().any(|vertex| vertex.color == expected_color))));
@@ -1773,7 +1773,7 @@ mod tests {
             );
             output.textures_delta.clear();
             assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,egui::Shape::Rect(rect) if rect.rect.size()==Vec2::splat(38.0))));
-            let indicator = output.shapes.iter().any(|shape| matches!(&shape.shape,egui::Shape::Circle(circle) if circle.radius==1.5 && circle.fill==crate::theme::ACCENT));
+            let indicator = output.shapes.iter().any(|shape| matches!(&shape.shape,egui::Shape::Circle(circle) if circle.radius==1.5 && circle.fill==crate::theme::accent()));
             assert_eq!(indicator, selected);
         }
     }

@@ -25,10 +25,13 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
     let modal = egui::Modal::new(egui::Id::new("create-playlist-dialog"))
         .frame(
             egui::Frame::popup(&ctx.global_style())
-                .fill(theme::SURFACE)
+                .fill(theme::surface())
                 .inner_margin(20)
                 .corner_radius(14)
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 51, 62))),
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    theme::tone(Color32::from_rgb(44, 51, 62)),
+                )),
         )
         .backdrop_color(Color32::from_black_alpha(150))
         .show(ctx, |ui| {
@@ -44,7 +47,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
             ui.label(
                 RichText::new(language.text("Название", "Name"))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             );
             let field = ui
                 .add_enabled_ui(!view.creating, |ui| {
@@ -85,7 +88,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                     ui.label(
                         RichText::new(language.text("Создаём…", "Creating…"))
                             .small()
-                            .color(theme::MUTED),
+                            .color(theme::muted()),
                     );
                 });
                 ui.add_space(4.0);
@@ -96,7 +99,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                         ui.add_sized(
                             egui::vec2(104.0, 34.0),
                             egui::Button::new(language.text("Создать", "Create"))
-                                .fill(theme::PRIMARY)
+                                .fill(theme::primary())
                                 .corner_radius(8),
                         )
                     })
@@ -265,7 +268,7 @@ mod tests {
                 .into_iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == theme::SURFACE && rect.corner_radius.nw == 14 =>
+                        if rect.fill == theme::surface() && rect.corner_radius.nw == 14 =>
                     {
                         Some(rect.rect)
                     }
@@ -296,7 +299,7 @@ mod tests {
                     .expect("Button background")
             };
             assert!((button(cancel).center().y - button(create).center().y).abs() <= 1.0);
-            assert!(shapes(&output).into_iter().any(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == theme::PRIMARY && rect.rect.contains_rect(create))));
+            assert!(shapes(&output).into_iter().any(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == theme::primary() && rect.rect.contains_rect(create))));
             h.click(create.center());
             assert_eq!(h.action, Some(Action::Submit));
         }

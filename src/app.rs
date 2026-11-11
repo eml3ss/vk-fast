@@ -88,8 +88,7 @@ use crate::{
     scrolling::Scrolling,
     search_swipe, search_ui, seek_bar,
     settings_search::{self, Query as SettingsQuery, Setting},
-    theme::{self, ACCENT, BACKGROUND, MUTED, PRIMARY, SURFACE},
-    titlebar, track_menu,
+    theme, titlebar, track_menu,
     web_audio::{WebAudioClient, WebAudioError},
     web_session::SessionCookie,
 };
@@ -1015,7 +1014,12 @@ fn time_slot_width(ui: &egui::Ui, duration: u32) -> f32 {
                 }
             })
             .collect();
-        fonts.layout_no_wrap(template, font, MUTED).size().x.ceil() + 1.0
+        fonts
+            .layout_no_wrap(template, font, theme::muted())
+            .size()
+            .x
+            .ceil()
+            + 1.0
     })
 }
 
@@ -1051,7 +1055,7 @@ fn paint_time(ui: &egui::Ui, rect: egui::Rect, text: String, align: egui::Align2
         align,
         &text,
         egui::TextStyle::Small.resolve(ui.style()),
-        MUTED,
+        theme::muted(),
     );
     ui.interact(rect, ui.id().with(id), Sense::hover())
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &text));
@@ -1388,6 +1392,9 @@ pub struct MusicApp {
     explicit_badge_save_failed: bool,
     /// The fullscreen player's animated blurred backdrop.
     animated_backdrop: bool,
+    theme: theme::Theme,
+    accent: theme::Accent,
+    theme_save_failed: bool,
     animated_backdrop_save_failed: bool,
     /// Ctrl + the keyboard's volume keys change VK Fast's own volume.
     volume_keys_enabled: bool,
@@ -1620,6 +1627,15 @@ impl MusicApp {
     }
 
     pub fn new(ctx: &egui::Context, demo: bool, language: Language) -> Self {
+        // Before the first frame, so the window never shows another theme.
+        // Tests keep the default theme: it is one global for all of them.
+        let (appearance, accent) = if cfg!(test) {
+            Default::default()
+        } else {
+            (preferences::load_theme(), preferences::load_accent())
+        };
+        crate::palette::set_active(appearance);
+        crate::palette::set_accent(accent);
         theme::install(ctx);
         let cache_limit_mb = preferences::load_cache_limit_mb();
         #[cfg(not(test))]
@@ -1798,6 +1814,9 @@ impl MusicApp {
             explicit_badge: preferences::load_explicit_badge(),
             explicit_badge_save_failed: false,
             animated_backdrop: preferences::load_animated_backdrop(),
+            theme: appearance,
+            accent,
+            theme_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: preferences::load_volume_keys(),
             volume_keys_save_failed: false,
@@ -1935,6 +1954,41 @@ impl MusicApp {
     pub fn with_screenshot(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.screenshot_path = path;
         self
+    }
+
+    /// Screenshot builds only: show a scene that needs clicks otherwise.
+    #[cfg(feature = "screenshot")]
+    pub fn screenshot_scene(&mut self, ctx: &egui::Context, args: &[String]) {
+        let has = |flag: &str| args.iter().any(|arg| arg == flag);
+        if has("--interface") {
+            self.settings_section = SettingsSection::Interface;
+        }
+        if has("--equalizer") {
+            self.settings_section = SettingsSection::Equalizer;
+        }
+        if has("--playing") || has("--queue") || has("--lyrics") || has("--fullscreen") {
+            self.playing = self.library.tracks.first().cloned();
+        }
+        if has("--queue") {
+            self.toggle_queue(ctx);
+        }
+        if has("--lyrics") {
+            self.toggle_lyrics(ctx);
+        }
+        if has("--fullscreen") {
+            self.set_lyrics_fullscreen(ctx, true);
+        }
+        if has("--account-menu") {
+            egui::Popup::open_id(ctx, egui::Id::new("account-popup"));
+        }
+        if has("--toast") {
+            self.track_menu_notice = Some((
+                self.language
+                    .text("Трек добавлен в очередь", "Track added to the queue")
+                    .to_owned(),
+                Instant::now() + Duration::from_secs(60),
+            ));
+        }
     }
 
     #[cfg(feature = "screenshot")]
@@ -3775,7 +3829,7 @@ impl MusicApp {
             .add_enabled(
                 can_login,
                 egui::Button::new(t("Войти по QR-коду", "Sign in with QR code"))
-                    .fill(PRIMARY)
+                    .fill(theme::primary())
                     .min_size(button_size),
             )
             .clicked()
@@ -3805,7 +3859,7 @@ impl MusicApp {
             ui.label(
                 RichText::new(format!("VK ID {}", session.profile.id))
                     .small()
-                    .color(MUTED),
+                    .color(theme::muted()),
             );
             if session.cache_warning {
                 ui.colored_label(
@@ -3838,7 +3892,7 @@ impl MusicApp {
                     "Sign in on the official VK website",
                 ))
                 .small()
-                .color(MUTED),
+                .color(theme::muted()),
             );
             ui.add_space(8.0);
             ui.push_id("account-menu-login", |ui| self.login_controls(ui));
@@ -3870,7 +3924,7 @@ impl MusicApp {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .frame(
                 Frame::popup(ui.style())
-                    .fill(SURFACE)
+                    .fill(theme::surface())
                     .inner_margin(18)
                     .corner_radius(12),
             )
@@ -7255,7 +7309,7 @@ impl MusicApp {
             ui.label(
                 RichText::new(language.text("Вернуться назад", "Go back"))
                     .small()
-                    .color(MUTED),
+                    .color(theme::muted()),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icons::compact_button(
@@ -7656,7 +7710,7 @@ impl MusicApp {
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), Sense::click());
         let title = language.text("Вам понравилось", "You liked");
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 8.0, SURFACE);
+            ui.painter().rect_filled(rect, 8.0, theme::surface());
         }
         let photo = egui::Rect::from_min_size(
             egui::pos2(rect.left() + 8.0, rect.center().y - PHOTO * 0.5),
@@ -7671,12 +7725,12 @@ impl MusicApp {
             .show_rounded(&mut art, image_url, PHOTO, (PHOTO * 0.5) as u8);
         // The heart in a ring of the page's background, at the photo's corner.
         let badge = photo.right_bottom() - egui::vec2(7.0, 7.0);
-        ui.painter().circle_filled(badge, 12.0, BACKGROUND);
+        ui.painter().circle_filled(badge, 12.0, theme::background());
         icons::paint(
             ui.painter(),
             egui::Rect::from_center_size(badge, egui::Vec2::splat(18.0)),
             Icon::HeartFilled,
-            theme::ACCENT,
+            theme::accent(),
         );
         let subtitle = crate::release_info::counted(
             tracks.len() as u64,
@@ -7696,7 +7750,7 @@ impl MusicApp {
             egui::FontId::new(17.0, theme::semibold()),
             ui.visuals().text_color(),
         );
-        let details = line(subtitle, egui::FontId::proportional(13.0), MUTED);
+        let details = line(subtitle, egui::FontId::proportional(13.0), theme::muted());
         let height = heading.size().y + 3.0 + details.size().y;
         let top = rect.center().y - height * 0.5;
         ui.painter()
@@ -7785,7 +7839,9 @@ impl MusicApp {
                             .text("Нет доступных треков.", "No available tracks.")
                             .into()
                     };
-                    theme::inset_heading(ui, |ui| ui.label(RichText::new(message).color(MUTED)));
+                    theme::inset_heading(ui, |ui| {
+                        ui.label(RichText::new(message).color(theme::muted()))
+                    });
                     return;
                 }
                 let tracks = &page.tracks;
@@ -8102,9 +8158,9 @@ impl MusicApp {
                 rect,
                 9.0,
                 if selected {
-                    theme::SELECTED
+                    theme::selected()
                 } else {
-                    theme::BACKGROUND
+                    theme::panel_hover()
                 },
             );
         }
@@ -8115,7 +8171,11 @@ impl MusicApp {
                 egui::vec2(19.0, 19.0),
             ),
             icon,
-            if selected { ACCENT } else { MUTED },
+            if selected {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
         );
         ui.painter().text(
             egui::pos2(rect.left() + 43.0, rect.center().y),
@@ -8184,7 +8244,7 @@ impl MusicApp {
                 egui::pos2(divider.left() + 6.0, divider.center().y),
                 egui::pos2(divider.right() - 6.0, divider.center().y),
             ],
-            egui::Stroke::new(1.0, Color32::from_rgb(57, 65, 77)),
+            egui::Stroke::new(1.0, theme::tone(Color32::from_rgb(57, 65, 77))),
         );
         ui.add_space(0.0);
         let selected =
@@ -8271,7 +8331,7 @@ impl MusicApp {
                                 fonts.layout_no_wrap(
                                     total.to_string(),
                                     egui::FontId::proportional(16.0),
-                                    MUTED,
+                                    theme::muted(),
                                 )
                             })
                         });
@@ -8310,7 +8370,7 @@ impl MusicApp {
                             });
                             let pos =
                                 egui::pos2(rect.left(), center_y - number.mesh_bounds.center().y);
-                            ui.painter().galley(pos, number, MUTED);
+                            ui.painter().galley(pos, number, theme::muted());
                         }
                         response
                     })
@@ -8363,7 +8423,7 @@ impl MusicApp {
                     "Демо · вымышленные треки, без подключения к VK",
                     "Demo · sample tracks, no VK connection",
                 ))
-                .color(MUTED),
+                .color(theme::muted()),
             );
         } else if self.session.is_none() {
             theme::inset_heading(ui, |ui| {
@@ -8372,21 +8432,21 @@ impl MusicApp {
                         "Ваша библиотека начнётся с подключения аккаунта",
                         "Connect your account to see your library",
                     ))
-                    .color(MUTED),
+                    .color(theme::muted()),
                 )
             });
         }
         ui.add_space(8.0);
         if self.session.is_some() || !self.view_tracks().is_empty() {
             Frame::new()
-                .fill(SURFACE)
+                .fill(theme::surface())
                 .corner_radius(8)
                 .inner_margin(6)
                 .show(ui, |ui| {
                     ui.spacing_mut().interact_size.y = 22.0;
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.horizontal(|ui| {
-                        icons::show(ui, Icon::Search, MUTED, 16.0);
+                        icons::show(ui, Icon::Search, theme::muted(), 16.0);
                         ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .frame(Frame::NONE)
@@ -8419,7 +8479,7 @@ impl MusicApp {
                             "Your profile is connected, but VK did not grant music access.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                 });
             ui.add_space(6.0);
@@ -8971,8 +9031,15 @@ impl MusicApp {
                     .hover_pos()
                     .is_some_and(|point| rect.contains(point))
             });
-        ui.painter()
-            .rect_filled(rect, 5.0, if row_hovered { SURFACE } else { BACKGROUND });
+        ui.painter().rect_filled(
+            rect,
+            5.0,
+            if row_hovered {
+                theme::surface()
+            } else {
+                theme::background()
+            },
+        );
         let index_width = track_index_width(
             ui,
             self.view_tracks().len().max(index + 1) + self.row_number_offset,
@@ -8990,7 +9057,7 @@ impl MusicApp {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if unavailable {
                     ui.set_opacity(ui.opacity() * 0.65);
-                    ui.visuals_mut().override_text_color = Some(MUTED);
+                    ui.visuals_mut().override_text_color = Some(theme::muted());
                 }
                 let (index_rect, index_response) =
                     ui.allocate_exact_size(egui::vec2(index_width, 40.0), Sense::click());
@@ -9014,9 +9081,9 @@ impl MusicApp {
                             Icon::Play
                         },
                         if unavailable {
-                            MUTED
+                            theme::muted()
                         } else if playing {
-                            ACCENT
+                            theme::accent()
                         } else {
                             Color32::WHITE
                         },
@@ -9028,9 +9095,9 @@ impl MusicApp {
                         (index + 1 + self.row_number_offset).to_string(),
                         egui::TextStyle::Small.resolve(ui.style()),
                         if !unavailable && highlighted {
-                            ACCENT
+                            theme::accent()
                         } else {
-                            MUTED
+                            theme::muted()
                         },
                     );
                 }
@@ -9058,9 +9125,9 @@ impl MusicApp {
                             egui::Label::new(theme::track_title(
                                 track,
                                 if unavailable {
-                                    MUTED
+                                    theme::muted()
                                 } else if highlighted {
-                                    ACCENT
+                                    theme::accent()
                                 } else {
                                     ui.visuals().text_color()
                                 },
@@ -9092,17 +9159,19 @@ impl MusicApp {
                             {
                                 let link = ui
                                     .add(
-                                        egui::Label::new(RichText::new(label).color(MUTED))
-                                            .truncate()
-                                            .selectable(false)
-                                            .sense(Sense::click()),
+                                        egui::Label::new(
+                                            RichText::new(label).color(theme::muted()),
+                                        )
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if link.hovered() {
                                     ui.painter().hline(
                                         link.rect.x_range(),
                                         link.rect.bottom() - 1.0,
-                                        egui::Stroke::new(1.0, MUTED),
+                                        egui::Stroke::new(1.0, theme::muted()),
                                     );
                                 }
                                 controls_contain_pointer |= link.contains_pointer();
@@ -9124,7 +9193,7 @@ impl MusicApp {
                         |ui| {
                             ui.set_min_width(track_sort::DATE_WIDTH);
                             ui.add(
-                                egui::Label::new(RichText::new(label).color(MUTED))
+                                egui::Label::new(RichText::new(label).color(theme::muted()))
                                     .truncate()
                                     .selectable(false),
                             );
@@ -9153,7 +9222,7 @@ impl MusicApp {
                     action = Some(TrackAction::ToggleLike(track.clone()));
                 }
                 ui.add(
-                    egui::Label::new(RichText::new(track.duration_label()).color(MUTED))
+                    egui::Label::new(RichText::new(track.duration_label()).color(theme::muted()))
                         .selectable(false),
                 );
             },
@@ -9360,7 +9429,7 @@ impl MusicApp {
                 let artist_width = ui.fonts_mut(|fonts| {
                     let mut width = |text: &str| {
                         fonts
-                            .layout_no_wrap(text.to_owned(), artist_font.clone(), MUTED)
+                            .layout_no_wrap(text.to_owned(), artist_font.clone(), theme::muted())
                             .size()
                             .x
                     };
@@ -9443,7 +9512,7 @@ impl MusicApp {
                                 egui::Label::new(
                                     RichText::new(&artist)
                                         .font(artist_font.clone())
-                                        .color(MUTED),
+                                        .color(theme::muted()),
                                 )
                                 .truncate()
                                 .selectable(false),
@@ -9780,7 +9849,7 @@ impl MusicApp {
                     "Demo: sample tracks without audio",
                 ))
                 .small()
-                .color(MUTED),
+                .color(theme::muted()),
             );
         }
         // In the player only the cover, the title and the artists are links
@@ -10074,7 +10143,7 @@ impl MusicApp {
                 )
             ))
             .small()
-            .color(MUTED),
+            .color(theme::muted()),
         );
         if status
             .as_ref()
@@ -10086,7 +10155,7 @@ impl MusicApp {
                     "Now choose VK Fast for HTTP and HTTPS links in Windows Settings.",
                 ))
                 .small()
-                .color(MUTED),
+                .color(theme::muted()),
             );
             if ui
                 .button(t("Открыть параметры Windows", "Open Windows Settings"))
@@ -10255,8 +10324,11 @@ impl MusicApp {
             + 16.0;
         let mut clicked = None;
         egui::Frame::new()
-            .fill(theme::SURFACE)
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 53, 67)))
+            .fill(theme::surface())
+            .stroke(egui::Stroke::new(
+                1.0,
+                theme::tone(Color32::from_rgb(44, 53, 67)),
+            ))
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(18, 14))
             .show(ui, |ui| {
@@ -10269,16 +10341,19 @@ impl MusicApp {
                             ui.label(RichText::new(title.as_str()).size(15.0));
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(description.as_str()).small().color(MUTED),
+                                    RichText::new(description.as_str())
+                                        .small()
+                                        .color(theme::muted()),
                                 )
                                 .wrap(),
                             );
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let widgets = &mut ui.style_mut().visuals.widgets;
-                            widgets.inactive.bg_fill = Color32::from_rgb(35, 41, 50);
-                            widgets.inactive.weak_bg_fill = Color32::from_rgb(35, 41, 50);
-                            widgets.hovered.bg_fill = Color32::from_rgb(45, 53, 65);
+                            widgets.inactive.bg_fill = theme::tone(Color32::from_rgb(35, 41, 50));
+                            widgets.inactive.weak_bg_fill =
+                                theme::tone(Color32::from_rgb(35, 41, 50));
+                            widgets.hovered.bg_fill = theme::tone(Color32::from_rgb(45, 53, 65));
                             widgets.hovered.bg_stroke = egui::Stroke::NONE;
                             if icons::button(ui, Icon::Trash, action, *enabled).clicked() {
                                 clicked = Some(index);
@@ -10364,7 +10439,7 @@ impl MusicApp {
         ui.label(
             RichText::new(language.text("НАСТРОЙКИ", "SETTINGS"))
                 .small()
-                .color(MUTED),
+                .color(theme::muted()),
         );
         ui.add_space(6.0);
         for section in SettingsSection::ALL {
@@ -10458,7 +10533,7 @@ impl MusicApp {
                     ui.add_space(18.0);
                     ui.push_id(("settings-section", section as u8), |ui| {
                         Frame::new()
-                            .fill(SURFACE)
+                            .fill(theme::surface())
                             .corner_radius(12)
                             .inner_margin(20)
                             .show(ui, |ui| {
@@ -10475,7 +10550,7 @@ impl MusicApp {
                             RichText::new(
                                 language.text("Настройки не найдены.", "No settings found."),
                             )
-                            .color(MUTED),
+                            .color(theme::muted()),
                         );
                     });
                 }
@@ -10503,7 +10578,7 @@ impl MusicApp {
                 "When a track ends by itself, the next one starts early and gradually takes over. The next track only starts loading at that moment.",
             ))
             .small()
-            .color(MUTED),
+            .color(theme::muted()),
         );
         if self.crossfade {
             ui.add_space(10.0);
@@ -10590,6 +10665,8 @@ impl MusicApp {
                 Setting::Logging,
             ],
             SettingsSection::Interface => &[
+                Setting::Theme,
+                Setting::Accent,
                 Setting::SystemTitlebar,
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
@@ -10655,7 +10732,7 @@ impl MusicApp {
                             "Changes are saved automatically.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.language_save_failed {
                         ui.colored_label(
@@ -10685,7 +10762,7 @@ impl MusicApp {
                     {
                         self.set_tray_enabled(&ctx, enabled);
                     }
-                    ui.label(RichText::new(t("Музыка продолжит играть. Открыть окно или выйти можно через значок в трее.", "Music keeps playing. Use the tray icon to show the window or exit.")).small().color(MUTED));
+                    ui.label(RichText::new(t("Музыка продолжит играть. Открыть окно или выйти можно через значок в трее.", "Music keeps playing. Use the tray icon to show the window or exit.")).small().color(theme::muted()));
                     if self.minimize_to_tray && self.tray.unavailable() {
                         ui.label(
                             RichText::new(t(
@@ -10693,7 +10770,7 @@ impl MusicApp {
                                 "System tray is unavailable; closing will exit the application.",
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(theme::muted()),
                         );
                     }
                     if self.tray_save_failed {
@@ -10729,7 +10806,7 @@ impl MusicApp {
                             "Show the current track in Discord.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.discord_rpc_save_failed {
                         ui.colored_label(
@@ -10761,7 +10838,7 @@ impl MusicApp {
                             "Diagnostics for playback and application issues.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if ui
                         .add_enabled(
@@ -10786,6 +10863,111 @@ impl MusicApp {
                 }
             }
             SettingsSection::Interface => {
+                if query.matches(Setting::Theme) {
+                    ui.label(t("Тема оформления", "Theme"));
+                    let previous = self.theme;
+                    egui::ComboBox::from_id_salt("settings-theme")
+                        .width(200.0)
+                        .selected_text(self.theme.title(language))
+                        .show_ui(ui, |ui| {
+                            for choice in theme::Theme::ALL {
+                                ui.selectable_value(
+                                    &mut self.theme,
+                                    choice,
+                                    choice.title(language),
+                                );
+                            }
+                        });
+                    if self.theme != previous {
+                        theme::apply(ui.ctx(), self.theme, self.accent);
+                        self.theme_save_failed =
+                            !cfg!(test) && preferences::save_theme(self.theme).is_err();
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(t(
+                            "Чёрная тема выключает пиксели фона на OLED-экранах.",
+                            "The black theme switches background pixels off on OLED screens.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
+                    if self.theme_save_failed {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t("Не удалось сохранить тему.", "Could not save the theme."),
+                        );
+                    }
+                    if query.matches(Setting::Accent)
+                        || query.matches(Setting::SystemTitlebar)
+                        || query.matches(Setting::CompactSeek)
+                        || query.matches(Setting::DoubleClickPlay)
+                        || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::Accent) {
+                    ui.label(t("Цвет акцента", "Accent colour"));
+                    let previous = self.accent;
+                    // Each colour's name after a dot in that colour.
+                    let swatch = |ui: &egui::Ui, accent: theme::Accent| {
+                        let font = egui::TextStyle::Button.resolve(ui.style());
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(
+                            "● ",
+                            0.0,
+                            egui::TextFormat::simple(font.clone(), accent.color()),
+                        );
+                        job.append(
+                            accent.title(language),
+                            0.0,
+                            egui::TextFormat::simple(font, ui.visuals().text_color()),
+                        );
+                        job
+                    };
+                    egui::ComboBox::from_id_salt("settings-accent")
+                        .width(200.0)
+                        .selected_text(swatch(ui, self.accent))
+                        .show_ui(ui, |ui| {
+                            for choice in theme::Accent::ALL {
+                                ui.selectable_value(&mut self.accent, choice, swatch(ui, choice));
+                            }
+                        });
+                    if self.accent != previous {
+                        theme::apply(ui.ctx(), self.theme, self.accent);
+                        self.theme_save_failed =
+                            !cfg!(test) && preferences::save_accent(self.accent).is_err();
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(t(
+                            "Цвет кнопок, ссылок, выделения и играющего трека.",
+                            "The colour of buttons, links, highlights and the playing track.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
+                    if self.theme_save_failed && !query.matches(Setting::Theme) {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 158, 153),
+                            t("Не удалось сохранить тему.", "Could not save the theme."),
+                        );
+                    }
+                    if query.matches(Setting::SystemTitlebar)
+                        || query.matches(Setting::CompactSeek)
+                        || query.matches(Setting::DoubleClickPlay)
+                        || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
                 if query.matches(Setting::SystemTitlebar) {
                     let label = t("Системный заголовок окна", "System title bar");
                     if theme::switch(ui, &mut self.system_titlebar, label).changed() {
@@ -10799,7 +10981,7 @@ impl MusicApp {
                             "Off: window controls are integrated into the VK Fast toolbar.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.titlebar_save_failed {
                         ui.colored_label(
@@ -10831,7 +11013,7 @@ impl MusicApp {
                             "Off: the seek bar spans the full player width.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.seek_layout_save_failed {
                         ui.colored_label(
@@ -10863,7 +11045,7 @@ impl MusicApp {
                     ui.label(RichText::new(t(
                         "Выключено — один клик по строке. Кнопка Play вместо номера всегда запускает трек одним кликом.",
                         "Off: click a row once. The Play button in place of its number always works with one click.",
-                    )).small().color(MUTED));
+                    )).small().color(theme::muted()));
                     if self.click_behavior_save_failed {
                         ui.colored_label(
                             Color32::from_rgb(255, 158, 153),
@@ -10889,7 +11071,7 @@ impl MusicApp {
                             "Off: search starts as you type.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.search_on_enter_save_failed {
                         ui.colored_label(
@@ -10922,7 +11104,7 @@ impl MusicApp {
                             "Middle-click a page and move the mouse up or down. Any click stops scrolling.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.middle_autoscroll_save_failed {
                         ui.colored_label(
@@ -10949,7 +11131,7 @@ impl MusicApp {
                             "A boxed E next to the title of tracks VK marks as explicit.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.explicit_badge_save_failed {
                         ui.colored_label(
@@ -10979,7 +11161,7 @@ impl MusicApp {
                             "The track's blurred cover slowly drifts behind the lyrics. Off: a still gradient in its colour.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.animated_backdrop_save_failed {
                         ui.colored_label(
@@ -11023,7 +11205,7 @@ impl MusicApp {
                             t("Недоступно в этой системе.", "Unavailable on this system.")
                         }
                     };
-                    ui.label(RichText::new(hint).small().color(MUTED));
+                    ui.label(RichText::new(hint).small().color(theme::muted()));
                     if self.volume_keys_save_failed {
                         ui.colored_label(
                             Color32::from_rgb(255, 158, 153),
@@ -11066,7 +11248,7 @@ impl MusicApp {
                             "Music continues with a mix based on the last track.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.mix_after_queue_save_failed {
                         ui.colored_label(
@@ -11113,7 +11295,7 @@ impl MusicApp {
                             "The playing track is shown in your VK page status.",
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     if self.broadcast_save_failed {
                         ui.colored_label(
@@ -11162,7 +11344,7 @@ impl MusicApp {
                         }
                     });
                     ui.label(RichText::new(if self.cache_limit_mb==0 { t("Кэш выключен","Cache is off") }
-                        else { t("При достижении лимита старые записи удаляются автоматически.","Older entries are removed automatically when the limit is reached.") }).small().color(MUTED));
+                        else { t("При достижении лимита старые записи удаляются автоматически.","Older entries are removed automatically when the limit is reached.") }).small().color(theme::muted()));
                     if query.matches(Setting::CacheStatus) || query.matches(Setting::CacheClear) {
                         ui.add_space(16.0);
                     }
@@ -11209,7 +11391,7 @@ impl MusicApp {
                             RichText::new("VK")
                                 .size(28.0)
                                 .family(theme::semibold())
-                                .color(ACCENT),
+                                .color(theme::accent()),
                         );
                         ui.label(RichText::new("FAST").size(26.0).family(theme::semibold()));
                     });
@@ -11220,11 +11402,11 @@ impl MusicApp {
                             t("Версия", "Version"),
                             env!("CARGO_PKG_VERSION")
                         ))
-                        .color(MUTED),
+                        .color(theme::muted()),
                     );
                     ui.label(t("Музыкальный плеер для VK", "Music player for VK"));
                     ui.add_space(12.0);
-                    ui.label(RichText::new("GPL-3.0-only").small().color(MUTED));
+                    ui.label(RichText::new("GPL-3.0-only").small().color(theme::muted()));
                 }
                 #[cfg(any(windows, test))]
                 if query.matches(Setting::Updates) {
@@ -11298,7 +11480,8 @@ impl MusicApp {
             .show_separator_line(false)
             .frame(
                 Frame::new()
-                    .fill(SURFACE)
+                    .fill(theme::panel())
+                    .stroke(theme::panel_line().unwrap_or(egui::Stroke::NONE))
                     .inner_margin(12)
                     // The page keeps its own 8 px on the right, so the gap to
                     // this card matches the page's gap to the left sidebar.
@@ -11370,7 +11553,7 @@ impl MusicApp {
             .show_separator_line(true)
             .frame(
                 Frame::new()
-                    .fill(SURFACE)
+                    .fill(theme::panel())
                     .inner_margin(egui::Margin::symmetric(16, PLAYER_PADDING_Y)),
             )
             .show(ui, |ui| self.player_bar(ui));
@@ -11387,13 +11570,18 @@ impl MusicApp {
             .resizable(true)
             .default_size(self.panel_widths[0])
             .size_range(LEFT_PANEL_WIDTHS.0..=left_max)
-            .show_separator_line(false)
-            .frame(Frame::new().fill(SURFACE).inner_margin(egui::Margin {
-                left: 18,
-                right: 18,
-                top: 18,
-                bottom: if self.settings_open { 18 } else { 9 },
-            }))
+            // Panels as dark as the page are set apart by a line.
+            .show_separator_line(theme::panel_line().is_some())
+            .frame(
+                Frame::new()
+                    .fill(theme::panel())
+                    .inner_margin(egui::Margin {
+                        left: 18,
+                        right: 18,
+                        top: 18,
+                        bottom: if self.settings_open { 18 } else { 9 },
+                    }),
+            )
             .show(ui, |ui| {
                 if self.settings_open {
                     self.settings_sidebar(ui);
@@ -11407,22 +11595,26 @@ impl MusicApp {
             .show_separator_line(false)
             .frame(
                 Frame::new()
-                    .fill(BACKGROUND)
+                    .fill(theme::background())
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| self.toolbar(ui));
         self.right_panel(ui);
         let page = egui::CentralPanel::default()
-            .frame(Frame::new().fill(BACKGROUND).inner_margin(egui::Margin {
-                left: 8,
-                right: 8,
-                top: if !self.settings_open && matches!(self.page, MusicPage::Search(_)) {
-                    8
-                } else {
-                    16
-                },
-                bottom: if self.settings_open { 24 } else { 0 },
-            }))
+            .frame(
+                Frame::new()
+                    .fill(theme::background())
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: if !self.settings_open && matches!(self.page, MusicPage::Search(_)) {
+                            8
+                        } else {
+                            16
+                        },
+                        bottom: if self.settings_open { 24 } else { 0 },
+                    }),
+            )
             .show(ui, |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                 if self.settings_open {
@@ -11530,7 +11722,7 @@ impl MusicApp {
                                     .clicked();
                                 });
                             });
-                            ui.label(RichText::new(message).color(MUTED));
+                            ui.label(RichText::new(message).color(theme::muted()));
                         });
                     });
                 if dismiss && let Some(until) = &mut self.error_closing {
@@ -11635,7 +11827,7 @@ impl MusicApp {
 
 impl eframe::App for MusicApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        BACKGROUND.to_normalized_gamma_f32()
+        theme::background().to_normalized_gamma_f32()
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -12413,6 +12605,9 @@ mod tests {
             explicit_badge: true,
             explicit_badge_save_failed: false,
             animated_backdrop: true,
+            theme: theme::Theme::default(),
+            accent: theme::Accent::default(),
+            theme_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: false,
             volume_keys_save_failed: false,
@@ -12589,7 +12784,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == theme::SELECTED
+                        if rect.fill == theme::selected()
                             && (rect.rect.width() - 40.0).abs() <= 0.5
                             && (rect.rect.height() - 40.0).abs() <= 0.5
                             && rect.rect.left() > 200.0 =>
@@ -12718,7 +12913,8 @@ mod tests {
                     assert!(rows.len() >= 3, "Too few rows rendered at {size:?}");
                     for (rect, fill) in &rows {
                         assert_eq!(
-                            *fill, BACKGROUND,
+                            *fill,
+                            theme::background(),
                             "Unexpected zebra/selection fill at {rect:?}"
                         );
                     }
@@ -12773,7 +12969,7 @@ mod tests {
                         .iter()
                         .find_map(|shape| match shape {
                             egui::Shape::Rect(rect)
-                                if rect.fill == SURFACE
+                                if rect.fill == theme::surface()
                                     && rect.rect.width() >= rows[0].0.width() * 0.9
                                     && rect.rect.left() >= rows[0].0.left() - 1.0
                                     && rect.rect.bottom() <= rows[0].0.top()
@@ -13403,7 +13599,7 @@ mod tests {
             .into_iter()
             .find_map(|shape| match shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == PRIMARY
+                    if rect.fill == theme::primary()
                         && rect.rect.width() == 38.0
                         && rect.rect.bottom() > size.y - 100.0 =>
                 {
@@ -13527,7 +13723,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == SURFACE
+                            if rect.fill == theme::surface()
                                 && (rect.rect.width() - size.x).abs() < 0.5
                                 && (rect.rect.bottom() - size.y).abs() < 0.5 =>
                         {
@@ -13687,7 +13883,7 @@ mod tests {
                     .into_iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == PRIMARY
+                            if rect.fill == theme::primary()
                                 && (rect.rect.width() - 38.0).abs() < 0.5
                                 && rect.rect.bottom() > size.y - 100.0 =>
                         {
@@ -13894,7 +14090,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == SURFACE
+                            if rect.fill == theme::surface()
                                 && (rect.rect.width() - size.x).abs() <= 1.0
                                 && (rect.rect.bottom() - size.y).abs() <= 1.0 =>
                         {
@@ -13911,7 +14107,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == PRIMARY
+                            if rect.fill == theme::primary()
                                 && (rect.rect.width() - 38.0).abs() <= 0.5
                                 && (rect.rect.height() - 38.0).abs() <= 0.5
                                 && panel.contains_rect(rect.rect) =>
@@ -14236,7 +14432,7 @@ mod tests {
                         egui::Shape::Rect(rect)
                             if (rect.rect.bottom() - size.y).abs() <= 1.0
                                 && (rect.rect.width() - size.x).abs() <= 1.0
-                                && rect.fill == SURFACE =>
+                                && rect.fill == theme::surface() =>
                         {
                             Some(rect.rect)
                         }
@@ -15270,7 +15466,7 @@ mod tests {
         };
         let title = color("Could not complete the action").unwrap();
         let body = color(&WebAudioError::Network.localized(Language::English)).unwrap();
-        assert_eq!((title, body), (Color32::WHITE, MUTED));
+        assert_eq!((title, body), (Color32::WHITE, theme::muted()));
         // The same error keeps its time; it ends with a fade.
         account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         assert_eq!(app.error_closing, Some(until));
@@ -16330,7 +16526,7 @@ mod tests {
                 .into_iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == BACKGROUND
+                        if rect.fill == theme::background()
                             && rect.rect.top() == 0.0
                             && rect.rect.left() > 250.0
                             && rect.rect.width() > 400.0 =>
@@ -16395,7 +16591,7 @@ mod tests {
             .into_iter()
             .find_map(|shape| match shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == SURFACE
+                    if rect.fill == theme::surface()
                         && rect.rect.top() < 50.0
                         && rect.rect.left() >= 252.0
                         && rect.rect.width() > 200.0 =>
@@ -16674,7 +16870,7 @@ mod tests {
             .into_iter()
             .find_map(|shape| match shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == SURFACE
+                    if rect.fill == theme::surface()
                         && (rect.rect.height() - 38.0).abs() < 0.5
                         && rect.rect.top() > heading.bottom()
                         && rect.rect.top() < heading.bottom() + 32.0
@@ -16718,7 +16914,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == SURFACE
+                        if rect.fill == theme::surface()
                             && (rect.rect.width() - size.x).abs() < 0.5
                             && (rect.rect.bottom() - size.y).abs() < 0.5 =>
                     {
@@ -16731,7 +16927,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == SURFACE
+                        if rect.fill == theme::surface()
                             && rect.rect.left() == 0.0
                             && rect.rect.top() == 0.0
                             && (rect.rect.width() - 252.0).abs() < 1.0 =>
@@ -16746,7 +16942,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == BACKGROUND
+                        if rect.fill == theme::background()
                             && rect.rect.top() == 0.0
                             && (rect.rect.left() - 252.0).abs() < 1.0
                             && rect.rect.width() > 400.0 =>
@@ -16766,7 +16962,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match shape {
                     egui::Shape::Rect(rect)
-                        if rect.fill == SURFACE
+                        if rect.fill == theme::surface()
                             && rect.rect.width() > 200.0
                             && header.contains_rect(rect.rect) =>
                     {
@@ -16969,7 +17165,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == theme::SELECTED
+                            if rect.fill == theme::selected()
                                 && rect.rect.contains(selected_text.center()) =>
                         {
                             Some(rect.rect)
@@ -16981,7 +17177,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match shape {
                         egui::Shape::Rect(rect)
-                            if rect.fill == SURFACE
+                            if rect.fill == theme::surface()
                                 && rect.rect.top() < 52.0
                                 && rect.rect.left() >= 252.0
                                 && rect.rect.width() > 200.0 =>
@@ -17842,7 +18038,7 @@ mod tests {
             for text in labels {
                 assert_eq!(text.galley.job.sections.len(), 2);
                 let version = &text.galley.job.sections[1];
-                assert_eq!(version.format.color, MUTED);
+                assert_eq!(version.format.color, theme::muted());
                 assert_eq!(
                     &text.galley.job.text[version.byte_range.start.0..version.byte_range.end.0],
                     " Slowed"
@@ -17923,7 +18119,7 @@ mod tests {
                         if (rect.rect.width() - 8.0).abs() < 0.5
                             && rect.rect.height() >= 27.5
                             && rect.rect.left() > row.right()
-                            && rect.fill == theme::SCROLL_HANDLE =>
+                            && rect.fill == crate::palette::current().scroll_handle =>
                     {
                         Some(rect.rect)
                     }
@@ -18427,7 +18623,7 @@ mod tests {
                         _ => None,
                     })
                     .unwrap();
-                assert_eq!(badge.galley.job.sections[0].format.color, MUTED);
+                assert_eq!(badge.galley.job.sections[0].format.color, theme::muted());
                 assert_eq!(badge.galley.job.sections[0].format.font_id.size, 16.0);
                 assert!(badge.visual_bounding_rect().left() > title.right());
                 assert!(badge.visual_bounding_rect().left() - title.right() < 14.0);
@@ -18618,7 +18814,7 @@ mod tests {
         fn blue_button(shape: &egui::Shape, target: egui::Rect) -> bool {
             match shape {
                 egui::Shape::Rect(rect) => {
-                    rect.fill == PRIMARY
+                    rect.fill == theme::primary()
                         && rect.rect.center().distance(target.center()) <= 1.0
                         && (rect.rect.width() - target.width()).abs() <= 2.0
                 }

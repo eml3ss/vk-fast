@@ -357,11 +357,11 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
     let hovered = response.hovered() || response.has_focus();
     let active = state != PlayState::Idle;
     let fill = if active {
-        theme::SELECTED
+        theme::selected()
     } else if hovered {
-        Color32::from_rgb(31, 38, 49)
+        theme::tone(Color32::from_rgb(31, 38, 49))
     } else {
-        theme::SURFACE
+        theme::surface()
     };
     let radius = rect.height() * 0.5;
     ui.painter().rect_filled(rect, radius, fill);
@@ -372,9 +372,9 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
             Stroke::new(
                 1.0,
                 if active {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
-                    theme::PRIMARY
+                    theme::primary()
                 },
             ),
             egui::StrokeKind::Inside,
@@ -385,9 +385,9 @@ fn mix_chip(ui: &mut egui::Ui, title: &str, state: PlayState) -> Response {
         center,
         disc,
         if active {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::PRIMARY
+            theme::primary()
         },
     );
     state_icon(
@@ -464,7 +464,7 @@ fn friend_card(
                     language.text("совпадение с вашим вкусом", "match with your taste")
                 ))
                 .small()
-                .color(Color32::from_rgb(196, 210, 230)),
+                .color(theme::tone(Color32::from_rgb(196, 210, 230))),
             )
             .truncate()
             .selectable(false),
@@ -488,7 +488,7 @@ fn friend_card(
             egui::Label::new(
                 RichText::new(&friend.owner_name)
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             )
             .truncate()
             .selectable(false),
@@ -507,7 +507,7 @@ fn friend_card(
         let hit = ui.interact(row, ui.id().with(("friend-track", index)), Sense::click());
         if hit.hovered() {
             ui.painter()
-                .rect_filled(row, 8.0, Color32::from_rgb(36, 44, 57));
+                .rect_filled(row, 8.0, theme::tone(Color32::from_rgb(36, 44, 57)));
         }
         let art = egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0));
         image(ui, covers, art, track.cover_url.as_deref(), index + 1);
@@ -542,7 +542,7 @@ fn friend_card(
         );
         theme::badged_line(&mut line, badge, |ui| {
             ui.add(
-                egui::Label::new(RichText::new(&track.artist).small().color(theme::MUTED))
+                egui::Label::new(RichText::new(&track.artist).small().color(theme::muted()))
                     .truncate()
                     .selectable(false),
             )
@@ -577,7 +577,7 @@ fn artist_mix_card(
         ui.painter().rect_stroke(
             rect,
             12.0,
-            Stroke::new(1.0, theme::ACCENT),
+            Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
@@ -715,9 +715,9 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
             ))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    buttons.style_mut().visuals.widgets.inactive.bg_fill = theme::PRIMARY;
+    buttons.style_mut().visuals.widgets.inactive.bg_fill = theme::primary();
     buttons.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-    buttons.style_mut().visuals.widgets.hovered.bg_fill = theme::ACCENT;
+    buttons.style_mut().visuals.widgets.hovered.bg_fill = theme::accent();
     buttons.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     let (icon, label, action) = if !view.connected {
         (
@@ -781,12 +781,12 @@ fn collage(
     fallback: Icon,
 ) {
     if tracks.is_empty() {
-        ui.painter().rect_filled(rect, 10.0, theme::SELECTED);
+        ui.painter().rect_filled(rect, 10.0, theme::selected());
         icons::paint(
             ui.painter(),
             rect.shrink(rect.width() * 0.27),
             fallback,
-            Color32::from_rgb(119, 159, 214),
+            theme::accent_tone(Color32::from_rgb(119, 159, 214)),
         );
         return;
     }
@@ -834,16 +834,16 @@ fn card(ui: &mut egui::Ui, size: egui::Vec2, label: &str) -> (egui::Rect, Respon
         response.request_focus();
     }
     let fill = if response.hovered() || response.has_focus() {
-        Color32::from_rgb(31, 38, 49)
+        theme::tone(Color32::from_rgb(31, 38, 49))
     } else {
-        theme::SURFACE
+        theme::surface()
     };
     ui.painter().rect_filled(rect, 12.0, fill);
     if response.hovered() || response.has_focus() {
         ui.painter().rect_stroke(
             rect,
             12.0,
-            Stroke::new(1.0, theme::PRIMARY),
+            Stroke::new(1.0, theme::primary()),
             egui::StrokeKind::Inside,
         );
     }
@@ -884,7 +884,7 @@ fn card_text_badged(
     text.add(egui::Label::new(title).truncate().selectable(false));
     theme::badged_line(&mut text, badge, |ui| {
         ui.add(
-            egui::Label::new(RichText::new(subtitle).small().color(theme::MUTED))
+            egui::Label::new(RichText::new(subtitle).small().color(theme::muted()))
                 .truncate()
                 .selectable(false),
         )
@@ -977,7 +977,7 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
                             egui::vec2(18.0, 18.0),
                         ),
                         Icon::ArrowRight,
-                        theme::MUTED,
+                        theme::muted(),
                     );
                     card_text(
                         ui,
@@ -1050,7 +1050,7 @@ fn collection_card(
         ui.painter().rect_stroke(
             rect,
             12.0,
-            Stroke::new(1.0, theme::ACCENT),
+            Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
@@ -1095,7 +1095,7 @@ fn section_heading(
     let mut clicked = false;
     theme::inset_heading(ui, |ui| {
         ui.horizontal(|ui| {
-            icons::show(ui, icon, theme::MUTED, 20.0);
+            icons::show(ui, icon, theme::muted(), 20.0);
             ui.add(
                 egui::Label::new(RichText::new(title).size(20.0).family(theme::semibold()))
                     .selectable(false),
@@ -1144,7 +1144,7 @@ fn recent_preview(recent: &[Track], limit: usize) -> Vec<&Track> {
 
 fn empty_collections(ui: &mut egui::Ui, view: &HomeView<'_>) {
     egui::Frame::new()
-        .fill(theme::SURFACE)
+        .fill(theme::surface())
         .corner_radius(12)
         .inner_margin(18)
         .show(ui, |ui| {
@@ -1164,7 +1164,7 @@ fn empty_collections(ui: &mut egui::Ui, view: &HomeView<'_>) {
                 )
             };
             ui.add(
-                egui::Label::new(RichText::new(message).color(theme::MUTED))
+                egui::Label::new(RichText::new(message).color(theme::muted()))
                     .wrap()
                     .selectable(false),
             );
@@ -2211,7 +2211,7 @@ mod tests {
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    egui::Shape::Circle(circle) if circle.fill == theme::ACCENT => {
+                    egui::Shape::Circle(circle) if circle.fill == theme::accent() => {
                         Some(circle.center)
                     }
                     _ => None,

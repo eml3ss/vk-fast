@@ -116,10 +116,10 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
                     if index == 2 {
                         Color32::from_rgb(139, 47, 62)
                     } else {
-                        theme::SELECTED
+                        theme::selected()
                     }
                 } else {
-                    theme::BACKGROUND
+                    theme::background()
                 };
                 if highlighted {
                     ui.painter()
@@ -128,7 +128,7 @@ pub fn controls(ui: &mut egui::Ui, language: Language) -> Rect {
                 let color = if highlighted {
                     ui.visuals().text_color()
                 } else {
-                    theme::MUTED
+                    theme::muted()
                 };
                 let icon = Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
                 match index {

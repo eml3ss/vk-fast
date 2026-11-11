@@ -10,6 +10,8 @@ use crate::{
 #[derive(Clone, Copy)]
 pub enum Setting {
     Language,
+    Theme,
+    Accent,
     SystemTitlebar,
     CompactSeek,
     DoubleClickPlay,
@@ -59,6 +61,12 @@ impl Query {
         let keywords = match setting {
             Setting::Language => {
                 "общие язык языки интерфейса русский английский перевод локализация general interface language languages russian english translation localization"
+            }
+            Setting::Theme => {
+                "интерфейс тема темы оформление цвет цвета цветовая схема тёмная темная чёрная черная oled олед графит серая полночь синяя фон палитра внешний вид interface theme themes appearance colour color colors scheme dark black oled amoled graphite grey gray midnight blue background palette look"
+            }
+            Setting::Accent => {
+                "интерфейс цвет акцента акцент основной оттенок синий фиолетовый розовый красный оранжевый зелёный зеленый бирюзовый кнопки ссылки выделение тема оформление interface accent colour color main tint hue blue violet purple pink red orange green teal buttons links highlight theme appearance"
             }
             Setting::SystemTitlebar => {
                 "интерфейс системный заголовок окна панель оформление рамка кнопки interface system title bar titlebar custom window decoration frame caption controls"
@@ -134,7 +142,7 @@ impl Query {
 
 pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Response {
     egui::Frame::new()
-        .fill(theme::SURFACE)
+        .fill(theme::surface())
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 7))
         .show(ui, |ui| {
@@ -142,7 +150,7 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Respo
             ui.spacing_mut().interact_size.y = 24.0;
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.horizontal(|ui| {
-                icons::show(ui, Icon::Search, theme::MUTED, 18.0);
+                icons::show(ui, Icon::Search, theme::muted(), 18.0);
                 let show_clear = !query.is_empty();
                 let width = (ui.available_width() - if show_clear { 32.0 } else { 0.0 }).max(0.0);
                 let mut edit = ui.add(
@@ -163,7 +171,7 @@ pub fn input(ui: &mut egui::Ui, query: &mut String, language: Language) -> Respo
                         if clear.hovered() {
                             ui.visuals().text_color()
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         },
                     );
                     let label = language.text("Очистить поиск настроек", "Clear settings search");

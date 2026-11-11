@@ -245,11 +245,11 @@ pub(super) fn header(
             .on_hover_text(tooltip);
         let selected = sort.column == column && sort.active();
         let color = if selected {
-            theme::ACCENT
+            theme::accent()
         } else if response.hovered() {
             ui.visuals().text_color()
         } else {
-            MUTED
+            theme::muted()
         };
         let anchor = match align {
             egui::Align2::RIGHT_CENTER => area.right_center(),
@@ -421,7 +421,11 @@ mod tests {
         for label in ["ДАТА ДОБАВЛЕНИЯ", "DATE ADDED"] {
             let width = ctx.fonts_mut(|fonts| {
                 fonts
-                    .layout_no_wrap(label.into(), egui::FontId::proportional(11.5), MUTED)
+                    .layout_no_wrap(
+                        label.into(),
+                        egui::FontId::proportional(11.5),
+                        theme::muted(),
+                    )
                     .size()
                     .x
             });

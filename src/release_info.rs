@@ -43,7 +43,7 @@ pub fn show(ui: &mut egui::Ui, language: Language, tracks: &[Track], stats: &Alb
         ui.spacing_mut().item_spacing.y = 1.0;
         for line in &info.summary {
             ui.add(
-                egui::Label::new(RichText::new(line).color(theme::MUTED))
+                egui::Label::new(RichText::new(line).color(theme::muted()))
                     .wrap()
                     .selectable(false),
             );
@@ -53,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, language: Language, tracks: &[Track], stats: &Alb
         }
         for line in &info.dates {
             ui.add(
-                egui::Label::new(RichText::new(line).color(theme::MUTED))
+                egui::Label::new(RichText::new(line).color(theme::muted()))
                     .wrap()
                     .selectable(false),
             );
