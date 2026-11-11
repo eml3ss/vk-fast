@@ -749,7 +749,11 @@ fn playlist_menu(ui: &mut egui::Ui, language: Language, item: &PlaylistItem) -> 
     for (icon, label, intent) in [
         (
             Icon::Radio,
-            language.text("Микс по плейлисту", "Go to playlist mix"),
+            if item.kind == CollectionKind::Album {
+                language.text("Микс по альбому", "Go to album mix")
+            } else {
+                language.text("Микс по плейлисту", "Go to playlist mix")
+            },
             Action::Mix(reference.clone()),
         ),
         (
@@ -2074,6 +2078,18 @@ mod tests {
                         .center()
                 ),
                 Some(Action::TogglePin(item(2).reference))
+            );
+            h.items[1].kind = CollectionKind::Album;
+            let output = h.open();
+            assert!(
+                text_rect(&output, language.text("Микс по альбому", "Go to album mix")).is_some()
+            );
+            assert!(
+                text_rect(
+                    &output,
+                    language.text("Микс по плейлисту", "Go to playlist mix")
+                )
+                .is_none()
             );
         }
     }
