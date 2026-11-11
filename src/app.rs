@@ -1390,6 +1390,8 @@ pub struct MusicApp {
     /// Until then, the track being resolved crossfades with the one still
     /// playing out (set when its last seconds started the next one).
     crossfade_until: Option<Instant>,
+    /// The track a seek into its last seconds played on without a crossfade.
+    crossfade_skipped: Option<(i64, i64)>,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
     screen_cache_owner: Option<i64>,
     /// Known "date added" of own playlist tracks, by playlist.
@@ -1791,6 +1793,7 @@ impl MusicApp {
             crossfade_seconds,
             crossfade_save_failed: false,
             crossfade_until: None,
+            crossfade_skipped: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),
@@ -2308,6 +2311,11 @@ impl MusicApp {
     fn commit_playback_seek(&mut self, position: f64) {
         let Some(track) = &self.playing else { return };
         let position = bounded_track_position(position, track.duration);
+        // Seeking into the seconds where the crossfade would already have
+        // begun cancels it for this track: it plays to its end and the next
+        // one starts as usual. Seeking back before them restores it.
+        let starts_at = f64::from(track.duration) - f64::from(self.crossfade_seconds);
+        self.crossfade_skipped = (self.crossfade && position >= starts_at).then(|| track.key());
         self.system_media.position_changed();
         if self.resume_position.is_some() {
             self.resume_position = Some(position);
@@ -2443,6 +2451,7 @@ impl MusicApp {
         self.resume_position = Some(bounded_track_position(position, track.duration));
         self.time_slots = None;
         self.finished_handled = false;
+        self.crossfade_skipped = None;
         self.advance_on_load = false;
         let (sender, receiver) = mpsc::sync_channel(1);
         let ctx = self.repaint_target.with_context(ctx);
@@ -3092,6 +3101,9 @@ impl MusicApp {
             return;
         }
         let Some(track) = &self.playing else { return };
+        if self.crossfade_skipped == Some(track.key()) {
+            return;
+        }
         let snapshot = self.player.snapshot();
         let fade = f64::from(self.crossfade_seconds);
         let duration = f64::from(track.duration);
@@ -3106,7 +3118,13 @@ impl MusicApp {
         // The track's own end must not advance a second time.
         self.finished_handled = true;
         self.crossfade_until = Some(Instant::now() + Duration::from_secs_f64(left.max(0.0) + 0.5));
-        crate::diagnostics::event("playback", "crossfade: next track starting");
+        crate::diagnostics::event(
+            "playback",
+            &format!(
+                "crossfade: next track starting at {:.1}s of {duration:.0}s ({fade:.0}s fade)",
+                snapshot.position
+            ),
+        );
         self.advance_track(ctx, true);
         if self.playback_pending.is_none() {
             // Nothing to fade into (a mix or page still loading, or the end).
@@ -11590,7 +11608,9 @@ impl MusicApp {
             let mut wake = playing_wake(snapshot.position, duration, self.seek_pixels);
             // Wake for the crossfade's start too, even with no window shown.
             let crossfade_in = duration - f64::from(self.crossfade_seconds) - snapshot.position;
-            if self.crossfade && !self.finished_handled && crossfade_in > 0.0 {
+            let skipped = self.crossfade_skipped.is_some()
+                && self.crossfade_skipped == self.playing.as_ref().map(Track::key);
+            if self.crossfade && !self.finished_handled && !skipped && crossfade_in > 0.0 {
                 wake = wake.min(Duration::from_secs_f64(crossfade_in + 0.005));
             }
             ctx.request_repaint_after(wake);
@@ -12208,6 +12228,7 @@ mod tests {
             crossfade_seconds: preferences::DEFAULT_CROSSFADE_SECONDS,
             crossfade_save_failed: false,
             crossfade_until: None,
+            crossfade_skipped: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),

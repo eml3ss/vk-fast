@@ -499,7 +499,7 @@ struct Pcm {
     volume: Arc<AtomicU32>,
     equalizer: Arc<crate::equalizer::Shared>,
     /// Frames this stream fades in over from its first frame (0: none).
-    fade_in_from: u64,
+    /// Frames count from where the stream started, not from the track's start.
     fade_in_len: u64,
     /// Frame where a crossfade out starts (`NO_FADE`: none) and its length.
     fade_out_from: AtomicU64,
@@ -542,7 +542,6 @@ impl Pcm {
             started: AtomicBool::new(false),
             volume,
             equalizer: Arc::default(),
-            fade_in_from: 0,
             fade_in_len: 0,
             fade_out_from: AtomicU64::new(NO_FADE),
             fade_out_len: AtomicU64::new(0),
@@ -661,8 +660,8 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
         let slot = (at % capacity_frames as u64) as usize * pcm.channels;
         // Equal-power crossfade: the tracks' sum keeps its loudness.
         let mut gain = volume;
-        if at < pcm.fade_in_from.saturating_add(pcm.fade_in_len) {
-            let t = at.saturating_sub(pcm.fade_in_from) as f32 / pcm.fade_in_len as f32;
+        if at < pcm.fade_in_len {
+            let t = at as f32 / pcm.fade_in_len as f32;
             gain *= (t * std::f32::consts::FRAC_PI_2).sin();
         }
         if at >= fade_out_from {
@@ -1489,15 +1488,24 @@ impl Running {
 
 /// One controller tick of a crossfade's outgoing track: once the new track is
 /// `heard`, its fade starts where it is, over `frames` or what is left of it.
+/// The stream's frames count from `offset`, where it started in the track.
 /// True when it is silent and can be dropped.
-fn crossfade_step(pcm: &Pcm, duration: u32, frames: u64, heard: bool) -> bool {
+fn crossfade_step(pcm: &Pcm, offset: f64, duration: u32, frames: u64, heard: bool) -> bool {
     let read = pcm.cursor.load(Ordering::Acquire) & PCM_FRAME_MASK;
     let mut from = pcm.fade_out_from.load(Ordering::Acquire);
     if from == NO_FADE && heard {
-        let left = frame_at(f64::from(duration)).saturating_sub(read);
-        pcm.fade_out_len
-            .store(frames.min(left).max(1), Ordering::Relaxed);
+        let left = frame_at((f64::from(duration) - offset).max(0.0)).saturating_sub(read);
+        let len = frames.min(left).max(1);
+        pcm.fade_out_len.store(len, Ordering::Relaxed);
         pcm.fade_out_from.store(read, Ordering::Release);
+        crate::diagnostics::event(
+            "playback",
+            &format!(
+                "crossfade: fading out at {:.1}s of {duration}s over {:.1}s",
+                offset + frame_time(read),
+                frame_time(len)
+            ),
+        );
         from = read;
     }
     let faded =
@@ -1595,7 +1603,6 @@ fn start(
     let pcm = Arc::new(Pcm {
         underruns: control.underruns.clone(),
         equalizer: output.equalizer,
-        fade_in_from: frame,
         fade_in_len: fade_in,
         ..Pcm::new(CHANNELS, SAMPLE_RATE, output.volume, paused)
     });
@@ -1833,7 +1840,7 @@ fn controller(
             let heard = running
                 .as_ref()
                 .is_some_and(|new| new.pcm.started.load(Ordering::Acquire));
-            if crossfade_step(&old.pcm, old.duration, *frames, heard) {
+            if crossfade_step(&old.pcm, old.offset, old.duration, *frames, heard) {
                 fading = None;
             }
         }
@@ -1921,11 +1928,21 @@ mod tests {
         pcm.primed.store(epoch | 1, Ordering::Release);
     }
     #[test]
+    fn a_stream_started_mid_track_without_a_crossfade_plays_at_full_level() {
+        // After a seek a stream starts at its own frame 0 with no fade in.
+        let p = Pcm::new(2, 10, Arc::new(AtomicU32::new(0.5_f32.to_bits())), false);
+        seed_pcm(&p, 0, [0.5, -0.5, 0.25, -0.25]);
+        p.eof.store(true, Ordering::Release);
+        let mut output = [0.0; 4];
+        render(&mut output, &p);
+        assert_eq!(output, [0.25, -0.25, 0.125, -0.125]);
+    }
+
+    #[test]
     fn a_crossfade_raises_the_new_track_and_lowers_the_old_with_equal_power() {
         // 100 frames a second keeps the arithmetic readable.
         let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
         let new = Pcm {
-            fade_in_from: 0,
             fade_in_len: 100,
             ..Pcm::new(1, 100, volume.clone(), false)
         };
@@ -1944,25 +1961,26 @@ mod tests {
         seed_pcm(&old, 0, std::iter::repeat_n(1.0, 1_000));
         old.eof.store(true, Ordering::Release);
         old.started.store(true, Ordering::Release);
-        assert!(!crossfade_step(&old, 10, 300, false));
+        assert!(!crossfade_step(&old, 0.0, 10, 300, false));
         assert_eq!(old.fade_out_from.load(Ordering::Acquire), NO_FADE);
         let mut output = vec![0.0; 100];
         render(&mut output, &old);
         assert!(output.iter().all(|sample| *sample == 1.0));
         // Heard: it fades from where it is, over the fade or what is left.
-        assert!(!crossfade_step(&old, 10, 300, true));
+        assert!(!crossfade_step(&old, 0.0, 10, 300, true));
         assert_eq!(old.fade_out_from.load(Ordering::Acquire), 100);
         assert_eq!(old.fade_out_len.load(Ordering::Acquire), 300);
         let mut output = vec![0.0; 300];
         render(&mut output, &old);
         assert!((output[150] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.02);
         assert!(output.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6));
-        assert!(crossfade_step(&old, 10, 300, true), "silent: dropped");
+        assert!(crossfade_step(&old, 0.0, 10, 300, true), "silent: dropped");
         // Less left than the fade: it reaches silence as the track ends.
         let short = Pcm::new(1, 100, Arc::new(AtomicU32::new(1.0_f32.to_bits())), false);
-        // The end is counted at the output rate: 10 s is `frame_at(10.0)`.
-        seed_pcm(&short, frame_at(10.0) - 100, std::iter::repeat_n(1.0, 100));
-        assert!(!crossfade_step(&short, 10, 300, true));
+        // A stream started at 9 s of a 10 s track: its frames count from 9 s,
+        // at the output rate.
+        seed_pcm(&short, frame_at(1.0) - 100, std::iter::repeat_n(1.0, 100));
+        assert!(!crossfade_step(&short, 9.0, 10, 300, true));
         assert_eq!(short.fade_out_len.load(Ordering::Acquire), 100);
     }
 

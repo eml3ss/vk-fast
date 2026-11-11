@@ -113,3 +113,22 @@ fn the_crossfade_setting_shows_its_length_only_while_on_and_is_found_by_search()
     }
     assert!(account_ui_text_rect(&output, "Crossfade length: 6 s").is_some());
 }
+
+#[test]
+fn seeking_into_the_crossfade_seconds_cancels_it_and_seeking_back_restores_it() {
+    let ctx = egui::Context::default();
+    let mut app = playing_at(&ctx, 100.0);
+    let first = app.play_queue.as_ref().unwrap()[0].key();
+    // Into the last 6 s: no crossfade, the track plays to its end.
+    app.commit_playback_seek(197.0);
+    app.player = Player::test_playing(200, 197.0).0;
+    app.poll_playback(&ctx);
+    assert_eq!(app.playing.as_ref().map(Track::key), Some(first));
+    assert!(app.playback_pending.is_none() && !app.crossfading());
+    // Back before them: it crossfades again when they come.
+    app.commit_playback_seek(150.0);
+    app.player = Player::test_playing(200, 195.0).0;
+    app.poll_playback(&ctx);
+    assert!(app.playback_pending.is_some() && app.crossfading());
+    finish_resolvers(&mut app);
+}
