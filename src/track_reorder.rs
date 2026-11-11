@@ -270,6 +270,179 @@ mod drag_tests {
     use crate::app::tests::{account_ui_app, account_ui_frame, account_ui_text_rect, page};
 
     #[test]
+    fn a_row_carried_out_of_my_music_joins_the_queue_or_an_own_playlist() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        let client = WebAudioClient::new(vec![crate::web_session::SessionCookie {
+            domain: ".vk.ru".into(),
+            path: "/".into(),
+            name: "remixsid".into(),
+            value: "synthetic-carry-test".into(),
+            secure: true,
+            expires_unix: None,
+        }])
+        .unwrap();
+        app.session = Some(Session {
+            profile: Profile {
+                id: 42,
+                first_name: "Test".into(),
+                last_name: "Account".into(),
+                avatar_url: None,
+            },
+            cache_warning: false,
+            music: Some(client),
+        });
+        let mut tracks = page(4, &[1, 2, 3, 4]).items;
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.owner_id = 42;
+            track.title = format!("Carried {index}");
+            track.subtitle = Some(String::new());
+            track.library_liked = Some(true);
+            if track.artists.is_empty() {
+                track.artists = vec![crate::model::ArtistRef {
+                    id: "synthetic".into(),
+                    name: "Artist".into(),
+                }];
+            }
+        }
+        app.library.tracks = tracks;
+        app.library.exhausted = true;
+        app.page = MusicPage::Library;
+        app.queue_ui.open = true;
+        // An own playlist, deliberately not in the editable list: the drop
+        // reaches "add to playlist", which then refuses without asking VK.
+        app.playlist_items = vec![crate::playlist_ui::PlaylistItem {
+            reference: AlbumRef {
+                id: 9,
+                owner_id: 42,
+                title: "Drop list".into(),
+                access_key: None,
+                cover_url: None,
+            },
+            kind: crate::web_audio::CollectionKind::Playlist,
+            subtitle: String::new(),
+            can_edit: true,
+            pinned: false,
+        }];
+        assert!(app.library_reorderable());
+        let size = egui::vec2(1300.0, 760.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let press = |pos, pressed| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        let page = app.page_rect;
+        // The title in the list: the queue panel lists the same tracks.
+        let in_list = |output: &egui::FullOutput, title: &str| {
+            crate::app::tests::account_ui_shapes(output)
+                .into_iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text() == title
+                            && page.contains(text.visual_bounding_rect().center()) =>
+                    {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {title} in the list"))
+        };
+        // Carries the row from its title to `to` in small steps.
+        let carry = |app: &mut MusicApp, frame: &mut u32, from: egui::Rect, to: egui::Pos2| {
+            let start = egui::pos2(from.right() + 40.0, from.center().y);
+            account_ui_frame(&ctx, app, size, frame, press(start, true));
+            let mut last = egui::FullOutput::default();
+            for step in 1..=12 {
+                let at = start + (to - start) * (step as f32 / 12.0);
+                last =
+                    account_ui_frame(&ctx, app, size, frame, vec![egui::Event::PointerMoved(at)]);
+            }
+            for _ in 0..3 {
+                last =
+                    account_ui_frame(&ctx, app, size, frame, vec![egui::Event::PointerMoved(to)]);
+            }
+            account_ui_frame(&ctx, app, size, frame, press(to, false));
+            let mut settled = egui::FullOutput::default();
+            for _ in 0..2 {
+                settled = account_ui_frame(&ctx, app, size, frame, Vec::new());
+            }
+            (last, settled)
+        };
+
+        let queue = egui::pos2(size.x - 120.0, size.y * 0.4);
+        let from = in_list(&output, "Carried 0");
+        let (carrying, settled) = carry(&mut app, &mut frame, from, queue);
+        output = settled;
+        // Away from the list: a small card with the title at the pointer,
+        // while the row waits in its place.
+        let titles: Vec<_> = crate::app::tests::account_ui_shapes(&carrying)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Carried 0" => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            titles
+                .iter()
+                .any(|rect| rect.left() > page.right() && (rect.center().y - queue.y).abs() < 24.0),
+            "the card follows the pointer: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|rect| page.contains(rect.center())),
+            "the row stays in the list: {titles:?}"
+        );
+        let first = app.library.tracks[0].key();
+        assert!(
+            app.play_order
+                .queued()
+                .iter()
+                .any(|entry| entry.key == first)
+        );
+        assert!(crate::track_drag::carried(&ctx).is_none());
+
+        let list = account_ui_text_rect(&output, "Drop list").unwrap();
+        let from = in_list(&output, "Carried 1");
+        let (_, settled) = carry(&mut app, &mut frame, from, list.center());
+        output = settled;
+        assert_eq!(app.track_menu_error, Some(WebAudioError::Rejected));
+
+        // A filtered list cannot be reordered, but its rows still carry.
+        app.filter = "Carried".into();
+        assert!(!app.library_reorderable());
+        for _ in 0..2 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let third = app.library.tracks[2].key();
+        let from = in_list(&output, "Carried 2");
+        carry(&mut app, &mut frame, from, queue);
+        assert!(
+            app.play_order
+                .queued()
+                .iter()
+                .any(|entry| entry.key == third)
+        );
+
+        // Neither drop moved a row, and nothing went to VK.
+        let ids: Vec<_> = app.library.tracks.iter().map(|track| track.id).collect();
+        assert_eq!(ids, [1, 2, 3, 4]);
+        assert!(app.reorder_request.is_none() && app.workers.is_empty());
+    }
+
+    #[test]
     fn my_music_rows_lift_and_slide_and_escape_cancels_without_vk() {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, Language::English);

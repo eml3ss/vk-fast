@@ -124,6 +124,20 @@ impl MusicApp {
     /// The queue itself, in its own panel or above the lyrics. Returns
     /// whether its close button was clicked.
     pub(super) fn queue_contents(&mut self, ui: &mut egui::Ui) -> bool {
+        // A track carried from a list joins the queue when let go over it.
+        let area = ui.max_rect().expand(6.0);
+        match crate::track_drag::target(ui, area) {
+            crate::track_drag::Target::Hovered => {
+                crate::track_drag::paint_target(ui.ctx(), area, 10.0);
+            }
+            crate::track_drag::Target::Dropped => {
+                if let Some(carried) = crate::track_drag::carried(ui.ctx()) {
+                    crate::track_drag::clear(ui.ctx());
+                    self.add_to_queue(ui.ctx(), carried.track);
+                }
+            }
+            crate::track_drag::Target::None => {}
+        }
         let mut panel = std::mem::take(&mut self.queue_ui);
         let source = self.play_queue.as_deref().unwrap_or(&self.library.tracks);
         let source_stamp = (

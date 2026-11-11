@@ -497,6 +497,16 @@ impl MusicApp {
         action: playlist_ui::Action,
     ) {
         match action {
+            playlist_ui::Action::AddCarriedTrack(reference) => {
+                if let Some(carried) = crate::track_drag::carried(ctx) {
+                    crate::track_drag::clear(ctx);
+                    self.handle_track_menu_action(
+                        ctx,
+                        &carried.track,
+                        track_menu::Action::AddToPlaylist(reference),
+                    );
+                }
+            }
             playlist_ui::Action::Reorder { playlist, before } => {
                 self.reorder_sidebar_playlist(ctx, &playlist, before.as_ref());
             }

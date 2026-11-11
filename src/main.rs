@@ -62,6 +62,7 @@ mod system_media;
 mod system_tray;
 mod theme;
 mod titlebar;
+mod track_drag;
 mod track_menu;
 mod ui_fonts;
 #[cfg(any(windows, test))]

@@ -41,6 +41,8 @@ pub enum Action {
         playlist: AlbumRef,
         before: Option<AlbumRef>,
     },
+    /// A track carried from a list was let go over this own playlist.
+    AddCarriedTrack(AlbumRef),
 }
 
 /// Library tags under the header, like VK's own sections.
@@ -577,6 +579,21 @@ fn playlist_rows(
     for (index, rect, response) in responses {
         let item = &view.items[index];
         let key = playlist_key(item);
+        // A track carried from a list goes into the account's own playlists.
+        let drop = if item.can_edit && item.kind != CollectionKind::Album {
+            crate::track_drag::target(ui, rect)
+        } else {
+            crate::track_drag::Target::None
+        };
+        match drop {
+            crate::track_drag::Target::Hovered => {
+                crate::track_drag::paint_target(ui.ctx(), rect, 8.0);
+            }
+            crate::track_drag::Target::Dropped => {
+                action = Some(Action::AddCarriedTrack(item.reference.clone()));
+            }
+            crate::track_drag::Target::None => {}
+        }
         if memory.active.as_ref().is_none_or(|drag| drag.key != key) {
             paint_playlist_row(
                 ui,
@@ -586,7 +603,8 @@ fn playlist_rows(
                 rect,
                 RowPaint {
                     selected: view.selected == Some(key),
-                    hovered: response.hovered() && !dragging,
+                    hovered: (response.hovered() && !dragging)
+                        || drop == crate::track_drag::Target::Hovered,
                     focused: response.has_focus() && !dragging,
                     ghost: false,
                 },

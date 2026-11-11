@@ -118,6 +118,9 @@ pub(super) struct Lane {
     pointer: Option<egui::Pos2>,
     held: bool,
     escape: bool,
+    /// The dragged row is carried away from the list, to a playlist or the
+    /// queue: it waits in its own place meanwhile.
+    away: bool,
     settled: Option<Drag>,
     pub(super) moved: Option<Move>,
     previous: HashSet<u64>,
@@ -173,6 +176,7 @@ impl Lane {
             pointer,
             held,
             escape,
+            away: false,
             settled: None,
             moved: None,
             previous: HashSet::new(),
@@ -188,11 +192,16 @@ impl Lane {
             memory.active = None;
         }
         memory.scope = scope;
+        let inside = pointer
+            .is_some_and(|point| point.x >= clip.left() - 8.0 && point.x <= clip.right() + 8.0);
         if let Some(drag) = &mut memory.active {
             match position(drag.key) {
                 Some(from) if drag.slots.contains(&from) => {
                     drag.from = from;
-                    if let Some(pointer) = pointer {
+                    if !inside {
+                        drag.to = from;
+                        lane.away = true;
+                    } else if let Some(pointer) = pointer {
                         drag.pointer = pointer;
                         lane.target(drag);
                         // The source follows the pointer, so release
@@ -207,8 +216,6 @@ impl Lane {
                 _ => memory.active = None,
             }
         }
-        let inside = pointer
-            .is_some_and(|point| point.x >= clip.left() - 8.0 && point.x <= clip.right() + 8.0);
         if (escape || !held)
             && let Some(drag) = memory.active.take()
             && released
@@ -243,6 +250,16 @@ impl Lane {
         self.memory.active.is_some()
     }
 
+    /// The display row being dragged, if any.
+    pub(super) fn dragged(&self) -> Option<usize> {
+        self.memory.active.as_ref().map(|drag| drag.from)
+    }
+
+    /// The list's visible area.
+    pub(super) fn clip(&self) -> egui::Rect {
+        self.clip
+    }
+
     /// The press of a finished drag is still held or just released.
     pub(super) fn suppressing(&self) -> bool {
         self.memory.suppress_release
@@ -250,10 +267,12 @@ impl Lane {
 
     /// The dragged row is painted by `finish`, not in the list.
     pub(super) fn hides(&self, key: u64) -> bool {
-        self.memory
-            .active
-            .as_ref()
-            .is_some_and(|drag| drag.key == key)
+        !self.away
+            && self
+                .memory
+                .active
+                .as_ref()
+                .is_some_and(|drag| drag.key == key)
     }
 
     /// Where row `index` is drawn now, sliding to its slot. Call it for the
@@ -321,6 +340,7 @@ impl Lane {
         let mut ghost = None;
         if let Some(drag) = &self.memory.active
             && let Some(pointer) = self.pointer
+            && !self.away
         {
             let target = self.origin_y + drag.to as f32 * self.stride;
             let gap = (self.stride - self.height) * 0.5;

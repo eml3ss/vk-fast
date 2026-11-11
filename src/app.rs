@@ -1231,6 +1231,8 @@ pub struct MusicApp {
     row_drag_enabled: bool,
     /// The rect of the row whose drag began this frame.
     row_drag_started: Option<egui::Rect>,
+    /// The lifted copy of a dragged row is being drawn: it starts no drag.
+    row_drag_lane: bool,
     reorder_request: Option<track_reorder::Request>,
     album_titles: album_titles::State,
     playlist_request: Option<PlaylistRequest>,
@@ -1610,6 +1612,7 @@ impl MusicApp {
             playlist_removal: playlist_removal::State::default(),
             row_drag_enabled: false,
             row_drag_started: None,
+            row_drag_lane: false,
             reorder_request: None,
             album_titles: album_titles::State::default(),
             playlist_request: None,
@@ -4958,15 +4961,51 @@ impl MusicApp {
         if let Some(moved) = lane.moved {
             action = Some(TrackAction::Reorder(moved));
         }
-        if let Some((from, rect)) = lane.finish(ui)
+        let dragged = lane
+            .dragged()
+            .and_then(|row| self.view_tracks().get(source(row)).cloned());
+        let list = lane.clip();
+        let ghost = lane.finish(ui);
+        if let Some((from, rect)) = ghost
             && let Some(track) = self.view_tracks().get(source(from)).cloned()
         {
+            self.row_drag_lane = true;
             ui.scope_builder(
                 egui::UiBuilder::new().max_rect(rect).id_salt("lane-ghost"),
                 |ui| {
                     self.track_row(ui, &track, source(from), active, show_date);
                 },
             );
+            self.row_drag_lane = false;
+        }
+        // The dragged row can also be carried away to a playlist or the
+        // queue; away from the list it shrinks from where it was last drawn.
+        let ctx = ui.ctx().clone();
+        let carried = crate::track_drag::carried(&ctx);
+        match dragged {
+            Some(track) => {
+                let row = ghost
+                    .map(|(_, rect)| rect)
+                    .or_else(|| {
+                        carried
+                            .filter(|carried| carried.reorder)
+                            .map(|carried| carried.row)
+                    })
+                    .unwrap_or(list);
+                crate::track_drag::carry(
+                    &ctx,
+                    crate::track_drag::Carried {
+                        track,
+                        list,
+                        row,
+                        reorder: true,
+                    },
+                );
+            }
+            None if carried.is_some_and(|carried| carried.reorder) => {
+                crate::track_drag::clear(&ctx);
+            }
+            None => {}
         }
         action
     }
@@ -8304,17 +8343,27 @@ impl MusicApp {
             .is_some_and(|current| current.key() == track.key());
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.0), Sense::hover());
+        // Every row can be carried to a playlist or the queue; rows of a
+        // reorderable list also move within it.
         let response = ui.interact(
             rect,
             ui.id().with(("track-row", track.key(), index)),
-            if self.row_drag_enabled {
-                Sense::click_and_drag()
-            } else {
-                Sense::click()
-            },
+            Sense::click_and_drag(),
         );
-        if self.row_drag_enabled && response.drag_started_by(egui::PointerButton::Primary) {
-            self.row_drag_started = Some(rect);
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if self.row_drag_enabled {
+                self.row_drag_started = Some(rect);
+            } else if !self.row_drag_lane && crate::track_drag::carried(ui.ctx()).is_none() {
+                crate::track_drag::carry(
+                    ui.ctx(),
+                    crate::track_drag::Carried {
+                        track: track.clone(),
+                        list: ui.clip_rect(),
+                        row: rect,
+                        reorder: false,
+                    },
+                );
+            }
         }
         let row_hovered = ui.is_enabled()
             && response.contains_pointer()
@@ -10587,6 +10636,7 @@ impl MusicApp {
 
     fn render_frame(&mut self, ui: &mut egui::Ui) {
         self.scrolling.apply(ui.ctx());
+        crate::track_drag::begin_frame(ui.ctx());
         if ui.ctx().current_pass_index() == 0 {
             let enabled = self.middle_autoscroll && !self.lyrics.fullscreen;
             self.autoscroll.apply(ui.ctx(), enabled, self.page_rect);
@@ -10697,6 +10747,7 @@ impl MusicApp {
                 }
             });
         self.page_rect = page.response.rect;
+        crate::track_drag::end_frame(ui.ctx(), &mut self.covers);
         let _ = self.qr_window(ui.ctx());
         self.mix_settings_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
@@ -11553,6 +11604,7 @@ mod tests {
             playlist_removal: playlist_removal::State::default(),
             row_drag_enabled: false,
             row_drag_started: None,
+            row_drag_lane: false,
             reorder_request: None,
             album_titles: album_titles::State::default(),
             playlist_request: None,
