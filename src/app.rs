@@ -10562,8 +10562,10 @@ impl MusicApp {
                 Frame::new()
                     .fill(SURFACE)
                     .inner_margin(12)
+                    // The page keeps its own 8 px on the right, so the gap to
+                    // this card matches the page's gap to the left sidebar.
                     .outer_margin(egui::Margin {
-                        left: 8,
+                        left: 0,
                         right: 8,
                         top: 6,
                         bottom: 6,
