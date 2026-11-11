@@ -5747,7 +5747,11 @@ impl MusicApp {
         let disliked = self.disliked.contains(&track.key());
         let response = icons::track_button(
             ui,
-            Icon::Dislike,
+            if disliked {
+                Icon::DislikeFilled
+            } else {
+                Icon::Dislike
+            },
             if disliked {
                 self.language
                     .text("Убрать из «Не нравится»", "Remove dislike")

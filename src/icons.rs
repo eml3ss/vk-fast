@@ -32,6 +32,8 @@ pub enum Icon {
     HeartFilled,
     /// A thumbs-down: VK's "Не нравится".
     Dislike,
+    /// The thumbs-down of a disliked track.
+    DislikeFilled,
     /// Two stacked sheets: copy text.
     Copy,
     /// Two horizontal sliders with knobs: tune something.
@@ -854,6 +856,32 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 (16.8, 3.5),
             ]);
         }
+        Icon::DislikeFilled => {
+            // The outline's hand and cuff as solid shapes, grown by half the
+            // outline's width so both icons cover the same area; a gap keeps
+            // the cuff apart from the hand.
+            let pixels_per_point = painter.ctx().pixels_per_point();
+            let hand: Vec<_> = [
+                (12.6, 21.9),
+                (16.0, 16.9),
+                (16.0, 2.7),
+                (6.5, 2.7),
+                (2.4, 11.9),
+                (4.5, 14.6),
+                (8.7, 14.6),
+                (8.0, 18.1),
+                (9.8, 21.9),
+            ]
+            .iter()
+            .map(|(x, y)| point(*x, *y))
+            .collect();
+            painter.add(egui::Shape::mesh(filled_concave_mesh(
+                &rounded_path(&hand, 1.4 * scale, true),
+                color,
+                pixels_per_point,
+            )));
+            polygon(&[(17.6, 2.7), (21.5, 2.7), (21.5, 15.0), (17.6, 15.0)], 1.4);
+        }
     }
 }
 
@@ -1019,8 +1047,10 @@ pub fn track_button(
         } else {
             crate::theme::MUTED
         };
+        // A clear step towards white on hover: the muted gray turns nearly
+        // white, the accent of a selected action lightens.
         let color = if response.hovered() || response.has_focus() {
-            base.lerp_to_gamma(Color32::WHITE, 0.18)
+            base.lerp_to_gamma(Color32::WHITE, if selected { 0.35 } else { 0.75 })
         } else {
             base
         };
@@ -1033,7 +1063,10 @@ pub fn track_button(
         }
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                if matches!(icon, Icon::Heart | Icon::HeartFilled | Icon::Dislike) {
+                if matches!(
+                    icon,
+                    Icon::Heart | Icon::HeartFilled | Icon::Dislike | Icon::DislikeFilled
+                ) {
                     egui::WidgetType::Checkbox
                 } else {
                     egui::WidgetType::Button
@@ -1147,6 +1180,7 @@ mod tests {
             Icon::Heart,
             Icon::HeartFilled,
             Icon::Dislike,
+            Icon::DislikeFilled,
             Icon::QueueAdd,
             Icon::Queue,
             Icon::Lyrics,

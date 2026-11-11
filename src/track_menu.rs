@@ -210,7 +210,11 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     }
     if row(
         ui,
-        Icon::Dislike,
+        if view.disliked {
+            Icon::DislikeFilled
+        } else {
+            Icon::Dislike
+        },
         if view.disliked {
             language.text("Убрать из «Не нравится»", "Remove dislike")
         } else {
@@ -428,7 +432,7 @@ fn row(
         if pending {
             ui.put(icon_rect, egui::Spinner::new().size(14.0));
         } else {
-            let glyph_color = if matches!(icon, Icon::HeartFilled) {
+            let glyph_color = if matches!(icon, Icon::HeartFilled | Icon::DislikeFilled) {
                 theme::ACCENT
             } else if response.hovered() || response.has_focus() {
                 color
