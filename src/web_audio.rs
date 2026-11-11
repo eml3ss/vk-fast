@@ -4039,11 +4039,12 @@ fn exact_artist(value: &Value, name: &str) -> Result<ArtistRef, WebAudioError> {
         .get("items")
         .and_then(Value::as_array)
         .ok_or(WebAudioError::Format)?;
-    let folded = name.trim().to_lowercase();
+    // Only the very same name counts, letter case included.
+    let name = name.trim();
     let mut matches = rows
         .iter()
         .filter_map(|value| artists_from_object(&serde_json::json!({"main_artists":[value]})).pop())
-        .filter(|artist| artist.name.to_lowercase() == folded);
+        .filter(|artist| artist.name.trim() == name);
     let artist = matches.next().ok_or(WebAudioError::NoStream)?;
     if matches.any(|other| other.id != artist.id) {
         return Err(WebAudioError::Format);
@@ -9932,13 +9933,16 @@ mod detail_tests {
 
     #[test]
     fn exact_name_fallback_rejects_partial_or_ambiguous_artist_search_results() {
-        let results = json!({"items":[{"id":"partial","name":"Canonical Remix"},{"id":"canonical-1","name":"CANONICAL"}]});
+        let results = json!({"items":[{"id":"partial","name":"Canonical Remix"},{"id":"upper","name":"CANONICAL"},{"id":"canonical-1","name":"Canonical"}]});
         assert_eq!(
-            exact_artist(&results, " canonical ").unwrap().id,
+            exact_artist(&results, " Canonical ").unwrap().id,
             "canonical-1"
         );
+        assert_eq!(exact_artist(&results, "CANONICAL").unwrap().id, "upper");
+        assert!(exact_artist(&results, "canonical").is_err());
+        assert!(exact_artist(&results, "Canonical Remi").is_err());
         assert!(exact_artist(&results, "Unknown").is_err());
-        let ambiguous = json!({"items":[{"id":"one","name":"Same"},{"id":"two","name":"same"}]});
+        let ambiguous = json!({"items":[{"id":"one","name":"Same"},{"id":"two","name":"Same"}]});
         assert!(exact_artist(&ambiguous, "Same").is_err());
         let duplicates = json!({"items":[{"id":"one","name":"Same"},{"id":"one","name":"Same"},{"id":"two","name":"Same"}]});
         assert!(exact_artist(&duplicates, "Same").is_err());

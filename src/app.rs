@@ -424,7 +424,7 @@ impl MusicPage {
     fn detail_key(&self) -> Option<String> {
         match self {
             Self::Artist(artist) => Some(if artist.id.is_empty() {
-                format!("artist-name:{}", artist.name.to_lowercase())
+                format!("artist-name:{}", artist.name)
             } else {
                 format!("artist:{}", artist.id)
             }),
@@ -1501,21 +1501,20 @@ impl MusicApp {
     }
 
     fn navigate_music(&mut self, ctx: &egui::Context, page: MusicPage) {
-        if let MusicPage::Artist(artist) = &page
-            && !crate::model::valid_artist_id(&artist.id)
-            && !artist.name.trim().is_empty()
-        {
-            // A display name is not a canonical VK artist identity. Search the
-            // whole name, including its spaces and punctuation, instead of
-            // resolving a possibly unrelated artist with the same name.
-            let query = artist.name.trim().chars().take(512).collect::<String>();
-            self.search.input = query.clone();
-            self.search.edit();
-            self.search.category = SearchCategory::All;
-            self.navigate_music(ctx, MusicPage::Search(query.clone()));
-            self.restore_search(ctx, &query);
-            return;
-        }
+        // A display name without VK's artist ID opens the artist whose name
+        // VK's artist search returns exactly; without one exact match the
+        // failed page is replaced by a search for the whole name.
+        let page = match page {
+            MusicPage::Artist(artist)
+                if !crate::model::valid_artist_id(&artist.id) && !artist.name.trim().is_empty() =>
+            {
+                MusicPage::Artist(ArtistRef {
+                    id: String::new(),
+                    name: artist.name.trim().to_owned(),
+                })
+            }
+            page => page,
+        };
         if !self.settings_open && self.page == page {
             return;
         }
@@ -6769,6 +6768,18 @@ impl MusicApp {
         }
         if self.page.detail_key().as_deref() != Some(key.as_str()) {
             return;
+        }
+        // An artist opened by name becomes the artist VK matched, so its
+        // follow state, history and later reloads use the canonical ID.
+        if let (MusicPage::Artist(reference), Ok(DetailPage::Artist(found))) = (&self.page, &result)
+            && reference.id.is_empty()
+            && crate::model::valid_artist_id(&found.artist.id)
+        {
+            self.page = MusicPage::Artist(found.artist.clone());
+            key = self.page.detail_key().unwrap_or(key);
+            if let Some(request) = &mut self.detail_request {
+                request.key = key.clone();
+            }
         }
         // A `/music/playlist/` link can lead to an album or single: show it
         // as VK describes it.
@@ -17629,8 +17640,21 @@ mod tests {
         assert_eq!(app.detail_error, Some(WebAudioError::Format));
     }
 
+    fn artist_test_page(artist: ArtistRef, releases_pending: bool) -> DetailPage {
+        DetailPage::Artist(crate::web_audio::ArtistPage {
+            artist,
+            image_url: None,
+            tracks: Vec::new(),
+            latest_releases: Vec::new(),
+            discography: Vec::new(),
+            releases_error: None,
+            releases_pending,
+            related: Vec::new(),
+        })
+    }
+
     #[test]
-    fn display_only_artist_names_search_whole_spaces_and_hyphens_without_a_detail_request() {
+    fn display_only_artist_names_open_the_exactly_named_artist_by_vk_id() {
         for (id, name) in [
             ("", "Artist With Spaces"),
             ("", "Artist - With Hyphens"),
@@ -17643,20 +17667,81 @@ mod tests {
             let playing = page(1, &[99]).items.remove(0);
             app.playing = Some(playing.clone());
             app.play_queue = Some(vec![playing.clone()]);
-            app.search.category = SearchCategory::Albums;
-            let artist = ArtistRef {
-                id: id.into(),
-                name: name.into(),
+            app.navigate_music(
+                &ctx,
+                MusicPage::Artist(ArtistRef {
+                    id: id.into(),
+                    name: name.into(),
+                }),
+            );
+            // The name is looked up as an artist, not searched right away.
+            let by_name = ArtistRef {
+                id: String::new(),
+                name: name.trim().into(),
             };
-            app.navigate_music(&ctx, MusicPage::Artist(artist));
+            assert!(app.page == MusicPage::Artist(by_name.clone()));
+            assert!(app.workers.is_empty());
+            // VK's exact match arrives first without, then with its discography.
+            let found = ArtistRef {
+                id: "canonical-7".into(),
+                name: by_name.name.clone(),
+            };
+            let (sender, receiver) = mpsc::sync_channel(2);
+            app.detail_request = Some(DetailRequest {
+                owner: 42,
+                key: app.page.detail_key().unwrap(),
+                canceled: Arc::new(AtomicBool::new(false)),
+                receiver,
+            });
+            sender
+                .send(Ok(artist_test_page(found.clone(), true)))
+                .unwrap();
+            app.poll_detail(&ctx);
+            assert!(app.page == MusicPage::Artist(found.clone()));
+            assert_eq!(
+                app.detail_request.as_ref().unwrap().key,
+                "artist:canonical-7"
+            );
+            sender
+                .send(Ok(artist_test_page(found.clone(), false)))
+                .unwrap();
+            app.poll_detail(&ctx);
+            assert!(app.detail_request.is_none() && app.detail_error.is_none());
+            assert!(matches!(
+                app.details.get("artist:canonical-7").map(|page| page.as_ref()),
+                Some(DetailPage::Artist(page)) if !page.releases_pending
+            ));
+            assert_eq!(app.playing.as_ref().unwrap().key(), playing.key());
+            app.go_back(&ctx);
+            assert!(app.page == MusicPage::Library);
+        }
+    }
+
+    #[test]
+    fn display_only_artist_names_without_an_exact_match_search_the_whole_name() {
+        for (name, error) in [
+            ("Artist With Spaces", WebAudioError::NoStream),
+            ("  Artist - With Hyphens  ", WebAudioError::Format),
+            ("A, B & C", WebAudioError::Rejected),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = search_test_app(&ctx);
+            app.search.category = SearchCategory::Albums;
+            app.navigate_music(
+                &ctx,
+                MusicPage::Artist(ArtistRef {
+                    id: String::new(),
+                    name: name.into(),
+                }),
+            );
+            let key = app.page.detail_key().unwrap();
+            detail_test_error(&mut app, 42, key, error);
+            app.poll_detail(&ctx);
             let query = name.trim();
             assert!(matches!(&app.page, MusicPage::Search(actual) if actual == query));
             assert_eq!(app.search.input, query);
             assert!(app.search.category == SearchCategory::All);
             assert!(app.detail_request.is_none() && app.detail_error.is_none());
-            assert!(app.workers.is_empty());
-            assert_eq!(app.playing.as_ref().unwrap().key(), playing.key());
-            assert_eq!(app.play_queue.as_ref().unwrap()[0].key(), playing.key());
             app.go_back(&ctx);
             assert!(app.page == MusicPage::Library);
         }
