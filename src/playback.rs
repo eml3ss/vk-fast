@@ -646,6 +646,11 @@ impl Pcm {
         true
     }
 }
+/// Smoothstep: 0 to 1 with a flat start and end.
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 #[cfg(test)]
 fn render(output: &mut [f32], pcm: &Pcm) {
     render_equalized(output, pcm, &mut crate::equalizer::Processor::new());
@@ -682,14 +687,17 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
     {
         let at = read + index as u64;
         let slot = (at % capacity_frames as u64) as usize * pcm.channels;
-        // Equal-power crossfade: the tracks' sum keeps its loudness.
+        // Equal-power crossfade (the tracks' sum keeps its loudness) along
+        // an S-curve: both ends are gentle, so the new track does not pop in
+        // and the old one does not drop out, and a longer crossfade changes
+        // the level more slowly throughout.
         let mut gain = volume;
         if at < fade_in_len {
-            let t = at as f32 / fade_in_len as f32;
+            let t = smooth(at as f32 / fade_in_len as f32);
             gain *= (t * std::f32::consts::FRAC_PI_2).sin();
         }
         if at >= fade_out_from {
-            let t = ((at - fade_out_from) as f32 / fade_out_len as f32).min(1.0);
+            let t = smooth(((at - fade_out_from) as f32 / fade_out_len as f32).min(1.0));
             gain *= (t * std::f32::consts::FRAC_PI_2).cos().max(0.0);
         }
         for (channel, sample) in output.iter_mut().enumerate() {
@@ -2040,6 +2048,8 @@ mod tests {
         let mut output = vec![0.0; 200];
         render(&mut output, &new);
         assert!(output[0] < 0.02, "starts silent: {}", output[0]);
+        // A gentle start: about 1 % of the level a twentieth of the way in.
+        assert!(output[5] < 0.02, "{}", output[5]);
         assert!((output[50] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.02);
         assert!(
             output[100..]
