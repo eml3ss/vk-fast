@@ -367,28 +367,99 @@ fn from_hsv([hue, saturation, value]: [f32; 3]) -> Color32 {
     Color32::from_rgb(channel(r), channel(g), channel(b))
 }
 
-/// A whole colour in text: `#6f2fdb`, `6f2fdb`, `111, 47, 219`,
-/// `111 47 219` or `rgb(111, 47, 219)`. One number alone is not a colour.
+/// A hex colour: `#6f2fdb` or `6f2fdb`, `0x6f2fdb`, and, with `#` or `0x`,
+/// the short `#fff` and `#6f2fdbff` (its alpha is dropped).
+fn parse_hex(text: &str) -> Option<Color32> {
+    let text = text.trim();
+    let (digits, prefixed) = match text
+        .strip_prefix('#')
+        .or_else(|| text.strip_prefix("0x"))
+        .or_else(|| text.strip_prefix("0X"))
+    {
+        Some(digits) => (digits, true),
+        None => (text, false),
+    };
+    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let pair = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    let single = |at: usize| {
+        u8::from_str_radix(&digits[at..=at], 16)
+            .ok()
+            .map(|c| c * 17)
+    };
+    match digits.len() {
+        6 => Some(Color32::from_rgb(pair(0)?, pair(2)?, pair(4)?)),
+        8 if prefixed => Some(Color32::from_rgb(pair(0)?, pair(2)?, pair(4)?)),
+        3 if prefixed => Some(Color32::from_rgb(single(0)?, single(1)?, single(2)?)),
+        _ => None,
+    }
+}
+
+/// A `#rrggbb` (or `#rrggbbaa`) inside other text, such as `color: #6F2FDB;`.
+fn hex_inside(text: &str) -> Option<Color32> {
+    text.match_indices('#').find_map(|(at, _)| {
+        let digits: String = text[at + 1..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect();
+        matches!(digits.len(), 6 | 8)
+            .then(|| parse_hex(&format!("#{digits}")))
+            .flatten()
+    })
+}
+
+/// A whole colour in pasted text: a hex colour (also inside other text),
+/// `111, 47, 219`, `111 47 219` or `rgb(111, 47, 219)`. One number alone is
+/// not a colour.
 fn parse_color(text: &str) -> Option<Color32> {
     let text = text.trim();
-    let hex = text.strip_prefix('#').unwrap_or(text);
-    if hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
-        return Some(Color32::from_rgb(channel(0)?, channel(2)?, channel(4)?));
+    if let Some(color) = parse_hex(text) {
+        return Some(color);
     }
     let numbers: Vec<&str> = text
         .split(|c: char| !c.is_ascii_digit())
         .filter(|part| !part.is_empty())
         .collect();
     let rest = text
+        .to_ascii_lowercase()
         .trim_start_matches("rgb")
         .chars()
         .all(|c| c.is_ascii_digit() || c.is_whitespace() || ",;()".contains(c));
-    if numbers.len() != 3 || !rest {
-        return None;
+    if numbers.len() == 3 && rest {
+        let channel = |index: usize| numbers[index].parse::<u8>().ok();
+        return Some(Color32::from_rgb(channel(0)?, channel(1)?, channel(2)?));
     }
-    let channel = |index: usize| numbers[index].parse::<u8>().ok();
-    Some(Color32::from_rgb(channel(0)?, channel(1)?, channel(2)?))
+    hex_inside(text)
+}
+
+/// A colour typed into a field: only a full six-digit hex, so `#6f2` or
+/// `111 47 2` on the way to a longer colour is not taken early.
+fn typed_color(text: &str) -> Option<Color32> {
+    let text = text.trim();
+    let digits = text.strip_prefix('#').unwrap_or(text);
+    if digits.len() == 6 {
+        return parse_hex(text);
+    }
+    hex_inside(text)
+}
+
+/// What an edit put into `old` to make `new`: the middle left when their
+/// shared start and end are cut off.
+fn inserted<'a>(old: &str, new: &'a str) -> &'a str {
+    let start = old
+        .char_indices()
+        .zip(new.char_indices())
+        .find(|((_, a), (_, b))| a != b)
+        .map_or(old.len().min(new.len()), |((at, _), _)| at);
+    let end = old[start..]
+        .chars()
+        .rev()
+        .zip(new[start..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum::<usize>();
+    &new[start..new.len() - end]
 }
 
 /// The accent's own colour picker, rounded like the rest of the app (egui's
@@ -406,7 +477,13 @@ fn color_picker(ui: &mut egui::Ui, color: &mut Color32) -> bool {
     ui.set_width(PICKER_WIDTH);
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
 
-    let mut whole = None;
+    // A whole colour pasted while no field (and no other text) is focused
+    // goes to the picker too.
+    let mut whole = if ui.memory(|memory| memory.focused().is_none()) {
+        take_pasted_color(ui)
+    } else {
+        None
+    };
     ui.horizontal(|ui| {
         // Three equal cells across the picker, each a name and its field.
         let gap = 8.0;
@@ -422,22 +499,9 @@ fn color_picker(ui: &mut egui::Ui, color: &mut Color32) -> bool {
                     let field = id.with(("channel", index));
                     if ui.memory(|memory| memory.has_focus(field)) {
                         // Taken before the field sees it: it would hold all of it.
-                        let pasted = ui.input_mut(|input| {
-                            let mut found = None;
-                            input.events.retain(|event| match event {
-                                egui::Event::Paste(text) => match parse_color(text) {
-                                    Some(color) => {
-                                        found = Some(color);
-                                        false
-                                    }
-                                    None => true,
-                                },
-                                _ => true,
-                            });
-                            found
-                        });
-                        whole = whole.or(pasted);
+                        whole = whole.or_else(|| take_pasted_color(ui));
                     }
+                    let old = state.fields[index].clone();
                     let response = ui.add_sized(
                         egui::vec2(ui.available_width(), 26.0),
                         egui::TextEdit::singleline(&mut state.fields[index])
@@ -447,7 +511,15 @@ fn color_picker(ui: &mut egui::Ui, color: &mut Color32) -> bool {
                     );
                     if response.changed() {
                         let text = state.fields[index].trim().to_owned();
-                        if let Some(full) = parse_color(&text) {
+                        // A hex typed in, or a colour put in beside the
+                        // number already there, fills all three.
+                        let full = typed_color(&text).or_else(|| {
+                            let put = inserted(&old, &state.fields[index]);
+                            (put.chars().count() > 1)
+                                .then(|| parse_color(put))
+                                .flatten()
+                        });
+                        if let Some(full) = full {
                             whole = Some(full);
                         } else if let Ok(value) = text.parse::<u8>() {
                             let mut channels = [color.r(), color.g(), color.b()];
@@ -536,6 +608,24 @@ fn color_picker(ui: &mut egui::Ui, color: &mut Color32) -> bool {
     state.color = *color;
     ui.data_mut(|data| data.insert_temp(id, state));
     *color != before
+}
+
+/// Removes this frame's pasted text if it is a whole colour, and returns it.
+fn take_pasted_color(ui: &egui::Ui) -> Option<Color32> {
+    ui.input_mut(|input| {
+        let mut found = None;
+        input.events.retain(|event| match event {
+            egui::Event::Paste(text) => match parse_color(text) {
+                Some(color) => {
+                    found = Some(color);
+                    false
+                }
+                None => true,
+            },
+            _ => true,
+        });
+        found
+    })
 }
 
 /// A round handle filled with the colour under it, ringed in white with a
@@ -665,16 +755,96 @@ mod tests {
             assert_eq!(parse_color(text), violet, "{text:?}");
         }
         for text in [
+            "0x6f2fdb",
+            "#6F2FDBFF",
+            "color: #6F2FDB;",
+            "RGB(111,47,219)",
+        ] {
+            assert_eq!(parse_color(text), violet, "{text:?}");
+        }
+        assert_eq!(parse_color("#fa0"), Some(Color32::from_rgb(255, 170, 0)));
+        for text in [
             "111",
+            "fa0",
             "111 47",
             "111 47 219 5",
             "300 47 219",
             "#6f2fd",
+            "6f2fdbff",
             "red",
             "",
         ] {
             assert_eq!(parse_color(text), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn typing_takes_a_colour_only_once_its_hex_is_whole() {
+        let violet = Some(Color32::from_rgb(111, 47, 219));
+        for text in ["#6f2fdb", "6f2fdb", "111#6f2fdb", "#6F2FDB "] {
+            assert_eq!(typed_color(text), violet, "{text:?}");
+        }
+        for text in ["#6f2", "#6f2fd", "111 47 2", "111 47 219", "11"] {
+            assert_eq!(typed_color(text), None, "{text:?}");
+        }
+        assert_eq!(inserted("111", "111#6f2fdb"), "#6f2fdb");
+        assert_eq!(inserted("111", "1#6f2fdb11"), "#6f2fdb");
+        assert_eq!(inserted("47", "200"), "200");
+        assert_eq!(inserted("11", "111"), "1");
+        assert_eq!(inserted("", "ё#6f2fdb"), "ё#6f2fdb");
+    }
+
+    #[test]
+    fn a_colour_pasted_with_no_field_focused_goes_to_the_picker() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut color = Accent::Blue.color();
+        picker_frame(&ctx, &mut color, Vec::new());
+        picker_frame(
+            &ctx,
+            &mut color,
+            vec![egui::Event::Paste("#6F2FDB".to_owned())],
+        );
+        assert_eq!(color, Color32::from_rgb(111, 47, 219));
+        // Other pasted text is left alone.
+        picker_frame(
+            &ctx,
+            &mut color,
+            vec![egui::Event::Paste("hello".to_owned())],
+        );
+        assert_eq!(color, Color32::from_rgb(111, 47, 219));
+    }
+
+    #[test]
+    fn hex_typed_after_the_number_in_a_field_converts_to_all_three() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut color = Color32::from_rgb(10, 20, 30);
+        picker_frame(&ctx, &mut color, Vec::new());
+        let id = egui::Id::new(PICKER).with("state").with(("channel", 0));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        picker_frame(&ctx, &mut color, Vec::new());
+        let mut seen = Vec::new();
+        for character in "#6f2fdb".chars() {
+            picker_frame(
+                &ctx,
+                &mut color,
+                vec![egui::Event::Text(character.to_string())],
+            );
+            seen.push(color);
+        }
+        // Nothing changes before the hex is whole, then all three do.
+        assert!(
+            seen[..6]
+                .iter()
+                .all(|c| *c == Color32::from_rgb(10, 20, 30)),
+            "{seen:?}"
+        );
+        assert_eq!(color, Color32::from_rgb(111, 47, 219));
+        let state = ctx
+            .data(|data| data.get_temp::<PickerState>(egui::Id::new(PICKER).with("state")))
+            .unwrap();
+        assert_eq!(state.fields, ["111", "47", "219"].map(str::to_owned));
     }
 
     #[test]
