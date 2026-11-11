@@ -9,7 +9,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use zeroize::Zeroize;
 
@@ -359,8 +359,16 @@ fn fetch_source(
         return Err(Error::RateLimited(retry - now));
     }
     let result = match source {
-        Source::Musixmatch => prepare(provider, config, shutdown)
-            .and_then(|()| provider.fetch(config, &request.query, canceled)),
+        Source::Musixmatch => prepare(provider, config, shutdown).and_then(|()| {
+            let delays: &[Duration] = if cfg!(test) {
+                &[]
+            } else {
+                &MUSIXMATCH_RETRY_DELAYS
+            };
+            retry_transient(delays, canceled, || {
+                provider.fetch(config, &request.query, canceled)
+            })
+        }),
         Source::Genius => provider.genius(&request.query, canceled),
         Source::Vk => request.vk.as_ref().ok_or(Error::NoSession).and_then(|vk| {
             if cfg!(test) {
@@ -393,6 +401,43 @@ fn fetch_source(
         if wait > 0 || error == Error::Auth {
             let _ = store::save(config);
         }
+    }
+    result
+}
+
+/// Pauses before asking Musixmatch again after a failure that may pass.
+const MUSIXMATCH_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(700), Duration::from_millis(1500)];
+
+/// Musixmatch now and then fails a request that succeeds when asked again: a
+/// dropped connection, a server error, a broken body or a passing "not
+/// found". Such failures are asked again after each delay before a fallback
+/// takes over. Refusals that repeat (authorization, a challenge, a limit, a
+/// restriction) are returned at once and never retried.
+fn retry_transient(
+    delays: &[Duration],
+    canceled: &impl Fn() -> bool,
+    mut attempt: impl FnMut() -> Result<Arc<Lyrics>, Error>,
+) -> Result<Arc<Lyrics>, Error> {
+    let mut result = attempt();
+    for delay in delays {
+        if !matches!(
+            result,
+            Err(Error::Network | Error::Format | Error::NotFound)
+        ) {
+            break;
+        }
+        let until = Instant::now() + *delay;
+        while Instant::now() < until {
+            if canceled() {
+                return Err(Error::Canceled);
+            }
+            thread::sleep((until - Instant::now()).min(Duration::from_millis(50)));
+        }
+        if canceled() {
+            return Err(Error::Canceled);
+        }
+        result = attempt();
     }
     result
 }
@@ -479,6 +524,65 @@ fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn musixmatch_failures_that_may_pass_are_asked_again_but_refusals_are_not() {
+        let delays = [Duration::ZERO; 2];
+        let found = Arc::new(crate::lyrics::test_data(3, true));
+        // A passing failure, then the lyrics.
+        for passing in [Error::Network, Error::Format, Error::NotFound] {
+            let mut calls = 0;
+            let result = retry_transient(&delays, &|| false, || {
+                calls += 1;
+                if calls < 3 {
+                    Err(passing)
+                } else {
+                    Ok(found.clone())
+                }
+            });
+            assert_eq!(calls, 3, "{passing:?}");
+            assert!(result.is_ok(), "{passing:?}");
+        }
+        // Three failures in a row: the last error goes on to the fallback.
+        let mut calls = 0;
+        let result = retry_transient(&delays, &|| false, || {
+            calls += 1;
+            Err(Error::NotFound)
+        });
+        assert_eq!((calls, result.unwrap_err()), (3, Error::NotFound));
+        // Refusals are not asked again.
+        for refusal in [
+            Error::Auth,
+            Error::Captcha,
+            Error::RateLimited(60),
+            Error::Restricted,
+            Error::Canceled,
+        ] {
+            let mut calls = 0;
+            let result = retry_transient(&delays, &|| false, || {
+                calls += 1;
+                Err(refusal)
+            });
+            assert_eq!((calls, result.unwrap_err()), (1, refusal));
+        }
+        // Found at once: one request.
+        let mut calls = 0;
+        assert!(
+            retry_transient(&delays, &|| false, || {
+                calls += 1;
+                Ok(found.clone())
+            })
+            .is_ok()
+        );
+        assert_eq!(calls, 1);
+        // A newer track cancels the wait.
+        let mut calls = 0;
+        let result = retry_transient(&[Duration::from_secs(60)], &|| true, || {
+            calls += 1;
+            Err(Error::Network)
+        });
+        assert_eq!((calls, result.unwrap_err()), (1, Error::Canceled));
+    }
+
     #[test]
     fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
         let mut calls = Vec::new();
