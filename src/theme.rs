@@ -241,15 +241,12 @@ pub fn slider<N: egui::emath::Numeric>(
     range: std::ops::RangeInclusive<N>,
     step: f64,
 ) -> egui::Response {
-    const HEIGHT: f32 = 24.0;
+    // A handle wider than the widgets' rounding (8): egui ends the blue fill
+    // that far past the handle's centre, so it stays hidden under it.
+    const HEIGHT: f32 = 28.0;
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = HEIGHT;
-        let rail = ui.spacing().slider_rail_height;
-        let visuals = ui.visuals_mut();
-        visuals.selection.bg_fill = ACCENT;
-        // The fill reaches `handle + rounding`: rounding the rail by its own
-        // half height keeps that end hidden under the handle.
-        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same((rail * 0.5) as u8);
+        ui.visuals_mut().selection.bg_fill = ACCENT;
         let response = ui.add(
             egui::Slider::new(value, range.clone())
                 .step_by(step)
@@ -275,8 +272,8 @@ pub fn slider<N: egui::emath::Numeric>(
         let half = egui::vec2(radius * aspect, radius) + egui::Vec2::splat(grow);
         ui.painter().rect_filled(
             egui::Rect::from_center_size(egui::pos2(x, response.rect.center().y), half * 2.0),
-            // egui's rounding: the widgets' 8 points, at most half the width.
-            egui::CornerRadius::same(half.x.min(8.0).floor() as u8),
+            // Exactly over egui's own handle: its rect and rounding.
+            ui.style().interact(&response).corner_radius,
             Color32::WHITE,
         );
         response
