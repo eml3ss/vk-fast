@@ -1,0 +1,75 @@
+name: 🎤 Текст песни (Lyrics)
+description: Текст не находится, не синхронизирован, отстаёт или чужой. / Lyrics missing, unsynced, out of time or wrong.
+labels: [bug]
+title: "Текст: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Тексты берутся из Musixmatch, VK и (если включено в настройках) Genius.
+        Иногда у трека в Musixmatch просто нет синхронизированного текста — тогда помочь не получится, но проверить стоит.
+
+  - type: input
+    id: track
+    attributes:
+      label: Название трека (Track title)
+      description: Как в VK Fast.
+      placeholder: "Godzilla"
+    validations:
+      required: true
+
+  - type: input
+    id: artist
+    attributes:
+      label: Исполнитель (Artist)
+      description: Как в VK Fast, со всеми исполнителями через запятую.
+      placeholder: "Eminem, Juice WRLD"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: problem
+    attributes:
+      label: Что не так (Problem)
+      options:
+        - Текст не найден (Not found)
+        - Текст есть, но без синхронизации (Not synced)
+        - Синхронизация отстаёт или спешит (Out of time)
+        - Показан текст другой песни (Wrong song)
+        - Другое (Other)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Источник в настройках (Lyrics source)
+      description: Настройки → «Воспроизведение» → «Источник текстов».
+      options:
+        - Musixmatch
+        - VK
+        - Не знаю (Not sure)
+    validations:
+      required: true
+
+  - type: input
+    id: elsewhere
+    attributes:
+      label: Где текст есть (Where it works)
+      description: Например, Spotify, Apple Music, сайт Musixmatch. Ссылка тоже подойдёт.
+      placeholder: "Spotify — синхронизированный"
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия VK Fast (Version)
+      description: Настройки → «О приложении».
+      placeholder: "0.6.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Подробности (Details)
+      description: Скриншот текста или на какой секунде начинается расхождение.

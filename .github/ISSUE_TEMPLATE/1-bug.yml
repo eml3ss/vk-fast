@@ -1,0 +1,142 @@
+name: 🐞 Ошибка (Bug)
+description: Что-то работает не так, вылетает или зависает. / Something is broken, crashes or hangs.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что сообщаете об ошибке! Чем точнее описание, тем быстрее её получится исправить.
+
+        > [!WARNING]
+        > **Не прикладывайте личные данные:** cookies, токены, QR-коды входа, файлы `music-session.json` и `musixmatch.json`, ссылки на аудиофайлы.
+        > Логи VK Fast пишутся уже без них — их прикладывать можно.
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия VK Fast (Version)
+      description: Настройки → «О приложении». / Settings → About.
+      placeholder: "0.6.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Система (OS)
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux — Wayland
+        - Linux — X11
+        - Другая (Other)
+    validations:
+      required: true
+
+  - type: input
+    id: system-details
+    attributes:
+      label: Дистрибутив и окружение (Distro and desktop)
+      description: Для Linux — дистрибутив и рабочий стол или оконный менеджер.
+      placeholder: "Arch + KDE Plasma 6, Ubuntu 24.04 + GNOME, Fedora + Hyprland"
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Как установлено (Package)
+      options:
+        - Windows — установщик (setup.exe)
+        - Windows — portable (zip)
+        - Linux — AppImage
+        - Linux — tar.gz
+        - Собрано из исходников (Built from source)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Где ошибка (Area)
+      options:
+        - Воспроизведение и плеер (Playback)
+        - Очередь, VK Mix и миксы (Queue and mixes)
+        - Тексты песен (Lyrics)
+        - Вход по QR и сессия (Sign-in)
+        - Моя музыка, плейлисты, альбомы (Library)
+        - Поиск (Search)
+        - Главная (Home)
+        - Страницы исполнителей и сообществ (Artist and owner pages)
+        - Внешний вид и окно (Interface and window)
+        - Трей, медиаклавиши, MPRIS/SMTC, Discord (System integration)
+        - Обновления на Windows (Windows updates)
+        - Другое (Other)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Что случилось (What happened)
+      description: Опишите ошибку своими словами. Если появилось сообщение об ошибке — перепишите его текст.
+      placeholder: "Например: после перемотки трек замолкает, хотя полоса прогресса идёт дальше."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить (Steps to reproduce)
+      description: По шагам, чтобы ошибку можно было воспроизвести.
+      placeholder: |
+        1. Открыть «Мою музыку»
+        2. Включить любой трек
+        3. Перемотать на середину
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидалось (Expected behaviour)
+      placeholder: "Трек продолжает играть с выбранного места."
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Как часто (How often)
+      options:
+        - Всегда (Always)
+        - Иногда (Sometimes)
+        - Было один раз (Once)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Лог (Log)
+      description: |
+        Лог очень помогает разобраться. Как его получить:
+        1. Настройки → «Общие» → включите **«Включить логи»**.
+        2. Повторите ошибку.
+        3. Нажмите **«Открыть папку логов»** и перетащите сюда файл `vk-fast.log` (или вставьте последние строки).
+
+        На Linux лог лежит в `~/.config/vk-fast/logs/vk-fast.log`.
+      placeholder: Перетащите файл vk-fast.log сюда или вставьте его строки.
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Скриншоты или видео (Screenshots or video)
+      description: Перетащите файлы сюда. Перед отправкой проверьте, что на них нет QR-кода входа и личных данных.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверка (Checklist)
+      options:
+        - label: Я поискал(а) похожие issues, и такой ещё нет. / I searched existing issues.
+          required: true
+        - label: Я не прикладываю cookies, токены, QR-коды и файлы сессии. / I am not attaching cookies, tokens, QR codes or session files.
+          required: true

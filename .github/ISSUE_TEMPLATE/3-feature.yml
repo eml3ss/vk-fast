@@ -1,0 +1,57 @@
+name: ✨ Идея (Feature request)
+description: Предложить новую функцию или улучшение. / Suggest a new feature or improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите, **что хочется сделать** и **зачем** — так проще понять идею, чем по одному названию функции.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Чего не хватает (What is missing)
+      description: Какую задачу сейчас неудобно или нельзя решить.
+      placeholder: "Хочу видеть, какие треки исполнителя уже есть в моей музыке, не листая всю библиотеку."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Как это может выглядеть (Proposal)
+      description: Как бы вы хотели, чтобы это работало. Можно приложить набросок или скриншот.
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Где так уже сделано (Examples)
+      description: Похожая функция в других приложениях — Spotify, Яндекс Музыка, VK и т. д. Скриншоты приветствуются.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Раздел приложения (Area)
+      options:
+        - Воспроизведение и плеер (Playback)
+        - Очередь, VK Mix и миксы (Queue and mixes)
+        - Тексты песен (Lyrics)
+        - Моя музыка, плейлисты, альбомы (Library)
+        - Поиск (Search)
+        - Главная (Home)
+        - Страницы исполнителей и сообществ (Artist and owner pages)
+        - Внешний вид и окно (Interface and window)
+        - Трей, медиаклавиши, MPRIS/SMTC, Discord (System integration)
+        - Другое (Other)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверка (Checklist)
+      options:
+        - label: Я поискал(а) похожие предложения, и такого ещё нет. / I searched existing requests.
+          required: true
