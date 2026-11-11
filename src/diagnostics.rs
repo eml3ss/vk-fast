@@ -82,7 +82,17 @@ pub fn init(active: bool) -> io::Result<()> {
 }
 
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if CAPTURE.with(|capture| capture.borrow().is_some()) {
+        return true;
+    }
     logger().enabled.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own log, kept apart from the shared one and other tests.
+    static CAPTURE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The interface's own words (labels, buttons, notices), learned as the app
@@ -236,13 +246,22 @@ impl SendLogged for reqwest::blocking::RequestBuilder {
 
 /// Not for audio callbacks. This never waits for disk or for a full queue.
 pub fn event(component: &str, message: &str) {
+    #[cfg(test)]
+    {
+        let captured = CAPTURE.with(|capture| {
+            capture.borrow_mut().as_mut().map(|log| {
+                log.push_str(&record(component, message));
+            })
+        });
+        if captured.is_some() {
+            return;
+        }
+    }
     queue_event(logger(), component, message);
 }
 
-fn queue_event(state: &Logger, component: &str, message: &str) {
-    if !state.enabled.load(Ordering::Acquire) {
-        return;
-    }
+/// One line of the log.
+fn record(component: &str, message: &str) -> String {
     let component: String = component
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || "._-".contains(*character))
@@ -250,7 +269,14 @@ fn queue_event(state: &Logger, component: &str, message: &str) {
         .collect();
     let message = sanitize(message);
     let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
-    let line = format!("{timestamp} [{component}] {message}\n");
+    format!("{timestamp} [{component}] {message}\n")
+}
+
+fn queue_event(state: &Logger, component: &str, message: &str) {
+    if !state.enabled.load(Ordering::Acquire) {
+        return;
+    }
+    let line = record(component, message);
     let sender = state.sender.lock().ok().and_then(|sender| sender.clone());
     if let Some(sender) = sender
         && matches!(
@@ -514,34 +540,14 @@ impl LogWriter {
     }
 }
 
-/// Runs `run` with the shared log written to a temporary file, and returns
-/// what it wrote. Capturing tests take turns; other tests' records may show
-/// up too.
+/// Runs `run` with logging on for this thread only, and returns what it
+/// wrote. The shared log and other tests are not touched.
 #[cfg(test)]
 pub fn capture_for_test<R>(run: impl FnOnce() -> R) -> (R, String) {
-    static SERIAL: Mutex<()> = Mutex::new(());
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut bytes = [0u8; 12];
-    getrandom::fill(&mut bytes).unwrap();
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let directory = std::env::temp_dir().join(format!("vk-fast-capture-{suffix}"));
-    let path = directory.join("logs/vk-fast.log");
-    let state = logger();
-    {
-        let _control = state.control.lock().unwrap();
-        stop(state).unwrap();
-        start(state, &path).unwrap();
-    }
+    CAPTURE.with(|capture| *capture.borrow_mut() = Some(String::new()));
     let result = run();
-    {
-        let _control = state.control.lock().unwrap();
-        stop(state).unwrap();
-    }
-    let text = fs::read_to_string(&path).unwrap_or_default();
-    let _ = fs::remove_dir_all(&directory);
-    (result, text)
+    let log = CAPTURE.with(|capture| capture.borrow_mut().take().unwrap_or_default());
+    (result, log)
 }
 
 #[cfg(test)]

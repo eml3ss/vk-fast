@@ -715,3 +715,35 @@ fn ctrl_volume_keys_switch_changes_app_volume_and_stays_grey_on_wayland() {
     TEST_SUPPORT.with(|support| support.set(Support::Available));
     app.volume_save_at.take();
 }
+
+#[test]
+fn the_scrollbar_keeps_the_same_gap_to_the_window_edge_as_the_content_on_the_left() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    app.demo = true;
+    app.library.tracks = page(40, &(1..=40).collect::<Vec<_>>()).items;
+    app.library.exhausted = true;
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    // The bar's full-height track along the right edge.
+    let bar = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.rect.left() > size.x - 40.0
+                    && rect.rect.height() > 300.0
+                    && rect.fill.a() > 0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.height().total_cmp(&b.height()))
+        .expect("the list's scrollbar");
+    let search = account_ui_text_rect(&output, "Search loaded tracks").unwrap();
+    // The search field's frame starts 8 points after the page's left edge.
+    let left_gap = 8.0;
+    assert!(search.left() > app.page_rect.left() + left_gap);
+    assert_eq!(size.x - bar.right(), left_gap, "bar {bar:?}");
+}

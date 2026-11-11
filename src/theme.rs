@@ -490,7 +490,9 @@ fn install_style(ctx: &egui::Context) {
         style.spacing.scroll = egui::style::ScrollStyle {
             bar_width: 8.0,
             bar_inner_margin: 6.0,
-            bar_outer_margin: 2.0,
+            // The page's own 8-point padding is the bar's gap to the window
+            // edge, the same as the content's gap on the left.
+            bar_outer_margin: 0.0,
             handle_min_length: 28.0,
             ..egui::style::ScrollStyle::solid()
         };

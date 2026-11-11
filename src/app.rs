@@ -17469,8 +17469,10 @@ mod tests {
                     "Excessive left padding: {art:?} in {row:?}"
                 );
                 if let Some(width) = previous_width {
+                    // The bar (8) and its gap to the rows (6); its gap to the
+                    // window edge is the page's own padding.
                     assert!(
-                        (width - row.width() - 16.0).abs() < 0.5,
+                        (width - row.width() - 14.0).abs() < 0.5,
                         "Only a visible scrollbar should reserve the right gutter"
                     );
                 }
@@ -17505,8 +17507,9 @@ mod tests {
                     bar.left() - row.right() >= 5.5,
                     "Scrollbar overlaps a track"
                 );
+                // The page's 8-point padding, as on the left.
                 assert!(
-                    (size.x - bar.right() - 10.0).abs() < 0.5,
+                    (size.x - bar.right() - 8.0).abs() < 0.5,
                     "Scrollbar did not use the right margin"
                 );
             }
