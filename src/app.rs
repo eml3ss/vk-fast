@@ -20,6 +20,9 @@ mod app_diagnostics;
 mod audio_upload_app;
 
 #[cfg(test)]
+#[path = "crossfade_tests.rs"]
+mod crossfade_tests;
+#[cfg(test)]
 #[path = "current_settings_tests.rs"]
 mod current_settings_tests;
 #[path = "discord_rpc_app.rs"]
@@ -1380,6 +1383,13 @@ pub struct MusicApp {
     page_rect: egui::Rect,
     mix_after_queue: bool,
     mix_after_queue_save_failed: bool,
+    /// Tracks crossfade over `crossfade_seconds` when one ends by itself.
+    crossfade: bool,
+    crossfade_seconds: u8,
+    crossfade_save_failed: bool,
+    /// Until then, the track being resolved crossfades with the one still
+    /// playing out (set when its last seconds started the next one).
+    crossfade_until: Option<Instant>,
     screen_cache: Option<(i64, Receiver<screen_cache_app::Snapshot>)>,
     screen_cache_owner: Option<i64>,
     /// Known "date added" of own playlist tracks, by playlist.
@@ -1613,6 +1623,14 @@ impl MusicApp {
             crate::equalizer::Settings::default()
         };
         player.set_equalizer(equalizer.enabled, &equalizer.gains);
+        #[cfg(not(test))]
+        let (crossfade, crossfade_seconds) = preferences::load_crossfade();
+        // UI tests never read the user's preferences for it.
+        #[cfg(test)]
+        let (crossfade, crossfade_seconds) = {
+            let _ = (preferences::load_crossfade, preferences::save_crossfade);
+            (false, preferences::DEFAULT_CROSSFADE_SECONDS)
+        };
         let (shuffle, repeat) = preferences::load_playback_modes();
         let mut app = Self {
             session: None,
@@ -1769,6 +1787,10 @@ impl MusicApp {
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: preferences::load_mix_after_queue(),
             mix_after_queue_save_failed: false,
+            crossfade,
+            crossfade_seconds,
+            crossfade_save_failed: false,
+            crossfade_until: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),
@@ -2409,7 +2431,10 @@ impl MusicApp {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.playback_cancel = Some(cancel.clone());
-        self.player.stop();
+        // A crossfade keeps the ending track audible while this one loads.
+        if !self.crossfading() {
+            self.player.stop();
+        }
         self.playback_pending = None;
         self.playback_error = None;
         self.selected = Some(key);
@@ -2989,8 +3014,21 @@ impl MusicApp {
                             self.send_broadcast(Some(resolved.track.key()));
                         }
                         let position = self.resume_position.take().unwrap_or(0.0);
-                        self.player
-                            .play_cached(resolved.cache_key, resolved.url, position);
+                        if position == 0.0 && self.crossfading() {
+                            crate::diagnostics::event(
+                                "playback",
+                                &format!("crossfade: {}s", self.crossfade_seconds),
+                            );
+                            self.player.crossfade_cached(
+                                resolved.cache_key,
+                                resolved.url,
+                                f32::from(self.crossfade_seconds),
+                            );
+                        } else {
+                            self.player
+                                .play_cached(resolved.cache_key, resolved.url, position);
+                        }
+                        self.crossfade_until = None;
                         self.playing = Some(resolved.track);
                     }
                     Err(UiError::NoStream | UiError::Music(WebAudioError::NoStream)) => {
@@ -3010,6 +3048,7 @@ impl MusicApp {
                 }
             }
         }
+        self.start_crossfade(ctx);
         if self.playback_pending.is_none()
             && self.playing.is_some()
             && matches!(self.player.snapshot().state, PlaybackState::Ended)
@@ -3024,6 +3063,54 @@ impl MusicApp {
             self.finished_handled = true;
             crate::diagnostics::event("playback", "track ended; advancing");
             self.advance_track(ctx, true);
+        }
+    }
+
+    /// The next track is being started under a crossfade.
+    fn crossfading(&self) -> bool {
+        self.crossfade_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// In a track's last `crossfade_seconds`, starts the next one as it would
+    /// start at the end, without stopping this one: only now does the next
+    /// track begin to load. Repeat one, short tracks and a track that is
+    /// paused, loading or seeking end as before.
+    fn start_crossfade(&mut self, ctx: &egui::Context) {
+        if !self.crossfade
+            || self.finished_handled
+            || self.playback_pending.is_some()
+            || self.resume_position.is_some()
+            || self.seek_position.is_some()
+            || self.home_autoplay.is_some()
+            || self.playlist_controls.loading_play()
+            || self
+                .mix_request
+                .as_ref()
+                .is_some_and(|request| request.start)
+        {
+            return;
+        }
+        let Some(track) = &self.playing else { return };
+        let snapshot = self.player.snapshot();
+        let fade = f64::from(self.crossfade_seconds);
+        let duration = f64::from(track.duration);
+        let left = duration - snapshot.position;
+        if snapshot.state != PlaybackState::Playing
+            || duration < fade * 2.0 + 5.0
+            || left > fade
+            || self.play_order.repeats(Some(track.key())).is_some()
+        {
+            return;
+        }
+        // The track's own end must not advance a second time.
+        self.finished_handled = true;
+        self.crossfade_until = Some(Instant::now() + Duration::from_secs_f64(left.max(0.0) + 0.5));
+        crate::diagnostics::event("playback", "crossfade: next track starting");
+        self.advance_track(ctx, true);
+        if self.playback_pending.is_none() {
+            // Nothing to fade into (a mix or page still loading, or the end).
+            self.crossfade_until = None;
         }
     }
 
@@ -10190,6 +10277,62 @@ impl MusicApp {
         );
     }
 
+    /// The crossfade switch and, while it is on, its length.
+    fn crossfade_settings(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
+        let t = |ru, en| language.text(ru, en);
+        let mut save = false;
+        if theme::switch(
+            ui,
+            &mut self.crossfade,
+            t("Плавный переход между треками", "Crossfade between tracks"),
+        )
+        .changed()
+        {
+            save = true;
+        }
+        ui.label(
+            RichText::new(t(
+                "Когда трек заканчивается сам, следующий начинает играть заранее и плавно сменяет его. Следующий трек начинает загружаться только в этот момент.",
+                "When a track ends by itself, the next one starts early and gradually takes over. The next track only starts loading at that moment.",
+            ))
+            .small()
+            .color(MUTED),
+        );
+        if self.crossfade {
+            ui.add_space(10.0);
+            ui.label(format!(
+                "{}: {} {}",
+                t("Длительность перехода", "Crossfade length"),
+                self.crossfade_seconds,
+                t("с", "s"),
+            ));
+            let slider = theme::slider(
+                ui,
+                &mut self.crossfade_seconds,
+                1..=preferences::MAX_CROSSFADE_SECONDS,
+                1.0,
+            );
+            // Saved once the slider settles, not on every step of a drag.
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                save = true;
+            }
+        }
+        if save {
+            self.crossfade_save_failed = !cfg!(test)
+                && preferences::save_crossfade(self.crossfade, self.crossfade_seconds).is_err();
+        }
+        if self.crossfade_save_failed {
+            ui.colored_label(
+                Color32::from_rgb(255, 158, 153),
+                t(
+                    "Не удалось сохранить настройку.",
+                    "Could not save the setting.",
+                ),
+            );
+        }
+    }
+
     /// Applies a changed equalizer at once and saves it shortly after, so a
     /// drag writes the file once.
     fn equalizer_changed(&mut self, ctx: &egui::Context, outcome: crate::equalizer_ui::Outcome) {
@@ -10252,6 +10395,7 @@ impl MusicApp {
             SettingsSection::Playback => &[
                 Setting::VolumeKeys,
                 Setting::MixAfterQueue,
+                Setting::Crossfade,
                 Setting::Broadcast,
                 Setting::Lyrics,
             ],
@@ -10728,8 +10872,17 @@ impl MusicApp {
                         );
                     }
                 }
-                if query.matches(Setting::Broadcast) {
+                if query.matches(Setting::Crossfade) {
                     if query.matches(Setting::VolumeKeys) || query.matches(Setting::MixAfterQueue) {
+                        ui.add_space(16.0);
+                    }
+                    self.crossfade_settings(ui);
+                }
+                if query.matches(Setting::Broadcast) {
+                    if query.matches(Setting::VolumeKeys)
+                        || query.matches(Setting::MixAfterQueue)
+                        || query.matches(Setting::Crossfade)
+                    {
                         ui.add_space(16.0);
                     }
                     let label = t(
@@ -10786,15 +10939,16 @@ impl MusicApp {
                     ui.label(t("Лимит аудиокэша", "Audio cache limit"));
                     let mut gb = self.cache_limit_mb as f32 / 1024.0;
                     ui.horizontal(|ui| {
-                        let response = ui.add_enabled(
-                            self.audio_cache.is_some(),
-                            egui::Slider::new(
-                                &mut gb,
-                                0.0..=preferences::MAX_CACHE_MB as f32 / 1024.0,
-                            )
-                            .step_by(0.25)
-                            .show_value(false),
-                        );
+                        let response = ui
+                            .add_enabled_ui(self.audio_cache.is_some(), |ui| {
+                                theme::slider(
+                                    ui,
+                                    &mut gb,
+                                    0.0..=preferences::MAX_CACHE_MB as f32 / 1024.0,
+                                    0.25,
+                                )
+                            })
+                            .inner;
                         ui.label(format!("{gb:.2} {}", t("ГБ", "GB")));
                         if response.changed() {
                             self.cache_limit_mb = (gb * 1024.0).round() as u32;
@@ -11433,7 +11587,13 @@ impl MusicApp {
                 .playing
                 .as_ref()
                 .map_or(0.0, |track| f64::from(track.duration));
-            ctx.request_repaint_after(playing_wake(snapshot.position, duration, self.seek_pixels));
+            let mut wake = playing_wake(snapshot.position, duration, self.seek_pixels);
+            // Wake for the crossfade's start too, even with no window shown.
+            let crossfade_in = duration - f64::from(self.crossfade_seconds) - snapshot.position;
+            if self.crossfade && !self.finished_handled && crossfade_in > 0.0 {
+                wake = wake.min(Duration::from_secs_f64(crossfade_in + 0.005));
+            }
+            ctx.request_repaint_after(wake);
         }
     }
 }
@@ -12044,6 +12204,10 @@ mod tests {
             page_rect: egui::Rect::NOTHING,
             mix_after_queue: false,
             mix_after_queue_save_failed: false,
+            crossfade: false,
+            crossfade_seconds: preferences::DEFAULT_CROSSFADE_SECONDS,
+            crossfade_save_failed: false,
+            crossfade_until: None,
             screen_cache: None,
             screen_cache_owner: None,
             playlist_dates: HashMap::new(),

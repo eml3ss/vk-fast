@@ -21,6 +21,8 @@ use zeroize::Zeroizing;
 const TICK: Duration = Duration::from_millis(20);
 const DEFAULT_VOLUME: f32 = 0.7;
 const BUFFER_SECONDS: usize = 15;
+/// Longest crossfade: the fading track plays out of its decoded buffer.
+pub const MAX_CROSSFADE_SECONDS: f32 = 12.0;
 const HISTORY_SECONDS: usize = 15;
 const MAX_PCM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -135,6 +137,9 @@ enum Command {
         epoch: Epoch,
         source: Source,
         offset: f64,
+        /// Seconds the playing track fades out while this one fades in; 0
+        /// switches at once.
+        crossfade: f32,
     },
     Pause,
     Resume,
@@ -256,7 +261,26 @@ impl Player {
         );
     }
 
+    /// Starts the next track while the playing one fades out over
+    /// `seconds`: the new one only starts loading now, and the old one fades
+    /// once the new one is heard (sooner if it ends first).
+    pub fn crossfade_cached(&mut self, key: CacheKey, url: Option<String>, seconds: f32) {
+        self.play_source_with(
+            Source {
+                url: url.map(Zeroizing::new),
+                duration: key.duration,
+                key: Some(key),
+            },
+            0.0,
+            seconds,
+        );
+    }
+
     fn play_source(&mut self, source: Source, offset: f64) {
+        self.play_source_with(source, offset, 0.0);
+    }
+
+    fn play_source_with(&mut self, source: Source, offset: f64, crossfade: f32) {
         self.source_duration = Some(source.duration);
         let epoch = self.control.new_source();
         if let Ok(mut s) = self.state.lock() {
@@ -268,6 +292,11 @@ impl Player {
             epoch,
             source,
             offset,
+            crossfade: if crossfade.is_finite() {
+                crossfade.clamp(0.0, MAX_CROSSFADE_SECONDS)
+            } else {
+                0.0
+            },
         });
     }
     pub fn pause(&self) {
@@ -469,7 +498,14 @@ struct Pcm {
     started: AtomicBool,
     volume: Arc<AtomicU32>,
     equalizer: Arc<crate::equalizer::Shared>,
+    /// Frames this stream fades in over from its first frame (0: none).
+    fade_in_from: u64,
+    fade_in_len: u64,
+    /// Frame where a crossfade out starts (`NO_FADE`: none) and its length.
+    fade_out_from: AtomicU64,
+    fade_out_len: AtomicU64,
 }
+const NO_FADE: u64 = u64::MAX;
 impl Pcm {
     fn new(channels: u16, sample_rate: u32, volume: Arc<AtomicU32>, paused: bool) -> Self {
         let channels = usize::from(channels).max(1);
@@ -506,6 +542,10 @@ impl Pcm {
             started: AtomicBool::new(false),
             volume,
             equalizer: Arc::default(),
+            fade_in_from: 0,
+            fade_in_len: 0,
+            fade_out_from: AtomicU64::new(NO_FADE),
+            fade_out_len: AtomicU64::new(0),
         }
     }
     fn is_primed(&self) -> bool {
@@ -610,15 +650,28 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
     let requested = output.len() / pcm.channels;
     let frames = requested.min(available);
     let volume = f32::from_bits(pcm.volume.load(Ordering::Relaxed));
+    let fade_out_from = pcm.fade_out_from.load(Ordering::Acquire);
+    let fade_out_len = pcm.fade_out_len.load(Ordering::Relaxed).max(1);
     let capacity_frames = pcm.capacity / pcm.channels;
     for (index, output) in output[..frames * pcm.channels]
         .chunks_exact_mut(pcm.channels)
         .enumerate()
     {
-        let slot = ((read + index as u64) % capacity_frames as u64) as usize * pcm.channels;
+        let at = read + index as u64;
+        let slot = (at % capacity_frames as u64) as usize * pcm.channels;
+        // Equal-power crossfade: the tracks' sum keeps its loudness.
+        let mut gain = volume;
+        if at < pcm.fade_in_from.saturating_add(pcm.fade_in_len) {
+            let t = at.saturating_sub(pcm.fade_in_from) as f32 / pcm.fade_in_len as f32;
+            gain *= (t * std::f32::consts::FRAC_PI_2).sin();
+        }
+        if at >= fade_out_from {
+            let t = ((at - fade_out_from) as f32 / fade_out_len as f32).min(1.0);
+            gain *= (t * std::f32::consts::FRAC_PI_2).cos().max(0.0);
+        }
         for (channel, sample) in output.iter_mut().enumerate() {
             let raw = f32::from_bits(pcm.samples[slot + channel].load(Ordering::Relaxed));
-            *sample = raw * volume;
+            *sample = raw * gain;
         }
     }
     let played = &mut output[..frames * pcm.channels];
@@ -1420,6 +1473,42 @@ impl Running {
         (position, end, ready)
     }
 }
+impl Running {
+    /// Still playing out loud: worth fading rather than cutting.
+    fn audible(&self) -> bool {
+        let pcm = &self.pcm;
+        let read = pcm.cursor.load(Ordering::Acquire) & PCM_FRAME_MASK;
+        pcm.started.load(Ordering::Acquire)
+            && !pcm.paused.load(Ordering::Acquire)
+            && !pcm.canceled.load(Ordering::Acquire)
+            && !pcm.device_failed.load(Ordering::Acquire)
+            && !pcm.read_failed.load(Ordering::Acquire)
+            && !(pcm.eof.load(Ordering::Acquire) && read >= pcm.end_frame.load(Ordering::Acquire))
+    }
+}
+
+/// One controller tick of a crossfade's outgoing track: once the new track is
+/// `heard`, its fade starts where it is, over `frames` or what is left of it.
+/// True when it is silent and can be dropped.
+fn crossfade_step(pcm: &Pcm, duration: u32, frames: u64, heard: bool) -> bool {
+    let read = pcm.cursor.load(Ordering::Acquire) & PCM_FRAME_MASK;
+    let mut from = pcm.fade_out_from.load(Ordering::Acquire);
+    if from == NO_FADE && heard {
+        let left = frame_at(f64::from(duration)).saturating_sub(read);
+        pcm.fade_out_len
+            .store(frames.min(left).max(1), Ordering::Relaxed);
+        pcm.fade_out_from.store(read, Ordering::Release);
+        from = read;
+    }
+    let faded =
+        from != NO_FADE && read >= from.saturating_add(pcm.fade_out_len.load(Ordering::Relaxed));
+    let ended = pcm.eof.load(Ordering::Acquire) && read >= pcm.end_frame.load(Ordering::Acquire);
+    faded
+        || ended
+        || pcm.read_failed.load(Ordering::Acquire)
+        || pcm.device_failed.load(Ordering::Acquire)
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
         self.pcm.canceled.store(true, Ordering::Release);
@@ -1483,6 +1572,7 @@ fn start(
     source: &Source,
     offset: f64,
     output: Output,
+    fade_in: u64,
     paused: bool,
     control: Arc<Control>,
     cache: Option<&AudioCache>,
@@ -1505,6 +1595,8 @@ fn start(
     let pcm = Arc::new(Pcm {
         underruns: control.underruns.clone(),
         equalizer: output.equalizer,
+        fade_in_from: frame,
+        fade_in_len: fade_in,
         ..Pcm::new(CHANNELS, SAMPLE_RATE, output.volume, paused)
     });
     prefill(&pcm, &bytes, false);
@@ -1583,19 +1675,29 @@ fn controller(
     let mut running: Option<Running> = None;
     let mut active = Epoch::default();
     let mut pause_intent = false;
+    // The track fading out under a crossfade, and the fade's length.
+    let mut fading: Option<(Running, u64)> = None;
     loop {
         match commands.recv_timeout(TICK) {
             Ok(Command::Play {
                 epoch,
                 source: selected,
                 offset,
+                crossfade,
             }) => {
                 if !control.current_source(epoch) {
                     continue;
                 }
                 let duration = selected.duration;
                 source = Some(selected);
-                running = None;
+                // A crossfade keeps the audible track playing on its own
+                // output until the new one is heard; anything else stops it.
+                let frames = (f64::from(crossfade) * f64::from(SAMPLE_RATE)) as u64;
+                fading = running
+                    .take()
+                    .filter(|old| frames > 0 && old.audible())
+                    .map(|old| (old, frames));
+                let fade_in = if fading.is_some() { frames } else { 0 };
                 active = epoch;
                 pause_intent = false;
                 if !control.current(epoch) {
@@ -1613,6 +1715,7 @@ fn controller(
                     source.as_ref().unwrap(),
                     offset,
                     output.clone(),
+                    fade_in,
                     false,
                     control.clone(),
                     cache.as_ref(),
@@ -1629,6 +1732,7 @@ fn controller(
             }
             Ok(Command::Pause) => {
                 pause_intent = true;
+                fading = None;
                 if let Some(r) = &running {
                     r.pcm.paused.store(true, Ordering::Relaxed);
                 }
@@ -1643,6 +1747,7 @@ fn controller(
                 if !control.current(epoch) {
                     continue;
                 }
+                fading = None;
                 active = epoch;
                 let Some(source) = &source else {
                     publish(&state, &control, active, PlaybackState::Stopped, (0.0, 0.0));
@@ -1694,6 +1799,7 @@ fn controller(
                         source,
                         offset,
                         output.clone(),
+                        0,
                         paused,
                         control.clone(),
                         cache.as_ref(),
@@ -1715,12 +1821,21 @@ fn controller(
                 }
                 active = epoch;
                 running = None;
+                fading = None;
                 source = None;
                 pause_intent = false;
                 publish(&state, &control, active, PlaybackState::Stopped, (0.0, 0.0));
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => (),
+        }
+        if let Some((old, frames)) = &fading {
+            let heard = running
+                .as_ref()
+                .is_some_and(|new| new.pcm.started.load(Ordering::Acquire));
+            if crossfade_step(&old.pcm, old.duration, *frames, heard) {
+                fading = None;
+            }
         }
         if !control.current_source(active) {
             running = None;
@@ -1805,6 +1920,52 @@ mod tests {
         window.append(pcm, &bytes);
         pcm.primed.store(epoch | 1, Ordering::Release);
     }
+    #[test]
+    fn a_crossfade_raises_the_new_track_and_lowers_the_old_with_equal_power() {
+        // 100 frames a second keeps the arithmetic readable.
+        let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+        let new = Pcm {
+            fade_in_from: 0,
+            fade_in_len: 100,
+            ..Pcm::new(1, 100, volume.clone(), false)
+        };
+        seed_pcm(&new, 0, std::iter::repeat_n(1.0, 300));
+        let mut output = vec![0.0; 200];
+        render(&mut output, &new);
+        assert!(output[0] < 0.02, "starts silent: {}", output[0]);
+        assert!((output[50] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.02);
+        assert!(
+            output[100..]
+                .iter()
+                .all(|sample| (*sample - 1.0).abs() < 1e-6)
+        );
+        // The old track: nothing changes until the new one is heard.
+        let old = Pcm::new(1, 100, volume, false);
+        seed_pcm(&old, 0, std::iter::repeat_n(1.0, 1_000));
+        old.eof.store(true, Ordering::Release);
+        old.started.store(true, Ordering::Release);
+        assert!(!crossfade_step(&old, 10, 300, false));
+        assert_eq!(old.fade_out_from.load(Ordering::Acquire), NO_FADE);
+        let mut output = vec![0.0; 100];
+        render(&mut output, &old);
+        assert!(output.iter().all(|sample| *sample == 1.0));
+        // Heard: it fades from where it is, over the fade or what is left.
+        assert!(!crossfade_step(&old, 10, 300, true));
+        assert_eq!(old.fade_out_from.load(Ordering::Acquire), 100);
+        assert_eq!(old.fade_out_len.load(Ordering::Acquire), 300);
+        let mut output = vec![0.0; 300];
+        render(&mut output, &old);
+        assert!((output[150] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.02);
+        assert!(output.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6));
+        assert!(crossfade_step(&old, 10, 300, true), "silent: dropped");
+        // Less left than the fade: it reaches silence as the track ends.
+        let short = Pcm::new(1, 100, Arc::new(AtomicU32::new(1.0_f32.to_bits())), false);
+        // The end is counted at the output rate: 10 s is `frame_at(10.0)`.
+        seed_pcm(&short, frame_at(10.0) - 100, std::iter::repeat_n(1.0, 100));
+        assert!(!crossfade_step(&short, 10, 300, true));
+        assert_eq!(short.fade_out_len.load(Ordering::Acquire), 100);
+    }
+
     fn retained_samples(pcm: &Pcm) -> Vec<f32> {
         let window = pcm.window.lock().unwrap();
         let frames = pcm.capacity / pcm.channels;

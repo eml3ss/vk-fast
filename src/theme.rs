@@ -232,6 +232,51 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// egui's slider for settings: a white round handle and the passed part of
+/// the rail filled with the accent blue, ending under the handle.
+pub fn slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    step: f64,
+) -> egui::Response {
+    const HEIGHT: f32 = 24.0;
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = HEIGHT;
+        let rail = ui.spacing().slider_rail_height;
+        let visuals = ui.visuals_mut();
+        visuals.selection.bg_fill = ACCENT;
+        // The fill reaches `handle + rounding`: rounding the rail by its own
+        // half height keeps that end hidden under the handle.
+        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same((rail * 0.5) as u8);
+        let response = ui.add(
+            egui::Slider::new(value, range.clone())
+                .step_by(step)
+                .show_value(false)
+                .trailing_fill(true)
+                .handle_shape(egui::style::HandleShape::Circle),
+        );
+        // egui paints its handle in the rail's colour; this one is white.
+        let radius = response.rect.height() / 2.5;
+        let (low, high) = (range.start().to_f64(), range.end().to_f64());
+        let fraction = if high > low {
+            ((value.to_f64() - low) / (high - low)).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let track = response.rect.x_range().shrink(radius);
+        let x = egui::lerp(track.min..=track.max, fraction);
+        let grow = ui.style().interact(&response).expansion;
+        ui.painter().circle_filled(
+            egui::pos2(x, response.rect.center().y),
+            radius + grow,
+            Color32::WHITE,
+        );
+        response
+    })
+    .inner
+}
+
 const EXPLICIT_BADGES: &str = "vk-fast-explicit-badges";
 /// The gap between the explicit badge and the artists after it.
 pub const EXPLICIT_GAP: f32 = 6.0;

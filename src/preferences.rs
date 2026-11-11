@@ -26,6 +26,8 @@ const DEFAULT_DISCORD_RPC_ENABLED: bool = true;
 const DEFAULT_AUTO_UPDATES: bool = true;
 const DEFAULT_SEARCH_ON_ENTER: bool = true;
 const DEFAULT_MIX_AFTER_QUEUE: bool = true;
+pub const DEFAULT_CROSSFADE_SECONDS: u8 = 6;
+pub const MAX_CROSSFADE_SECONDS: u8 = 12;
 const DEFAULT_EXPLICIT_BADGE: bool = true;
 const DEFAULT_ANIMATED_BACKDROP: bool = true;
 static WRITES: Mutex<()> = Mutex::new(());
@@ -63,6 +65,11 @@ struct Preferences {
     middle_autoscroll: bool,
     #[serde(deserialize_with = "deserialize_mix_after_queue")]
     mix_after_queue: bool,
+    /// Off unless turned on.
+    #[serde(deserialize_with = "deserialize_crossfade")]
+    crossfade: bool,
+    #[serde(deserialize_with = "deserialize_crossfade_seconds")]
+    crossfade_seconds: u8,
     #[serde(deserialize_with = "deserialize_explicit_badge")]
     explicit_badge: bool,
     #[serde(deserialize_with = "deserialize_animated_backdrop")]
@@ -102,6 +109,8 @@ impl Default for Preferences {
             search_on_enter: DEFAULT_SEARCH_ON_ENTER,
             middle_autoscroll: false,
             mix_after_queue: DEFAULT_MIX_AFTER_QUEUE,
+            crossfade: false,
+            crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
             volume_keys: false,
@@ -244,6 +253,23 @@ fn deserialize_mix_after_queue<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_MIX_AFTER_QUEUE))
+}
+
+fn deserialize_crossfade<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
+}
+
+fn deserialize_crossfade_seconds<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_u64()
+        .filter(|seconds| (1..=u64::from(MAX_CROSSFADE_SECONDS)).contains(seconds))
+        .map_or(DEFAULT_CROSSFADE_SECONDS, |seconds| seconds as u8))
 }
 
 fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
@@ -805,6 +831,23 @@ pub fn load_mix_after_queue() -> bool {
         })
 }
 
+/// Whether tracks crossfade, and over how many seconds.
+pub fn load_crossfade() -> (bool, u8) {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or((false, DEFAULT_CROSSFADE_SECONDS), |preferences| {
+            (preferences.crossfade, preferences.crossfade_seconds)
+        })
+}
+
+pub fn save_crossfade(enabled: bool, seconds: u8) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.crossfade = enabled;
+        preferences.crossfade_seconds = seconds.clamp(1, MAX_CROSSFADE_SECONDS);
+    })
+}
+
 pub fn save_mix_after_queue(enabled: bool) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.mix_after_queue = enabled
@@ -987,6 +1030,30 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn crossfade_is_off_at_six_seconds_by_default_and_keeps_a_valid_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk-fast/preferences.json");
+        for json in [
+            r#"{}"#,
+            r#"{"crossfade":"yes","crossfade_seconds":0}"#,
+            r#"{"crossfade_seconds":99}"#,
+            r#"{"crossfade_seconds":-3}"#,
+        ] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(!preferences.crossfade);
+            assert_eq!(preferences.crossfade_seconds, DEFAULT_CROSSFADE_SECONDS);
+        }
+        update_at(&path, |preferences| {
+            preferences.crossfade = true;
+            preferences.crossfade_seconds = 9;
+        })
+        .unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(restored.crossfade);
+        assert_eq!(restored.crossfade_seconds, 9);
     }
 
     #[test]

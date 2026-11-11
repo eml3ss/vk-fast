@@ -321,7 +321,7 @@ impl MusicApp {
                     "language={:?} tray={} discord={} broadcast={} \
                      titlebar={} compact_seek={} double_click={} search_on_enter={} \
                      autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={} \
-                     equalizer={}:{}",
+                     equalizer={}:{} crossfade={}",
                     self.language,
                     self.minimize_to_tray,
                     self.discord_rpc_enabled,
@@ -345,7 +345,12 @@ impl MusicApp {
                             "manual"
                         },
                         crate::equalizer::Builtin::id
-                    )
+                    ),
+                    if self.crossfade {
+                        format!("{}s", self.crossfade_seconds)
+                    } else {
+                        "off".to_owned()
+                    }
                 ),
             ),
         ]

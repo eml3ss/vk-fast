@@ -19,6 +19,7 @@ pub enum Setting {
     AnimatedBackdrop,
     VolumeKeys,
     MixAfterQueue,
+    Crossfade,
     Broadcast,
     Lyrics,
     Equalizer,
@@ -91,6 +92,9 @@ impl Query {
             }
             Setting::Lyrics => {
                 "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный токен обновить playback lyrics musixmatch vk genius source fallback anonymous token renew synced источник резервный"
+            }
+            Setting::Crossfade => {
+                "воспроизведение кроссфейд плавный переход между треками затухание наложение смена следующий трек длительность секунды playback crossfade cross fade smooth transition between tracks fade overlap next track length seconds gapless"
             }
             Setting::Equalizer => {
                 "эквалайзер эквалайзера эквалайзер полосы частоты басы бас низкие высокие средние пресет пресеты звук тембр усиление дб гц equalizer eq bands frequencies bass treble mid preset presets sound tone boost gain db hz"
