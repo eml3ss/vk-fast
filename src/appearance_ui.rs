@@ -14,7 +14,9 @@ const SWATCH: f32 = 28.0;
 /// The custom accent's colour picker popup.
 pub const PICKER: &str = "vk-fast-accent-picker";
 
-/// The theme cards; returns whether another theme was chosen.
+/// The theme cards; returns whether another theme was chosen. The current
+/// one is drawn in `accent`, the others in their own accents, as picking
+/// them shows them.
 pub fn theme_cards(
     ui: &mut egui::Ui,
     current: &mut Theme,
@@ -35,7 +37,13 @@ pub fn theme_cards(
                     let title = choice.title(language);
                     let response = ui
                         .push_id(("theme-card", choice.code()), |ui| {
-                            theme_card(ui, choice, accent, title, *current == choice)
+                            let selected = *current == choice;
+                            let accent = if selected {
+                                accent
+                            } else {
+                                crate::palette::THEME_ACCENT
+                            };
+                            theme_card(ui, choice, accent, title, selected)
                         })
                         .inner;
                     if response.clicked() && *current != choice {
@@ -68,15 +76,7 @@ fn theme_card(
         return response;
     }
     let preview = egui::Rect::from_min_size(rect.min, CARD);
-    // Other themes as picking them would show them: one with its own accent
-    // comes with it.
-    let palette = choice.palette();
-    let accent = if selected {
-        accent
-    } else {
-        palette.accent_on_pick(accent)
-    };
-    paint_preview(ui.painter(), preview, &palette.with_accent(accent));
+    paint_preview(ui.painter(), preview, &choice.palette().with_accent(accent));
     // The outline keeps a light card apart from a light page, and shows the
     // chosen one in the accent.
     let (width, color) = if selected {
