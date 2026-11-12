@@ -977,7 +977,9 @@ pub fn compact_button(
                 if response.hovered() || response.is_pointer_button_down_on() {
                     pure
                 } else {
-                    egui::lerp(egui::Rgba::from(pure)..=egui::Rgba::from(fill), 0.12).into()
+                    // White gives way a little more than black to show.
+                    let rest = if pure.r() > 127 { 0.22 } else { 0.12 };
+                    egui::lerp(egui::Rgba::from(pure)..=egui::Rgba::from(fill), rest).into()
                 }
             } else {
                 visuals.fg_stroke.color
