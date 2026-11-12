@@ -401,16 +401,22 @@ fn luma(color: [f32; 3]) -> f32 {
 /// `color`, a shade of the `from` accent's family, in the same place of the
 /// `to` accent's family: its hue turned by as much as the accents', its
 /// saturation scaled alike, and `from`'s lightness becoming `to`'s.
-fn shift(color: Color32, from: Color32, to: Color32) -> Color32 {
+fn shift(color: Color32, from: Color32, to: Color32, light: bool) -> Color32 {
     if from == to {
         return color;
     }
     let [from_hue, from_saturation, from_lightness] = hsl(from);
     let from_lightness = from_lightness.clamp(0.05, 0.95);
     let [hue, saturation, accent_lightness] = hsl(to);
-    // Any colour can be picked: very dark or light ones are brought to a
-    // brightness that still reads on the page and under white text.
-    let accent_lightness = accent_lightness.clamp(0.3, 0.66);
+    // Any colour can be picked, white included: text and icons on accent
+    // fills follow it (`readable_on`). Only a colour that would vanish into
+    // the page is brought back: too dark on a dark page, too light on a
+    // light one.
+    let accent_lightness = if light {
+        accent_lightness.min(0.66)
+    } else {
+        accent_lightness.max(0.3)
+    };
     let [own_hue, own_saturation, lightness] = hsl(color);
     let saturation =
         (own_saturation * saturation / from_saturation.max(f32::EPSILON)).clamp(0.0, 1.0);
@@ -459,12 +465,15 @@ impl Palette {
             return palette;
         }
         let from = own.unwrap_or(BLUE);
-        palette.accent = shift(self.accent, from, accent);
-        palette.primary = shift(self.primary, from, accent);
-        palette.link = shift(self.link, from, accent);
-        palette.selected = shift(self.selected, from, accent);
-        palette.active = self.active.map(|active| shift(active, from, accent));
-        palette.control_hovered_stroke = shift(self.control_hovered_stroke, from, accent);
+        palette.accent = shift(self.accent, from, accent, self.light);
+        palette.primary = shift(self.primary, from, accent, self.light);
+        palette.link = shift(self.link, from, accent, self.light);
+        palette.selected = shift(self.selected, from, accent, self.light);
+        palette.active = self
+            .active
+            .map(|active| shift(active, from, accent, self.light));
+        palette.control_hovered_stroke =
+            shift(self.control_hovered_stroke, from, accent, self.light);
         palette.accent_color = accent;
         palette
     }
@@ -472,8 +481,8 @@ impl Palette {
     /// What to draw text and icons in on `fill`, a primary or accent fill,
     /// in place of `usual`: the theme's own `on_primary` when it has one,
     /// otherwise `usual`, unless it would not read there (contrast below
-    /// 3:1) and the theme's dark (or, in light themes, white) colour reads
-    /// better.
+    /// 2.5:1; the light theme's grey Play glyph on blue is 3:1 and stays)
+    /// and the theme's dark (or, in light themes, white) colour reads better.
     pub fn readable_on(&self, fill: Color32, usual: Color32) -> Color32 {
         if let Some(on) = self.on_primary
             && (fill == self.primary || fill == self.accent)
@@ -485,7 +494,7 @@ impl Palette {
         } else {
             self.background
         };
-        if contrast(usual, fill) < 3.0 && contrast(other, fill) > contrast(usual, fill) {
+        if contrast(usual, fill) < 2.5 && contrast(other, fill) > contrast(usual, fill) {
             other
         } else {
             usual
@@ -496,7 +505,7 @@ impl Palette {
     /// blue backdrop), in the same place of the active accent's family: its
     /// hue turned by as much as the accent's, its saturation scaled alike.
     pub fn accent_tone(&self, color: Color32) -> Color32 {
-        shift(color, BLUE, self.accent_color)
+        shift(color, BLUE, self.accent_color, self.light)
     }
 
     /// The colour that takes the place of `color`, a grey of the dark theme,
@@ -618,6 +627,25 @@ mod tests {
 
     #[test]
     fn text_on_filled_buttons_switches_only_where_it_would_not_read() {
+        // The light theme's grey Play glyph on blue (3:1) stays grey, like
+        // the buttons next to it.
+        let light = Theme::from_code("light").unwrap().palette();
+        assert_eq!(light.readable_on(light.primary, light.text), light.text);
+        // A white accent is kept as picked in dark themes; text on its
+        // filled buttons turns dark.
+        let white = original_dark().with_accent(Color32::WHITE);
+        assert_eq!(white.accent, Color32::WHITE);
+        assert_eq!(
+            white.readable_on(white.primary, white.text),
+            white.background
+        );
+        assert_eq!(
+            white.readable_on(white.accent, Color32::WHITE),
+            white.background
+        );
+        // On a light page only a colour that would vanish is darkened.
+        let pale = light.with_accent(Color32::WHITE);
+        assert!(hsl(pale.accent)[2] <= 0.661);
         // The dark themes keep their light text and white Play glyph exactly.
         for code in ["dark", "oled", "graphite", "midnight"] {
             let palette = Theme::from_code(code).unwrap().palette();
@@ -932,19 +960,13 @@ mod tests {
         for invalid in ["", "#", "#12345", "#1234567", "#12345g", "e01f7a", "gold"] {
             assert_eq!(parse_accent(invalid), None, "{invalid}");
         }
-        // A picked colour too dark or light to read is brought into range.
-        for picked in [
-            Color32::BLACK,
-            Color32::WHITE,
-            Color32::from_rgb(255, 255, 0),
-        ] {
-            let accent = original_dark().with_accent(picked).accent;
-            let lightness = hsl(accent)[2];
-            assert!(
-                (0.25..=0.7).contains(&lightness),
-                "{picked:?} -> {accent:?}"
-            );
+        // Light colours, white included, are kept on a dark page; only a
+        // colour that would vanish into it is lightened.
+        for picked in [Color32::WHITE, Color32::from_rgb(255, 255, 0)] {
+            assert_eq!(original_dark().with_accent(picked).accent, picked);
         }
+        let black = original_dark().with_accent(Color32::BLACK).accent;
+        assert!(hsl(black)[2] >= 0.29, "{black:?}");
     }
 
     #[test]

@@ -945,7 +945,17 @@ pub fn compact_button(
     ui.add_enabled_ui(enabled, |ui| {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::click());
         let visuals = ui.style().interact(&response);
-        let fill = if primary {
+        let palette = crate::palette::current();
+        // Light themes draw Play as a white circle with a black glyph,
+        // outlined so it stands out on the white player bar.
+        let light_play = primary && palette.light;
+        let fill = if light_play {
+            if response.hovered() || response.is_pointer_button_down_on() {
+                palette.control_hovered
+            } else {
+                Color32::WHITE
+            }
+        } else if primary {
             crate::theme::primary()
         } else {
             visuals.bg_fill
@@ -956,6 +966,14 @@ pub fn compact_button(
             || response.is_pointer_button_down_on()
         {
             ui.painter().rect_filled(rect, 19.0, fill);
+            if light_play {
+                ui.painter().rect_stroke(
+                    rect,
+                    19.0,
+                    egui::Stroke::new(1.0, palette.control_stroke),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         let inset = if primary && matches!(icon, Icon::Play) {
             5.0
@@ -968,7 +986,9 @@ pub fn compact_button(
             ui.painter(),
             rect.shrink(inset),
             icon,
-            if primary {
+            if light_play {
+                Color32::BLACK
+            } else if primary {
                 crate::theme::on_fill(fill, visuals.fg_stroke.color)
             } else {
                 visuals.fg_stroke.color

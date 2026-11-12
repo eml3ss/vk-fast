@@ -10959,8 +10959,8 @@ impl MusicApp {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(t(
-                            "Цвет кнопок, ссылок, выделения и играющего трека. Слишком тёмные и светлые цвета приводятся к читаемой яркости.",
-                            "The colour of buttons, links, highlights and the playing track. Very dark and light colours are brought to a readable brightness.",
+                            "Цвет кнопок, ссылок, выделения и играющего трека. Подойдёт любой, даже белый: текст и значки на кнопках подстраиваются под него.",
+                            "The colour of buttons, links, highlights and the playing track. Any colour works, even white: text and icons on buttons adapt to it.",
                         ))
                         .small()
                         .color(theme::muted()),
