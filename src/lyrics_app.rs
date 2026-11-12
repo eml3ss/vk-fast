@@ -239,10 +239,9 @@ impl MusicApp {
             self.lyrics.active = true;
         }
         self.lyrics.fullscreen = fullscreen;
-        if fullscreen && let Some(key) = self.playing.as_ref().map(Track::key) {
-            self.metadata_attempted.remove(&key);
-            self.hydrate_metadata(ctx, vec![key]);
-        }
+        // Each opening fetches the playing track's metadata afresh (the large
+        // album cover); the frame loop does it for every later track too.
+        self.fullscreen_metadata = None;
         self.lyrics.view.reset();
         if cfg!(windows) && !self.lyrics.previous_fullscreen {
             // Windows' borderless fullscreen breaks the custom title bar:

@@ -389,3 +389,31 @@ fn richer_metadata_for_the_same_track_keeps_its_lyrics_and_their_search() {
     app.poll_lyrics(&ctx);
     assert!(app.lyrics.data.is_none() && app.lyrics.service.is_none());
 }
+
+#[test]
+fn every_track_playing_in_fullscreen_fetches_its_large_cover_once_even_if_fetched_before() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx, Language::English);
+    let first = app.playing.as_ref().unwrap().key();
+    // Fetched long ago for another copy of the track (My music dates).
+    app.metadata_attempted.insert(first);
+    assert_eq!(app.fullscreen_metadata_key(), None, "only in fullscreen");
+    app.lyrics.fullscreen = true;
+    assert_eq!(app.fullscreen_metadata_key(), Some(first));
+    assert!(!app.metadata_attempted.contains(&first), "fetched afresh");
+    // Sent: not again for the same track.
+    app.metadata_attempted.insert(first);
+    app.fullscreen_metadata = Some(first);
+    assert_eq!(app.fullscreen_metadata_key(), None);
+    // The next track starts on its own: it is fetched too.
+    let mut next = page(1, &[8]).items.remove(0);
+    next.title = "NEXT".into();
+    app.metadata_attempted.insert(next.key());
+    app.playing = Some(next.clone());
+    assert_eq!(app.fullscreen_metadata_key(), Some(next.key()));
+    // Leaving fullscreen forgets it, so opening it again fetches once more.
+    app.fullscreen_metadata = Some(next.key());
+    app.lyrics.fullscreen = false;
+    assert_eq!(app.fullscreen_metadata_key(), None);
+    assert_eq!(app.fullscreen_metadata, None);
+}

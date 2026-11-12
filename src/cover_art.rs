@@ -60,8 +60,12 @@ enum State {
     /// The texture lives on the GPU; its pixels stay in memory only for the
     /// one cover an effect reads (see `ready_image`).
     Ready(TextureHandle, Option<Color32>, Option<Arc<ColorImage>>),
-    Failed,
+    /// Asked again after `FAILED_RETRY`: a network failure must not keep the
+    /// large fullscreen cover a stretched thumbnail until the next start.
+    Failed(std::time::Instant),
 }
+
+const FAILED_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct Entry {
     state: State,
@@ -176,7 +180,7 @@ impl CoverCache {
                 let kept = (self.kept.as_ref() == Some(&reply.key)).then_some(image);
                 State::Ready(texture, reply.color, kept)
             } else {
-                State::Failed
+                State::Failed(std::time::Instant::now())
             };
             if let Some(entry) = self.entries.get_mut(&reply.key) {
                 entry.state = state;
@@ -196,7 +200,7 @@ impl CoverCache {
                 true
             }
             State::Ready(_, _, None) => false,
-            State::Pending | State::Failed => true,
+            State::Pending | State::Failed(_) => true,
         });
         self.receive(context);
     }
@@ -210,7 +214,7 @@ impl CoverCache {
                     && match entry.state {
                         State::Pending => false,
                         State::Ready(..) => true,
-                        State::Failed => !textures_only,
+                        State::Failed(_) => !textures_only,
                     }
             })
             .min_by_key(|(_, entry)| entry.touched)
@@ -224,6 +228,11 @@ impl CoverCache {
     }
 
     fn request(&mut self, context: &egui::Context, key: Key) {
+        if self.entries.get(&key).is_some_and(
+            |entry| matches!(entry.state, State::Failed(at) if at.elapsed() >= FAILED_RETRY),
+        ) {
+            self.entries.remove(&key);
+        }
         if self.entries.contains_key(&key) || self.pending >= MAX_PENDING {
             return;
         }
@@ -243,12 +252,12 @@ impl CoverCache {
                         State::Pending
                     }
                     Err(TrySendError::Full(_)) => return,
-                    Err(TrySendError::Disconnected(_)) => State::Failed,
+                    Err(TrySendError::Disconnected(_)) => State::Failed(std::time::Instant::now()),
                 },
-                None => State::Failed,
+                None => State::Failed(std::time::Instant::now()),
             }
         } else {
-            State::Failed
+            State::Failed(std::time::Instant::now())
         };
         self.entries.insert(
             key,
@@ -987,6 +996,29 @@ mod tests {
             )),
             Some(Color32::from_rgb(10, 90, 180))
         );
+    }
+
+    #[test]
+    fn a_failed_cover_is_asked_for_again_only_after_a_while() {
+        let context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        // Not a valid cover address: no job, no network, just a failure.
+        let key = Key {
+            url: "ftp://images.example.test/cover.jpg".into(),
+            edge: HIGH_RES_TEXTURE_SIZE,
+        };
+        cache.request(&context, key.clone());
+        let failed_at = |cache: &CoverCache| match cache.entries[&key].state {
+            State::Failed(at) => at,
+            _ => panic!("failed"),
+        };
+        let first = failed_at(&cache);
+        cache.request(&context, key.clone());
+        assert_eq!(failed_at(&cache), first, "not again at once");
+        let long_ago = std::time::Instant::now() - FAILED_RETRY - Duration::from_secs(1);
+        cache.entries.get_mut(&key).unwrap().state = State::Failed(long_ago);
+        cache.request(&context, key.clone());
+        assert!(failed_at(&cache) > long_ago, "asked again");
     }
 
     #[test]

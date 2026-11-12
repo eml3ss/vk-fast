@@ -1304,6 +1304,9 @@ pub struct MusicApp {
     detail_error: Option<WebAudioError>,
     metadata_request: Option<MetadataRequest>,
     metadata_attempted: HashSet<(i64, i64)>,
+    /// The playing track whose metadata fullscreen lyrics fetched afresh:
+    /// its copy in the queue may lack the large album cover another copy got.
+    fullscreen_metadata: Option<(i64, i64)>,
     like_request: Option<LikeRequest>,
     dislike_request: Option<DislikeRequest>,
     /// Tracks marked "Не нравится" during this session.
@@ -1735,6 +1738,7 @@ impl MusicApp {
             detail_error: None,
             metadata_request: None,
             metadata_attempted: HashSet::new(),
+            fullscreen_metadata: None,
             like_request: None,
             dislike_request: None,
             disliked: HashSet::new(),
@@ -6831,6 +6835,23 @@ impl MusicApp {
         }
     }
 
+    /// In fullscreen lyrics every track that starts playing, by hand or on
+    /// its own, gets its metadata once more, even if fetched before: the
+    /// queue's copy may have only a list row's small cover, and the large
+    /// album cover comes with the metadata.
+    fn fullscreen_metadata_key(&mut self) -> Option<(i64, i64)> {
+        if !self.lyrics.fullscreen {
+            self.fullscreen_metadata = None;
+            return None;
+        }
+        let key = self.playing.as_ref().map(Track::key)?;
+        if self.fullscreen_metadata == Some(key) {
+            return None;
+        }
+        self.metadata_attempted.remove(&key);
+        Some(key)
+    }
+
     fn hydrate_metadata(&mut self, ctx: &egui::Context, keys: Vec<(i64, i64)>) {
         if self.demo || self.metadata_request.is_some() {
             return;
@@ -11898,12 +11919,17 @@ impl MusicApp {
             self.library_refresh_due = false;
             self.load_page(ctx, true);
         }
-        if (self.resume_position.is_none() || self.lyrics.fullscreen)
+        if let Some(key) = self.fullscreen_metadata_key() {
+            self.hydrate_metadata(ctx, vec![key]);
+            // Only once it really went out: another request may be under way.
+            if self.metadata_attempted.contains(&key) {
+                self.fullscreen_metadata = Some(key);
+            }
+        } else if self.resume_position.is_none()
             && let Some(track) = self.playing.as_ref().filter(|track| {
                 track.artists.is_empty()
                     || track.subtitle.is_none()
                     || track.library_liked.is_none()
-                    || self.lyrics.fullscreen
             })
         {
             self.hydrate_metadata(ctx, vec![track.key()]);
@@ -12532,6 +12558,7 @@ mod tests {
             detail_error: None,
             metadata_request: None,
             metadata_attempted: HashSet::new(),
+            fullscreen_metadata: None,
             like_request: None,
             dislike_request: None,
             disliked: HashSet::new(),
