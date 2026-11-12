@@ -180,7 +180,12 @@ fn hls_files(folder: &str) -> HashMap<String, Vec<u8>> {
 fn hls_decode(server: &Server, offset: f64) -> Vec<f32> {
     let net = server.net();
     let reply = net
-        .get(&server.url.join("stream.m3u8").unwrap(), None, 1024 * 1024)
+        .get(
+            "playlist",
+            &server.url.join("stream.m3u8").unwrap(),
+            None,
+            1024 * 1024,
+        )
         .unwrap();
     let stream = hls::Hls::new(net, reply.url, reply.data, offset).unwrap();
     let origin = stream.origin;
@@ -303,6 +308,7 @@ fn pending_network_header_is_canceled_without_waiting_for_the_request_timeout() 
     let start = Instant::now();
     assert!(
         net.get(
+            "test",
             &reqwest::Url::parse(&format!("http://{addr}/")).unwrap(),
             None,
             1024
@@ -369,4 +375,43 @@ fn public_decoder_refuses_local_files_userinfo_and_non_https_urls() {
         assert!(open(url, 0.0).is_err());
     }
     assert!(open("https://example.test/a", f64::NAN).is_err());
+}
+#[test]
+fn a_missing_hls_segment_is_logged_with_where_and_why_but_no_address() {
+    let mut files = hls_files("ts");
+    files.remove("/segment04.ts").unwrap();
+    let server = Server::new(files);
+    let (pcm, log) = crate::diagnostics::capture_for_test(|| {
+        let net = server.net();
+        let reply = net
+            .get(
+                "playlist",
+                &server.url.join("stream.m3u8").unwrap(),
+                None,
+                1 << 20,
+            )
+            .unwrap();
+        let stream = hls::Hls::new(net, reply.url, reply.data, 0.0).unwrap();
+        let mut decoder =
+            Pipeline::new(Box::new(stream), 0.0, 0.0, Arc::new(AtomicBool::new(false))).unwrap();
+        let mut bytes = Vec::new();
+        decoder.read_to_end(&mut bytes).map(|_| bytes.len())
+    });
+    let error = pcm.unwrap_err();
+    assert!(error.to_string().contains("segment status 404"), "{error}");
+    for expected in [
+        "source kind=hls segments=7",
+        "format ",
+        "codec=aac rate_khz=",
+        "media_http segment status=200 kib=",
+        "media_http segment status=404",
+        "hls segment_failed index=4 of=7",
+        "demux_failed at_s=",
+    ] {
+        assert!(log.contains(expected), "missing {expected:?} in:\n{log}");
+    }
+    assert!(
+        !log.contains("127.0.0.1") && !log.contains("segment04"),
+        "{log}"
+    );
 }

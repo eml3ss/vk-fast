@@ -18,7 +18,7 @@ impl Transport {
         let mut output = Vec::new();
         let start = (0..data.len().min(192))
             .find(|i| data[*i] == 0x47 && (*i + 188 >= data.len() || data[*i + 188] == 0x47))
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if !(data.len() - start).is_multiple_of(188) {
             return Err(invalid());
         }

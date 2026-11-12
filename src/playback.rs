@@ -936,7 +936,20 @@ fn spawn_decoder(url: &str, offset: f64) -> std::io::Result<crate::media_decoder
     crate::media_decoder::open(url, offset)
 }
 fn log_decoder_io_error(stage: &str, error: &std::io::Error) {
-    crate::diagnostics::event("decoder", &format!("{stage} kind={:?}", error.kind()));
+    // Decoder errors carry fixed reasons and code lines; a temporary file's
+    // own error may append its path, which stays out of the log.
+    let reason = error.to_string();
+    let reason = reason.split(" at path").next().unwrap_or_default();
+    crate::diagnostics::event(
+        "decoder",
+        &format!("{stage} kind={:?} reason={reason}", error.kind()),
+    );
+}
+fn log_stream(event: &str, frame: u64, duration: u32) {
+    crate::diagnostics::event(
+        "decoder",
+        &format!("{event} at_s={:.2} track_s={duration}", frame_time(frame)),
+    );
 }
 fn finish_decoder(
     slot: &DecoderSlot,
@@ -1017,6 +1030,7 @@ fn pump_mode(
             if let Some(end) = cache.complete()
                 && frame >= end
             {
+                log_stream("cache_end", end, source.duration);
                 if let Some(eof_frame) = eof_frame {
                     eof_frame.store(end, Ordering::Release);
                 }
@@ -1032,6 +1046,15 @@ fn pump_mode(
             .into_iter()
             .chain(stop_at)
             .min();
+        log_stream(
+            if pcm.is_some() {
+                "decode_start"
+            } else {
+                "prefetch_decode_start"
+            },
+            frame,
+            source.duration,
+        );
         let stream = decoder(url, frame_time(frame)).map_err(|error| {
             log_decoder_io_error("open_failed", &error);
             PlaybackError::Decoder
@@ -1055,6 +1078,7 @@ fn pump_mode(
                 Ok(n) => n,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
+                    log_stream("stream_read_failed_at", frame, source.duration);
                     log_decoder_io_error("stream_read_failed", &error);
                     let _ = finish_decoder(decoder_slot, canceled, true);
                     return Err(PlaybackError::Decoder);
@@ -1091,7 +1115,7 @@ fn pump_mode(
         };
         if reached_eof {
             if carry != 0 {
-                crate::diagnostics::event("decoder", "output_incomplete_frame");
+                log_stream("output_incomplete_frame", frame, source.duration);
                 let _ = finish_decoder(decoder_slot, canceled, true);
                 return Err(PlaybackError::Decoder);
             }
@@ -1103,9 +1127,11 @@ fn pump_mode(
                 return Err(PlaybackError::CacheMiss);
             }
             if !completed_duration_plausible(frame, source.duration) {
-                crate::diagnostics::event("decoder", "output_duration_incomplete");
+                // The stream ended well before the length VK states.
+                log_stream("output_duration_incomplete", frame, source.duration);
                 return Err(PlaybackError::Decoder);
             }
+            log_stream("decode_end", frame, source.duration);
             if let Some(eof_frame) = eof_frame {
                 eof_frame.store(frame, Ordering::Release);
             } else if let Some(cache) = cache {
@@ -1200,6 +1226,7 @@ impl Prefetch {
                     }
                     let end = worker_eof.load(Ordering::Acquire);
                     if !completed_duration_plausible(end, source.duration) {
+                        log_stream("prefetch_duration_incomplete", end, source.duration);
                         return Err(PlaybackError::Decoder);
                     }
                     if first_frame > 0 {
@@ -1226,6 +1253,16 @@ impl Prefetch {
                         .map_err(|_| PlaybackError::CacheMiss)?;
                     Ok(())
                 });
+                match &status {
+                    Ok(()) if !worker_cancel.load(Ordering::Acquire) => {
+                        crate::diagnostics::event("decoder", "prefetch_complete");
+                    }
+                    Err(error) => crate::diagnostics::event(
+                        "decoder",
+                        &format!("prefetch_failed error={error:?}"),
+                    ),
+                    Ok(()) => {}
+                }
                 if let Ok(mut result) = worker_result.lock() {
                     *result = Some(status);
                 }
@@ -1296,7 +1333,12 @@ fn pump_from_prefetch(
         // missing prefix. This validated natural EOF belongs to audible media,
         // independently of whether the entire track is ready for offline reuse.
         let end = prefetch.eof.load(Ordering::Acquire);
-        if (end > 0 && frame >= end) || cache.complete().is_some_and(|end| frame >= end) {
+        if end > 0 && frame >= end {
+            log_stream("prefetch_end", end, source.duration);
+            return Ok(());
+        }
+        if let Some(end) = cache.complete().filter(|end| frame >= *end) {
+            log_stream("cache_end", end, source.duration);
             return Ok(());
         }
         let policy_changed = !cache
@@ -1326,6 +1368,13 @@ fn pump_from_prefetch(
             );
         }
         if let Some(Err(error)) = result {
+            crate::diagnostics::event(
+                "decoder",
+                &format!(
+                    "playback_stopped_by_prefetch at_s={:.2} error={error:?}",
+                    frame_time(frame)
+                ),
+            );
             return Err(error);
         }
         let result = prefetch.result.lock().map_err(|_| PlaybackError::Worker)?;
@@ -1386,6 +1435,10 @@ impl Pump {
                     match result {
                         Ok(()) => reader_pcm.eof.store(true, Ordering::Release),
                         Err(failure) => {
+                            crate::diagnostics::event(
+                                "decoder",
+                                &format!("source_failed error={failure:?}"),
+                            );
                             if let Ok(mut error) = reader_error.lock() {
                                 *error = Some(failure);
                             }
@@ -1963,19 +2016,30 @@ fn controller(
         let started = r.pcm.started.load(Ordering::Relaxed);
         if finished {
             // Keep EOF history and stream so backward seek can reuse decoded PCM.
-            publish(
-                &state,
-                &control,
-                active,
-                completion_state(
-                    started,
-                    r.pcm.paused.load(Ordering::Relaxed),
-                    r.offset,
-                    position,
-                    r.duration,
-                ),
-                (position, position),
+            let completed = completion_state(
+                started,
+                r.pcm.paused.load(Ordering::Relaxed),
+                r.offset,
+                position,
+                r.duration,
             );
+            if matches!(completed, PlaybackState::Failed(_))
+                && control.current(active)
+                && !state
+                    .lock()
+                    .is_ok_and(|s| matches!(s.state, PlaybackState::Failed(_)))
+            {
+                // The stream ended without a single sample after the start
+                // point: nothing to play there, which counts as a decode failure.
+                crate::diagnostics::event(
+                    "decoder",
+                    &format!(
+                        "empty_output start_s={:.2} position_s={position:.2} track_s={}",
+                        r.offset, r.duration
+                    ),
+                );
+            }
+            publish(&state, &control, active, completed, (position, position));
         } else {
             let s = if r.pcm.paused.load(Ordering::Relaxed) {
                 PlaybackState::Paused
@@ -3173,22 +3237,32 @@ mod tests {
         assert!(cache.cache.complete_frames(&cache.key).unwrap().is_none());
         assert_eq!(prefetch.eof.load(Ordering::Acquire), 0);
         drop(prefetch);
-        // The ordinary bounded-streaming path applies the same validation.
+        // The ordinary bounded-streaming path applies the same validation,
+        // and the log says where the stream ended against VK's length.
         let pcm = pcm(2);
-        let status = pump_mode(
-            &source,
-            Some(&cache),
-            0,
-            Some(&pcm),
-            &AtomicBool::new(false),
-            &Arc::new(Mutex::new(None)),
-            &control,
-            None,
-            None,
-            None,
-            short_synthetic_decoder,
-        );
+        let (status, log) = crate::diagnostics::capture_for_test(|| {
+            pump_mode(
+                &source,
+                Some(&cache),
+                0,
+                Some(&pcm),
+                &AtomicBool::new(false),
+                &Arc::new(Mutex::new(None)),
+                &control,
+                None,
+                None,
+                None,
+                short_synthetic_decoder,
+            )
+        });
         assert_eq!(status, Err(PlaybackError::Decoder));
+        // The prefix comes from the cache; the stream decoded after it ends
+        // at 2 s of a 24 s track.
+        let expected = format!(
+            "output_duration_incomplete at_s=2.00 track_s={}",
+            source.duration
+        );
+        assert!(log.contains(&expected), "{log}");
         assert!(cache.cache.complete_frames(&cache.key).unwrap().is_none());
         assert!(!completed_duration_plausible(frame_at(1.0), 24));
         assert!(completed_duration_plausible(frame_at(23.0), 24));

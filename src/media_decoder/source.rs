@@ -23,7 +23,9 @@ pub(super) fn from_net(net: Net, url: Url, offset: f64) -> io::Result<(Box<dyn M
     let first = net.initial(&url, CHUNK)?;
     match first {
         Initial::File(mut file) => {
+            let bytes = file.seek(SeekFrom::End(0))?;
             file.seek(SeekFrom::Start(0))?;
+            log_source("whole_file", bytes, offset);
             Ok((Box::new(Spool(file)), 0.0))
         }
         Initial::Bytes(mut reply)
@@ -34,18 +36,22 @@ pub(super) fn from_net(net: Net, url: Url, offset: f64) -> io::Result<(Box<dyn M
                 .total
                 .is_some_and(|total| total > reply.data.len() as u64)
             {
-                reply = net.get(&reply.url, None, 1024 * 1024)?;
+                reply = net.get("playlist", &reply.url, None, 1024 * 1024)?;
             }
             let stream = Hls::new(net, reply.url, reply.data, offset)?;
             let origin = stream.origin;
             Ok((Box::new(stream), origin))
         }
-        Initial::Bytes(reply) if !reply.ranged => Ok((Box::new(Cursor::new(reply.data)), 0.0)),
+        Initial::Bytes(reply) if !reply.ranged => {
+            log_source("small_file", reply.data.len() as u64, offset);
+            Ok((Box::new(Cursor::new(reply.data)), 0.0))
+        }
         Initial::Bytes(reply) => {
             let total = reply
                 .total
                 .filter(|n| *n > 0 && *n <= 512 * 1024 * 1024)
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
+            log_source("ranges", total, offset);
             Ok((
                 Box::new(Http {
                     net,
@@ -59,6 +65,15 @@ pub(super) fn from_net(net: Net, url: Url, offset: f64) -> io::Result<(Box<dyn M
             ))
         }
     }
+}
+fn log_source(kind: &str, bytes: u64, offset: f64) {
+    crate::diagnostics::event(
+        "decoder",
+        &format!(
+            "source kind={kind} mib={:.2} offset_s={offset:.2}",
+            bytes as f64 / 1048576.0
+        ),
+    );
 }
 struct Spool(tempfile::NamedTempFile);
 impl Read for Spool {
@@ -99,9 +114,12 @@ impl Read for Http {
                 total,
                 ranged,
                 ..
-            } = self
-                .net
-                .get(&self.url, Some((self.position, end)), CHUNK as usize)?;
+            } = self.net.get(
+                "range",
+                &self.url,
+                Some((self.position, end)),
+                CHUNK as usize,
+            )?;
             if !ranged
                 || total != Some(self.total)
                 || data.is_empty()

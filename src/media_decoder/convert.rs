@@ -131,7 +131,7 @@ impl Converter {
         let target = (self.received as f64 * f64::from(self.output_rate)
             / f64::from(self.spec.rate()))
         .round() as u64;
-        let resampler = self.resampler.as_mut().ok_or_else(invalid)?;
+        let resampler = self.resampler.as_mut().ok_or_else(|| invalid())?;
         let mut offset = 0;
         loop {
             let needed = resampler.input_frames_next();

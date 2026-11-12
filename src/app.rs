@@ -11964,13 +11964,21 @@ impl MusicApp {
         self.poll_library_save(ctx);
         self.poll_recent_save(ctx);
         self.poll_playback(ctx);
-        let failure = match self.player.snapshot().state {
+        let snapshot = self.player.snapshot();
+        let failure = match snapshot.state {
             PlaybackState::Failed(error) => Some(error),
             _ => None,
         };
         if failure != self.logged_playback_failure {
             if let Some(error) = &failure {
-                crate::diagnostics::event("playback", &format!("engine_failed: {error:?}"));
+                crate::diagnostics::event(
+                    "playback",
+                    &format!(
+                        "engine_failed: {error:?} position_s={:.2} track_s={}",
+                        snapshot.position,
+                        self.playing.as_ref().map_or(0, |track| track.duration)
+                    ),
+                );
             }
             self.logged_playback_failure = failure;
         }

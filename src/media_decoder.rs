@@ -78,7 +78,7 @@ impl Read for Lazy {
             let pipeline = Pipeline::new(source, origin, self.offset, self.canceled.clone())?;
             self.pipeline = Some(pipeline);
         }
-        let pipeline = self.pipeline.as_mut().ok_or_else(invalid)?;
+        let pipeline = self.pipeline.as_mut().ok_or_else(|| invalid())?;
         pipeline.read(out)
     }
 }
@@ -96,6 +96,8 @@ struct Pipeline {
     canceled: Arc<AtomicBool>,
     eof: bool,
     failures: usize,
+    packets: u64,
+    skipped: u64,
 }
 impl Pipeline {
     fn new(
@@ -110,27 +112,59 @@ impl Pipeline {
         let mut format = symphonia::default::get_probe()
             .probe(&Hint::new(), mss, options, MetadataOptions::default())
             .map_err(map_error)?;
-        let track = format.default_track(TrackType::Audio).ok_or_else(invalid)?;
+        let track = format
+            .default_track(TrackType::Audio)
+            .ok_or_else(|| invalid())?;
         let params = track
             .codec_params
             .as_ref()
             .and_then(|p| p.audio())
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
             .map_err(map_error)?;
         let id = track.id;
         let time_base = track.time_base;
+        let length = time_base
+            .zip(track.duration)
+            .and_then(|(base, duration)| base.calc_duration(duration))
+            .map_or_else(|| "unknown".into(), |t| format!("{:.2}", t.as_secs_f64()));
+        crate::diagnostics::event(
+            "decoder",
+            &format!(
+                "format {} codec={} rate_khz={} channels={} length_s={length} delay={} padding={} \
+                 seekable={seekable} origin_s={origin:.2} offset_s={offset:.2}",
+                format.format_info().short_name,
+                decoder.codec_info().short_name,
+                params.sample_rate.map_or_else(
+                    || "unknown".into(),
+                    |rate| format!("{:.3}", f64::from(rate) / 1000.0)
+                ),
+                params.channels.as_ref().map_or(0, |c| c.count()),
+                track.delay.unwrap_or(0),
+                track.padding.unwrap_or(0),
+            ),
+        );
         if seekable && offset > 2.0 {
-            format
+            let seeked = format
                 .seek(
                     SeekMode::Accurate,
                     SeekTo::Time {
-                        time: Time::try_from_secs_f64(offset - 2.0).ok_or_else(invalid)?,
+                        time: Time::try_from_secs_f64(offset - 2.0).ok_or_else(|| invalid())?,
                         track_id: Some(id),
                     },
                 )
-                .map_err(map_error)?;
+                .map_err(map_error)
+                .inspect_err(|error| {
+                    crate::diagnostics::event("decoder", &format!("seek_failed reason={error}"));
+                })?;
+            let landed = time_base
+                .and_then(|base| base.calc_time(seeked.actual_ts))
+                .map_or(-1.0, |t| t.as_secs_f64());
+            crate::diagnostics::event(
+                "decoder",
+                &format!("seek to_s={:.2} landed_s={landed:.2}", offset - 2.0),
+            );
         }
         Ok(Self {
             format,
@@ -145,6 +179,8 @@ impl Pipeline {
             canceled,
             eof: false,
             failures: 0,
+            packets: 0,
+            skipped: 0,
         })
     }
     fn chunk(&mut self) -> io::Result<bool> {
@@ -155,9 +191,22 @@ impl Pipeline {
             if self.eof {
                 return Ok(false);
             }
-            let packet = self.format.next_packet().map_err(map_error)?;
+            let packet = self
+                .format
+                .next_packet()
+                .map_err(map_error)
+                .inspect_err(|error| self.log_failure("demux", error))?;
             let Some(packet) = packet else {
                 self.eof = true;
+                crate::diagnostics::event(
+                    "decoder",
+                    &format!(
+                        "stream_end at_s={:.2} packets={} skipped={}",
+                        self.seconds(),
+                        self.packets,
+                        self.skipped
+                    ),
+                );
                 let tail = self
                     .converter
                     .as_mut()
@@ -169,25 +218,63 @@ impl Pipeline {
             if packet.track_id != self.track {
                 continue;
             }
+            self.packets += 1;
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => {
                     self.failures = 0;
                     decoded
                 }
-                Err(DecodeError::DecodeError(_)) if self.failures < 32 => {
+                Err(DecodeError::DecodeError(reason)) if self.failures < 32 => {
                     self.failures += 1;
+                    self.skipped += 1;
+                    // The first few name the reason; a long broken run is
+                    // summed up at the end of the stream instead.
+                    if self.skipped <= 5 {
+                        crate::diagnostics::event(
+                            "decoder",
+                            &format!(
+                                "packet_skipped at_s={:.2} reason={reason} in_a_row={}",
+                                self.seconds(),
+                                self.failures
+                            ),
+                        );
+                    }
                     continue;
                 }
-                Err(error) => return Err(map_error(error)),
+                Err(error) => {
+                    let error = map_error(error);
+                    self.log_failure("decode", &error);
+                    return Err(error);
+                }
             };
             if decoded.frames() > 1024 * 1024 || decoded.spec().channels().count() > 32 {
+                let at = self.position.unwrap_or(0) as f64 / 48000.0;
+                crate::diagnostics::event(
+                    "decoder",
+                    &format!(
+                        "packet_too_large at_s={at:.2} frames={} channels={}",
+                        decoded.frames(),
+                        decoded.spec().channels().count()
+                    ),
+                );
                 return Err(invalid());
             }
             let spec = decoded.spec().clone();
             let mut samples = vec![0.0f32; decoded.samples_interleaved()];
             decoded.copy_to_slice_interleaved(&mut samples);
             if self.converter.as_ref().is_none_or(|c| c.spec() != &spec) {
-                if self.converter.is_some() {
+                if let Some(converter) = &self.converter {
+                    crate::diagnostics::event(
+                        "decoder",
+                        &format!(
+                            "format_changed at_s={:.2} rate_khz={:.3}->{:.3} channels={}->{}",
+                            self.seconds(),
+                            f64::from(converter.spec().rate()) / 1000.0,
+                            f64::from(spec.rate()) / 1000.0,
+                            converter.spec().channels().count(),
+                            spec.channels().count()
+                        ),
+                    );
                     return Err(invalid());
                 }
                 self.converter = Some(convert::Converter::new(&spec, 48000)?);
@@ -217,7 +304,7 @@ impl Pipeline {
                     let prefix = self
                         .converter
                         .as_mut()
-                        .ok_or_else(invalid)?
+                        .ok_or_else(|| invalid())?
                         .push(&vec![0.0; padding * spec.channels().count()])?;
                     self.publish(prefix)?;
                 }
@@ -225,12 +312,28 @@ impl Pipeline {
             let converted = self
                 .converter
                 .as_mut()
-                .ok_or_else(invalid)?
+                .ok_or_else(|| invalid())?
                 .push(&samples)?;
             if self.publish(converted)? {
                 return Ok(true);
             }
         }
+    }
+    /// Decoded position on the track timeline, for the log.
+    fn seconds(&self) -> f64 {
+        self.position.unwrap_or(0) as f64 / 48000.0
+    }
+    fn log_failure(&self, stage: &str, error: &io::Error) {
+        crate::diagnostics::event(
+            "decoder",
+            &format!(
+                "{stage}_failed at_s={:.2} packets={} skipped={} kind={:?} reason={error}",
+                self.seconds(),
+                self.packets,
+                self.skipped,
+                error.kind()
+            ),
+        );
     }
     fn publish(&mut self, samples: Vec<f32>) -> io::Result<bool> {
         let position = self.position.unwrap_or(0);
@@ -264,16 +367,37 @@ impl Read for Pipeline {
         }
     }
 }
+/// Symphonia's own reasons are static strings from the library, never stream
+/// data, so they go into the error text that the playback log records.
 fn map_error(error: DecodeError) -> io::Error {
-    if let DecodeError::Unsupported(reason) | DecodeError::DecodeError(reason) = &error {
-        crate::diagnostics::event("decoder", reason);
-    }
     match error {
-        DecodeError::IoError(error) => io::Error::new(error.kind(), "Media read failed"),
-        DecodeError::Unsupported(_) => {
-            io::Error::new(io::ErrorKind::Unsupported, "Unsupported audio format")
+        DecodeError::IoError(error) => {
+            let reason = error.to_string();
+            io::Error::new(error.kind(), format!("media read failed: {reason}"))
         }
-        _ => invalid(),
+        DecodeError::Unsupported(reason) => io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported audio: {reason}"),
+        ),
+        DecodeError::DecodeError(reason) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed audio: {reason}"),
+        ),
+        DecodeError::SeekError(kind) => {
+            io::Error::new(io::ErrorKind::InvalidData, format!("seek failed: {kind:?}"))
+        }
+        DecodeError::LimitError(reason) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decoder limit: {reason}"),
+        ),
+        DecodeError::ResetRequired => io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoder reset required (stream parameters changed)",
+        ),
+        error => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decoder failed: {error}"),
+        ),
     }
 }
 

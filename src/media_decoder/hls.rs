@@ -68,7 +68,7 @@ impl Hls {
                                 .filter(|v| !v.is_i_frame)
                                 .min_by_key(|v| v.bandwidth)
                         })
-                        .ok_or_else(invalid)?;
+                        .ok_or_else(|| invalid())?;
                     let audio = variant
                         .audio
                         .as_ref()
@@ -81,13 +81,13 @@ impl Hls {
                         .and_then(|a| a.uri.as_deref())
                         .unwrap_or(&variant.uri);
                     base = base.join(audio).map_err(|_| invalid())?;
-                    let reply = net.get(&base, None, 1024 * 1024)?;
+                    let reply = net.get("playlist", &base, None, 1024 * 1024)?;
                     base = reply.url;
                     bytes = reply.data;
                 }
             }
         }
-        let mut list = selected.ok_or_else(invalid)?;
+        let mut list = selected.ok_or_else(|| invalid())?;
         if list.segments.is_empty() || list.segments.len() > 100_000 || list.i_frames_only {
             return Err(invalid());
         }
@@ -121,7 +121,7 @@ impl Hls {
                 let start = range
                     .offset
                     .unwrap_or_else(|| *range_end.get(&segment.uri).unwrap_or(&0));
-                let end = start.checked_add(range.length).ok_or_else(invalid)?;
+                let end = start.checked_add(range.length).ok_or_else(|| invalid())?;
                 range_end.insert(segment.uri.clone(), end);
                 Some((start, end - 1))
             } else {
@@ -136,6 +136,27 @@ impl Hls {
         // Fragment readers start their stream clock at the first visible
         // fragment. Restore its position on the complete playlist timeline.
         let origin = times[next];
+        let protected = list
+            .segments
+            .iter()
+            .filter(|segment| {
+                segment
+                    .key
+                    .as_ref()
+                    .is_some_and(|key| key.method != KeyMethod::None)
+            })
+            .count();
+        let breaks = list.segments.iter().filter(|s| s.discontinuity).count();
+        crate::diagnostics::event(
+            "decoder",
+            &format!(
+                "source kind=hls segments={} playlist_s={time:.2} start_segment={next} \
+                 start_s={origin:.2} offset_s={offset:.2} protected={protected} \
+                 discontinuities={breaks} init={}",
+                list.segments.len(),
+                list.segments.iter().any(|s| s.map.is_some()),
+            ),
+        );
         let mut stream = Self {
             net,
             base,
@@ -166,6 +187,13 @@ impl Hls {
                     if delta < 1 << 32 {
                         stream.origin = delta as f64 / 90_000.0;
                     }
+                    crate::diagnostics::event(
+                        "decoder",
+                        &format!(
+                            "hls ts_clock start_s={:.2} playlist_start_s={origin:.2}",
+                            delta as f64 / 90_000.0
+                        ),
+                    );
                 }
                 stream.kind = Some(true);
                 stream.transport = Some(selected);
@@ -178,7 +206,9 @@ impl Hls {
     fn segment(&mut self, index: usize) -> io::Result<Vec<u8>> {
         let segment = self.segments[index].clone();
         let url = self.base.join(&segment.uri).map_err(|_| invalid())?;
-        let reply = self.net.get(&url, self.ranges[index], SEGMENT_LIMIT)?;
+        let reply = self
+            .net
+            .get("segment", &url, self.ranges[index], SEGMENT_LIMIT)?;
         if let Some((start, end)) = self.ranges[index]
             && (!reply.ranged || reply.data.len() as u64 != end - start + 1)
         {
@@ -200,10 +230,10 @@ impl Hls {
         }
         let url = self
             .base
-            .join(key.uri.as_deref().ok_or_else(invalid)?)
+            .join(key.uri.as_deref().ok_or_else(|| invalid())?)
             .map_err(|_| invalid())?;
         if self.key.as_ref().is_none_or(|(cached, _)| *cached != url) {
-            let bytes = self.net.get(&url, None, 16)?.data;
+            let bytes = self.net.get("key", &url, None, 16)?.data;
             if bytes.len() != 16 {
                 return Err(invalid());
             }
@@ -215,11 +245,11 @@ impl Hls {
             u128::from(
                 self.sequence
                     .checked_add(index as u64)
-                    .ok_or_else(invalid)?,
+                    .ok_or_else(|| invalid())?,
             )
             .to_be_bytes()
         };
-        let bytes = &self.key.as_ref().ok_or_else(invalid)?.1;
+        let bytes = &self.key.as_ref().ok_or_else(|| invalid())?.1;
         cbc::Decryptor::<aes::Aes128>::new_from_slices(bytes, &iv)
             .map_err(|_| invalid())?
             .decrypt_padded_vec_mut::<Pkcs7>(&data)
@@ -228,6 +258,13 @@ impl Hls {
     fn advance(&mut self) -> io::Result<bool> {
         loop {
             if self.next >= self.segments.len() {
+                if self.next == self.segments.len() {
+                    crate::diagnostics::event(
+                        "decoder",
+                        &format!("hls end segments={}", self.segments.len()),
+                    );
+                    self.next += 1;
+                }
                 return Ok(false);
             }
             let index = self.next;
@@ -240,23 +277,42 @@ impl Hls {
                     let start = r.offset.unwrap_or(0);
                     (start, start.saturating_add(r.length).saturating_sub(1))
                 });
-                let reply = self.net.get(&url, range, 8 * 1024 * 1024)?;
+                let reply = self.net.get("init", &url, range, 8 * 1024 * 1024)?;
                 let data = self.decrypt(reply.data, segment.key.as_ref(), index)?;
                 self.init = Some(map.uri.clone());
                 self.buffer = Cursor::new(data);
                 return Ok(true);
             }
-            let data = self.segment(index)?;
+            let data = self.segment(index).inspect_err(|error| {
+                crate::diagnostics::event(
+                    "decoder",
+                    &format!(
+                        "hls segment_failed index={index} of={} kind={:?} reason={error}",
+                        self.segments.len(),
+                        error.kind()
+                    ),
+                );
+            })?;
             self.next += 1;
             let ts = self.kind.unwrap_or_else(|| is_transport(&data));
             self.kind = Some(ts);
             let bytes = if ts {
                 if segment.discontinuity {
+                    crate::diagnostics::event(
+                        "decoder",
+                        &format!("hls discontinuity index={index}"),
+                    );
                     self.transport = Some(Transport::default());
                 }
                 self.transport
                     .get_or_insert_with(Transport::default)
-                    .push(&data, self.next == self.segments.len())?
+                    .push(&data, self.next == self.segments.len())
+                    .inspect_err(|error| {
+                        crate::diagnostics::event(
+                            "decoder",
+                            &format!("hls ts_failed index={index} reason={error}"),
+                        );
+                    })?
             } else {
                 data
             };
