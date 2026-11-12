@@ -937,15 +937,35 @@ fn filter_chips(
 
 const CHIP_HEIGHT: f32 = 28.0;
 
-fn chip_paint(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, selected: bool) {
+/// A tag's fill: the theme's own control colours (the accent when chosen),
+/// returned so the label can pick a colour that reads on it.
+fn chip_paint(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    selected: bool,
+) -> Color32 {
     let hovered = response.hovered() || response.has_focus();
+    let widgets = &ui.visuals().widgets;
     let fill = match (selected, hovered) {
         (true, false) => theme::accent(),
         (true, true) => theme::accent_tone(Color32::from_rgb(72, 132, 216)),
-        (false, false) => theme::tone(Color32::from_rgb(35, 41, 50)),
-        (false, true) => theme::tone(Color32::from_rgb(45, 53, 65)),
+        (false, false) => widgets.inactive.bg_fill,
+        (false, true) => widgets.hovered.bg_fill,
     };
     ui.painter().rect_filled(rect, rect.height() * 0.5, fill);
+    fill
+}
+
+/// The label on a tag: white (or the theme's `on_primary`) on the accent,
+/// the usual text on a control, each switched where it would not read.
+fn chip_text(fill: Color32, selected: bool) -> Color32 {
+    if selected {
+        // Judged on the accent itself, so hovering never flips the label.
+        theme::on_fill(theme::accent(), Color32::WHITE)
+    } else {
+        theme::on_fill(fill, crate::palette::current().text)
+    }
 }
 
 fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
@@ -957,17 +977,17 @@ fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
 }
 
 fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), Color32::WHITE);
+    // Laid out in the placeholder colour: a fixed colour here would win
+    // over the one picked for the fill below.
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        FontId::proportional(13.0),
+        Color32::PLACEHOLDER,
+    );
     let size = egui::vec2(chip_width(ui, text), CHIP_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    chip_paint(ui, rect, &response, selected);
-    let color = if selected {
-        Color32::WHITE
-    } else {
-        ui.visuals().text_color()
-    };
+    let fill = chip_paint(ui, rect, &response, selected);
+    let color = chip_text(fill, selected);
     ui.painter()
         .galley(rect.center() - galley.size() * 0.5, galley, color);
     response.widget_info(|| {
@@ -978,12 +998,12 @@ fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
 
 fn reset_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(CHIP_HEIGHT), Sense::click());
-    chip_paint(ui, rect, &response, false);
+    let fill = chip_paint(ui, rect, &response, false);
     icons::paint(
         ui.painter(),
         rect.shrink(8.0),
         Icon::Close,
-        ui.visuals().text_color(),
+        chip_text(fill, false),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response

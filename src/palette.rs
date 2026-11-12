@@ -472,18 +472,20 @@ impl Palette {
     /// What to draw text and icons in on `fill`, a primary or accent fill,
     /// in place of `usual`: the theme's own `on_primary` when it has one,
     /// otherwise `usual`, unless it would not read there (contrast below
-    /// 3:1) and the theme's dark (or, in light themes, white) colour reads
-    /// better.
+    /// 3:1) and the opposite reads better: for light `usual` the theme's
+    /// dark colour (its background, or its text in light themes), for dark
+    /// `usual` white (or, in dark themes, the brightest text).
     pub fn readable_on(&self, fill: Color32, usual: Color32) -> Color32 {
         if let Some(on) = self.on_primary
             && (fill == self.primary || fill == self.accent)
         {
             return on;
         }
-        let other = if self.light {
-            Color32::WHITE
-        } else {
-            self.background
+        let other = match (luminance(usual) > 0.18, self.light) {
+            (true, false) => self.background,
+            (true, true) => self.text,
+            (false, true) => Color32::WHITE,
+            (false, false) => self.strong,
         };
         if contrast(usual, fill) < 3.0 && contrast(other, fill) > contrast(usual, fill) {
             other
@@ -661,6 +663,14 @@ mod tests {
             catppuccin.background
         );
         let light = Theme::from_code("light").unwrap().palette();
+        // White on a yellow accent in the light theme turns to its dark text,
+        // and its dark text on a control stays.
+        let yellow = light.with_accent(rgb(0xff, 0xd3, 0x4d));
+        assert_eq!(
+            yellow.readable_on(yellow.accent, Color32::WHITE),
+            yellow.text
+        );
+        assert_eq!(light.readable_on(light.control, light.text), light.text);
         // Play/Pause: white in dark themes, black in light ones, turned over
         // only where the accent's fill would swallow it.
         assert_eq!(
