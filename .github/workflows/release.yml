@@ -1,0 +1,148 @@
+# Release packages are built here instead of on a developer machine.
+# A pushed tag vX.Y.Z builds both platforms and creates a DRAFT release with
+# exactly the four runtime files; publishing the draft stays a manual step
+# after the OTA check of the previous client (docs/release.md).
+# Running the workflow by hand builds the same files as artifacts only.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: Linux AppImage and tar.gz
+    # Ubuntu 24.04 is the glibc 2.39 baseline of the Linux packages.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libclang-dev libxkbcommon-dev libx11-dev \
+            libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev \
+            libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev \
+            libfontconfig1-dev python3 binutils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-release
+      - name: Build and package
+        env:
+          CARGO_TARGET_DIR: target
+          VK_FAST_OUTPUT: ${{ github.workspace }}/dist
+        run: ./scripts/build-linux.sh
+      - name: Check that the AppImage starts
+        run: |
+          ls -l dist
+          ./dist/VK-Fast-*-linux-x86_64.AppImage --appimage-extract-and-run --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/VK-Fast-*-linux-x86_64.AppImage
+            dist/VK-Fast-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows portable zip and installer
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
+      - name: Build and package
+        env:
+          VK_FAST_PYTHON: python
+        run: ./scripts/build-windows.sh --installer --output dist
+      - name: Check the portable zip and that the program starts
+        run: |
+          ls -l dist
+          python - <<'EOF'
+          import glob, zipfile
+          [archive] = glob.glob('dist/VK-Fast-*-windows-x86_64.zip')
+          names = zipfile.ZipFile(archive).namelist()
+          assert names == ['vk-fast.exe'], names
+          EOF
+          mkdir -p "$RUNNER_TEMP/portable"
+          unzip -o dist/VK-Fast-*-windows-x86_64.zip -d "$RUNNER_TEMP/portable"
+          "$RUNNER_TEMP/portable/vk-fast.exe" --print-data-paths
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/VK-Fast-*-windows-x86_64.zip
+            dist/VK-Fast-*-windows-x86_64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check version, files and notes
+        id: check
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib, re, tomllib
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          tag = os.environ['GITHUB_REF_NAME']
+          if tag != f'v{version}':
+              raise SystemExit(f'Tag {tag} does not match Cargo.toml version {version}')
+          expected = {
+              f'VK-Fast-{version}-linux-x86_64.AppImage',
+              f'VK-Fast-{version}-linux-x86_64.tar.gz',
+              f'VK-Fast-{version}-windows-x86_64.zip',
+              f'VK-Fast-{version}-windows-x86_64-setup.exe',
+          }
+          found = {path.name for path in pathlib.Path('dist').iterdir()}
+          if found != expected:
+              raise SystemExit(f'Release files differ: {sorted(found)}')
+          changelog = pathlib.Path('CHANGELOG.md').read_text()
+          match = re.search(rf'^## {re.escape(version)}\n(.*?)(?=^## |\Z)', changelog, re.S | re.M)
+          if not match or not match.group(1).strip():
+              raise SystemExit(f'CHANGELOG.md has no section for {version}')
+          pathlib.Path('notes.md').write_text(match.group(1).strip() + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          EOF
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "VK Fast $VERSION" --notes-file notes.md dist/*
