@@ -39,6 +39,8 @@ pub enum Output {
 }
 
 const PHOTO: f32 = 84.0;
+/// How far the ring around a picked photo reaches past it.
+const RING: f32 = 4.0;
 const CELL: f32 = 104.0;
 const SIDE: f32 = 270.0;
 
@@ -260,7 +262,8 @@ fn artist_cell(
     artist: &FollowedArtist,
     picked: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(CELL, PHOTO + 44.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(CELL, PHOTO + RING + 44.0), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -274,7 +277,9 @@ fn artist_cell(
         return response;
     }
     let circle = egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.top() + PHOTO * 0.5 + 2.0),
+        // The ring of a picked artist reaches past the photo: leave it room
+        // so the first row is not cut by the top of the list.
+        egui::pos2(rect.center().x, rect.top() + RING + PHOTO * 0.5),
         egui::vec2(PHOTO, PHOTO),
     );
     photo(ui, covers, circle, artist, ui.id().with("photo"));
@@ -454,7 +459,11 @@ fn favourite_row(
 fn progress(ui: &mut egui::Ui, count: usize, language: Language) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
     ui.painter().rect_filled(rect, 8.0, theme::background());
-    let share = (count.min(MINIMUM) as f32 / MINIMUM as f32).clamp(0.0, 1.0);
+    let target = (count.min(MINIMUM) as f32 / MINIMUM as f32).clamp(0.0, 1.0);
+    // The bar slides to its new length as artists are picked or dropped.
+    let share =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::new("recommendation-progress"), target, 0.25);
     if share > 0.0 {
         let mut fill = rect;
         fill.set_width(rect.width() * share);
