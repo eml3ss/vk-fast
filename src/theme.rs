@@ -600,18 +600,22 @@ fn after_contents(ui: &mut egui::Ui) {
             egui::style::ScrollAnimation::none(),
         );
     }
+    // Page keys: the distance still to go eases out over a few frames; a
+    // press while it is under way adds a page to it, so quick presses slide
+    // on smoothly instead of restarting the motion.
+    let remaining_id = ui.id().with("key-scroll-remaining");
+    let mut remaining = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(remaining_id))
+        .unwrap_or(0.0);
     match crate::autoscroll::take_key_scroll_for(ui) {
         // Most of a screen, leaving a little of the previous one in view.
         Some(crate::autoscroll::KeyScroll::Page(direction)) => {
-            ui.scroll_with_delta(egui::vec2(0.0, -direction * ui.clip_rect().height() * 0.85));
+            remaining += direction * ui.clip_rect().height() * 0.85;
         }
-        Some(crate::autoscroll::KeyScroll::Glide(points)) => {
-            ui.scroll_with_delta_animation(
-                egui::vec2(0.0, -points),
-                egui::style::ScrollAnimation::none(),
-            );
-        }
+        Some(crate::autoscroll::KeyScroll::Glide(points)) => remaining += points,
         Some(crate::autoscroll::KeyScroll::Top) => {
+            remaining = 0.0;
             ui.scroll_to_rect(
                 egui::Rect::from_min_size(ui.min_rect().min, egui::vec2(1.0, 1.0)),
                 Some(egui::Align::Min),
@@ -619,7 +623,32 @@ fn after_contents(ui: &mut egui::Ui) {
         }
         None => {}
     }
+    if remaining != 0.0 {
+        let dt = ui.input(|input| input.stable_dt).clamp(0.001, 0.05);
+        let eased = remaining * (1.0 - (-dt / KEY_SCROLL_EASE).exp());
+        let step = if remaining.abs() < 1.0 {
+            remaining
+        } else {
+            eased
+        };
+        ui.scroll_with_delta_animation(
+            egui::vec2(0.0, -step),
+            egui::style::ScrollAnimation::none(),
+        );
+        remaining -= step;
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|data| {
+        if remaining == 0.0 {
+            data.remove::<f32>(remaining_id);
+        } else {
+            data.insert_temp(remaining_id, remaining);
+        }
+    });
 }
+
+/// How quickly a Page key's scroll settles: the time constant of its ease.
+const KEY_SCROLL_EASE: f32 = 0.08;
 
 pub fn scroll_area<R>(
     ui: &mut egui::Ui,
@@ -831,23 +860,30 @@ mod tests {
         frame(None);
         frame(Some(KeyScroll::Page(1.0)));
         let mut offset = 0.0;
-        for _ in 0..5 {
+        for _ in 0..40 {
             offset = frame(None);
         }
         // About a screen, keeping a little of the previous one.
         assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
         frame(Some(KeyScroll::Page(1.0)));
-        for _ in 0..5 {
+        for _ in 0..40 {
             offset = frame(None);
         }
         assert!((offset - 600.0 * 0.85).abs() < 2.0, "{offset}");
         frame(Some(KeyScroll::Page(-1.0)));
-        for _ in 0..5 {
+        for _ in 0..40 {
             offset = frame(None);
         }
         assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
+        // Two quick presses add up instead of restarting the motion.
+        frame(Some(KeyScroll::Page(1.0)));
+        frame(Some(KeyScroll::Page(1.0)));
+        for _ in 0..40 {
+            offset = frame(None);
+        }
+        assert!((offset - 900.0 * 0.85).abs() < 2.0, "{offset}");
         frame(Some(KeyScroll::Top));
-        for _ in 0..5 {
+        for _ in 0..40 {
             offset = frame(None);
         }
         assert_eq!(offset, 0.0);

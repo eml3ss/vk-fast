@@ -19,7 +19,7 @@ pub const MAX_DB: f32 = 12.0;
 /// Gains move in half-decibel steps.
 pub const STEP_DB: f32 = 0.5;
 /// One octave per band.
-const Q: f64 = std::f64::consts::SQRT_2;
+const BANDWIDTH_OCTAVES: f64 = 1.0;
 /// Channels the callback filters; any further ones pass unchanged.
 const MAX_CHANNELS: usize = 8;
 
@@ -362,7 +362,11 @@ impl Biquad {
         coefficients: [1.0, 0.0, 0.0, 0.0, 0.0],
     };
 
-    /// A peaking filter an octave wide (RBJ audio EQ cookbook).
+    /// A peaking filter an octave wide (RBJ audio EQ cookbook). The
+    /// bandwidth form keeps it an octave wide after the bilinear transform:
+    /// set by Q, the top bands come out much narrower than their neighbours
+    /// (16 kHz about 2.7 times), so a flat top sagged between 8 and 16 kHz.
+    /// Below a few kilohertz both forms give the same filter.
     fn band(band: usize, gain: f32) -> Self {
         if gain == 0.0 {
             return Self::IDENTITY;
@@ -370,7 +374,7 @@ impl Biquad {
         let a = 10.0_f64.powf(f64::from(gain) / 40.0);
         let w0 = std::f64::consts::TAU * f64::from(BANDS[band]) / f64::from(SAMPLE_RATE);
         let (cos, sin) = (w0.cos(), w0.sin());
-        let alpha = sin / (2.0 * Q);
+        let alpha = sin * (std::f64::consts::LN_2 / 2.0 * BANDWIDTH_OCTAVES * w0 / sin).sinh();
         let [b0, b1, b2, a0, a1, a2] = [
             1.0 + alpha * a,
             -2.0 * cos,
@@ -589,6 +593,29 @@ mod tests {
                     "{gains:?} band {band}: {error}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_flat_top_dips_evenly_between_every_pair_of_bands() {
+        // All bands raised: the curve sags between neighbours by about the
+        // same everywhere, the top octave included.
+        let curve = Curve::new(&[MAX_DB; BANDS.len()]);
+        let dips: Vec<f32> = BANDS
+            .windows(2)
+            .map(|pair| {
+                let (low, high) = (pair[0].ln(), pair[1].ln());
+                (0..=50)
+                    .map(|step| curve.db((low + (high - low) * step as f32 / 50.0).exp()))
+                    .fold(f32::MAX, f32::min)
+            })
+            .collect();
+        let (lowest, highest) = dips.iter().fold((f32::MAX, f32::MIN), |(lo, hi), dip| {
+            (lo.min(*dip), hi.max(*dip))
+        });
+        assert!(highest - lowest < 1.5, "{dips:?}");
+        for freq in BANDS {
+            assert!((curve.db(freq) - MAX_DB).abs() < 0.01, "{freq}");
         }
     }
 

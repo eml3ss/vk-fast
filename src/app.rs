@@ -2815,7 +2815,7 @@ impl MusicApp {
     /// speed until it is released, instead of jumping page by page.
     fn glide_page_key(&mut self, ctx: &egui::Context) {
         const DELAY: f64 = 0.35;
-        const SPEED: f32 = 1600.0;
+        const SPEED: f32 = 3200.0;
         let Some((direction, since)) = self.page_key else {
             return;
         };
