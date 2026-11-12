@@ -247,18 +247,18 @@ impl Biquad {
 
 /// Neighbouring bands overlap, so filters set to the bands' values would
 /// add up to more (or less) at each band. These are the filter gains whose
-/// sum lands on every band's value (iterated until it does), so one band
-/// never drags its neighbours along.
-fn filter_gains(targets: &Gains) -> Gains {
+/// sum (`db`: one filter's gain at a frequency) lands on every band's value
+/// (iterated until it does), so one band never drags its neighbours along.
+fn balanced_gains(targets: &Gains, db: impl Fn(usize, f32, f32) -> f64) -> Gains {
     let targets = clean_gains(*targets);
     let mut gains = targets;
     for _ in 0..64 {
-        let filters: [Biquad; BANDS.len()] =
-            std::array::from_fn(|band| Biquad::band(band, gains[band]));
         let mut worst = 0.0_f64;
         let mut next = gains;
         for (band, freq) in BANDS.into_iter().enumerate() {
-            let reached: f64 = filters.iter().map(|filter| filter.db(freq)).sum();
+            let reached: f64 = (0..BANDS.len())
+                .map(|filter| db(filter, gains[filter], freq))
+                .sum();
             let error = f64::from(targets[band]) - reached;
             worst = worst.max(error.abs());
             next[band] = (gains[band] + error as f32).clamp(-MAX_FILTER_DB, MAX_FILTER_DB);
@@ -271,9 +271,35 @@ fn filter_gains(targets: &Gains) -> Gains {
     gains
 }
 
+/// The gains of the filters that are played.
+fn filter_gains(targets: &Gains) -> Gains {
+    balanced_gains(targets, |band, gain, freq| {
+        Biquad::band(band, gain).db(freq)
+    })
+}
+
+/// One band's ideal (analog) octave-wide peak at `freq`, in dB: the shape
+/// each played filter stands for. It is the same at every band on the
+/// graph's logarithmic axis; the played filters keep it up to about 10 kHz
+/// and are squeezed above, towards the 24 kHz limit of 48 kHz audio.
+fn ideal_db(band: usize, gain: f32, freq: f32) -> f64 {
+    if gain == 0.0 {
+        return 0.0;
+    }
+    let a = 10.0_f64.powf(f64::from(gain) / 40.0);
+    let q = 1.0 / (2.0 * (std::f64::consts::LN_2 / 2.0 * BANDWIDTH_OCTAVES).sinh());
+    let x = f64::from(freq) / f64::from(BANDS[band]);
+    let base = (1.0 - x * x).powi(2);
+    let num = base + (a * x / q).powi(2);
+    let den = base + (x / (a * q)).powi(2);
+    10.0 * (num / den).log10()
+}
+
 /// The sound of a set of band values: what is played and what is drawn.
 pub struct Curve {
     filters: [Biquad; BANDS.len()],
+    /// The ideal filters the graph draws, balanced like the played ones.
+    ideal: Gains,
 }
 
 impl Curve {
@@ -281,24 +307,35 @@ impl Curve {
         let filters = filter_gains(gains);
         Self {
             filters: std::array::from_fn(|band| Biquad::band(band, filters[band])),
+            ideal: balanced_gains(gains, ideal_db),
         }
     }
 
-    /// The curve's gain at `freq`, in dB.
+    /// The drawn curve's gain at `freq`, in dB: the ideal filters' shape,
+    /// alike at both ends of the graph. What is played matches it to a
+    /// hundredth of a decibel up to about 10 kHz and within half a decibel
+    /// above, where the played filters are squeezed.
     pub fn db(&self, freq: f32) -> f32 {
+        (0..BANDS.len())
+            .map(|band| ideal_db(band, self.ideal[band], freq))
+            .sum::<f64>() as f32
+    }
+
+    /// What is played at `freq`, in dB.
+    fn played_db(&self, freq: f32) -> f32 {
         self.filters
             .iter()
             .map(|filter| filter.db(freq))
             .sum::<f64>() as f32
     }
 
-    /// Level the output is lowered by so the loudest point of the curve
-    /// stays at or below 0 dB.
+    /// Level the output is lowered by so the loudest point of what is
+    /// played stays at or below 0 dB.
     pub fn headroom_db(&self) -> f32 {
         const POINTS: usize = 240;
         let (low, high) = (20.0_f32.ln(), 20_000.0_f32.ln());
         (0..=POINTS)
-            .map(|step| self.db((low + (high - low) * step as f32 / POINTS as f32).exp()))
+            .map(|step| self.played_db((low + (high - low) * step as f32 / POINTS as f32).exp()))
             .fold(0.0_f32, f32::max)
     }
 }
@@ -619,6 +656,19 @@ mod tests {
                     "{preset:?} {freq} Hz: {heard} vs {drawn}"
                 );
             }
+            // The graph draws the ideal filters: the played ones keep their
+            // shape low down and stray a little only near 24 kHz.
+            for (freq, tolerance) in [
+                (100.0, 0.02),
+                (1_000.0, 0.02),
+                (8_000.0, 0.3),
+                (12_000.0, 0.6),
+                (16_000.0, 0.6),
+                (20_000.0, 1.0),
+            ] {
+                let gap = (curve.db(freq) - curve.played_db(freq)).abs();
+                assert!(gap < tolerance, "{preset:?} {freq} Hz: {gap}");
+            }
         }
     }
 
@@ -667,10 +717,20 @@ mod tests {
         for freq in BANDS {
             assert!((curve.db(freq) - MAX_DB).abs() < 0.01, "{freq}");
         }
-        // The top end slopes off like the bottom one instead of dropping
-        // to nothing before 20 kHz.
-        assert!(curve.db(20.0) > 4.0, "{}", curve.db(20.0));
-        assert!(curve.db(20_000.0) > 6.0, "{}", curve.db(20_000.0));
+        // The graph's ends mirror each other: as far beyond 16 kHz as below
+        // 31 Hz, the drawn curve is just as high.
+        for octaves in [0.1_f32, 0.25, 0.5] {
+            let low = curve.db(BANDS[0] * 2.0_f32.powf(-octaves));
+            let high = curve.db(BANDS[9] * 2.0_f32.powf(octaves));
+            assert!((low - high).abs() < 0.05, "{octaves}: {low} vs {high}");
+        }
+        // What is played keeps the top end too, instead of dropping to
+        // nothing before 20 kHz.
+        assert!(
+            curve.played_db(20_000.0) > 6.0,
+            "{}",
+            curve.played_db(20_000.0)
+        );
     }
 
     #[test]
