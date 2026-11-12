@@ -14,7 +14,9 @@ import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-APPIMAGETOOL_SHA256 = '62aebc77c2149e96b593b94da9bbd1881e0984a56399ff6d7a03b7ddd7c9ce68'
+# A numbered release: the rolling `continuous` build changes under the same URL.
+APPIMAGETOOL_VERSION = '1.9.1'
+APPIMAGETOOL_SHA256 = 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'
 
 
 def appimagetool():
@@ -22,7 +24,7 @@ def appimagetool():
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / ('appimagetool-' + APPIMAGETOOL_SHA256[:12] + '.AppImage')
     if not path.is_file():
-        with urllib.request.urlopen('https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage', timeout=60) as response:
+        with urllib.request.urlopen(f'https://github.com/AppImage/appimagetool/releases/download/{APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage', timeout=60) as response:
             data = response.read(32 * 1024 * 1024)
         if hashlib.sha256(data).hexdigest() != APPIMAGETOOL_SHA256:
             raise SystemExit('AppImage tool checksum mismatch')

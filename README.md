@@ -43,7 +43,7 @@ cargo run --release --locked
 | Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire` |
 | Debian / Ubuntu | `build-essential pkg-config libclang-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
 
-Для запуска Linux-пакетов используются библиотеки дистрибутива. [Linux: запуск и упаковка](docs/linux.md).
+Для запуска Linux-пакетов используются библиотеки дистрибутива. [Linux: запуск и упаковка](docs/linux.md). Пакеты выпусков собирает GitHub Actions: [выпуск](docs/release.md).
 
 ## Лицензия
 VK Fast - бесплатный проект с открытым исходным кодом.
