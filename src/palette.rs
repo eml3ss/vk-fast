@@ -200,6 +200,17 @@ pub struct Palette {
     /// The selected sidebar item, pressed controls, hovered caption buttons.
     #[serde(deserialize_with = "deserialize_color")]
     pub selected: Color32,
+    /// The chosen item of a navigation list (sidebar pages, settings
+    /// sections, the open collection); none fills it with `selected`.
+    #[serde(default, deserialize_with = "deserialize_optional_color")]
+    pub active: Option<Color32>,
+    /// Text and icons on `active`; none keeps the usual text and accent icon.
+    #[serde(default, deserialize_with = "deserialize_optional_color")]
+    pub on_active: Option<Color32>,
+    /// Text and icons on `primary` and accent fills (filled buttons, Play);
+    /// none keeps the usual light text unless only dark text reads there.
+    #[serde(default, deserialize_with = "deserialize_optional_color")]
+    pub on_primary: Option<Color32>,
     #[serde(deserialize_with = "deserialize_color")]
     pub scroll_handle: Color32,
     #[serde(deserialize_with = "deserialize_color")]
@@ -227,6 +238,25 @@ pub struct Palette {
     /// The accent the blue colours above were turned to.
     #[serde(skip, default = "original_accent")]
     accent_color: Color32,
+}
+
+/// WCAG relative luminance.
+fn luminance(color: Color32) -> f32 {
+    let channel = |value: u8| {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+}
+
+/// WCAG contrast ratio, from 1 to 21.
+fn contrast(a: Color32, b: Color32) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -433,9 +463,33 @@ impl Palette {
         palette.primary = shift(self.primary, from, accent);
         palette.link = shift(self.link, from, accent);
         palette.selected = shift(self.selected, from, accent);
+        palette.active = self.active.map(|active| shift(active, from, accent));
         palette.control_hovered_stroke = shift(self.control_hovered_stroke, from, accent);
         palette.accent_color = accent;
         palette
+    }
+
+    /// What to draw text and icons in on `fill`, a primary or accent fill,
+    /// in place of `usual`: the theme's own `on_primary` when it has one,
+    /// otherwise `usual`, unless it would not read there (contrast below
+    /// 3:1) and the theme's dark (or, in light themes, white) colour reads
+    /// better.
+    pub fn readable_on(&self, fill: Color32, usual: Color32) -> Color32 {
+        if let Some(on) = self.on_primary
+            && (fill == self.primary || fill == self.accent)
+        {
+            return on;
+        }
+        let other = if self.light {
+            Color32::WHITE
+        } else {
+            self.background
+        };
+        if contrast(usual, fill) < 3.0 && contrast(other, fill) > contrast(usual, fill) {
+            other
+        } else {
+            usual
+        }
     }
 
     /// `color`, a colour of the blue accent family (a lighter blue, a dark
@@ -561,6 +615,55 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_on_filled_buttons_switches_only_where_it_would_not_read() {
+        // The dark themes keep their light text and white Play glyph exactly.
+        for code in ["dark", "oled", "graphite", "midnight"] {
+            let palette = Theme::from_code(code).unwrap().palette();
+            assert_eq!(
+                palette.readable_on(palette.primary, palette.text),
+                palette.text
+            );
+            assert_eq!(
+                palette.readable_on(palette.accent, Color32::WHITE),
+                Color32::WHITE
+            );
+            assert_eq!(palette.active, None);
+            assert_eq!(palette.on_active, None);
+            assert_eq!(palette.on_primary, None);
+        }
+        // A pale accent under a white glyph reads at 2:1; the page colour wins.
+        let catppuccin = Theme::from_code("catppuccin").unwrap().palette();
+        assert_eq!(
+            catppuccin.readable_on(catppuccin.accent, Color32::WHITE),
+            catppuccin.background
+        );
+        // A bright theme accent like Noctalia's buttons gets dark text...
+        let mut bright = *original_dark();
+        bright.primary = rgb(0xb8, 0xbb, 0x26);
+        bright.accent = bright.primary;
+        assert_eq!(
+            bright.readable_on(bright.primary, bright.text),
+            bright.background
+        );
+        // ...or exactly the theme's own colour for it, on primary and accent.
+        bright.on_primary = Some(rgb(0x28, 0x28, 0x28));
+        assert_eq!(
+            bright.readable_on(bright.primary, Color32::WHITE),
+            rgb(0x28, 0x28, 0x28)
+        );
+        assert_eq!(
+            bright.readable_on(bright.accent, bright.text),
+            rgb(0x28, 0x28, 0x28)
+        );
+        // Other fills still follow contrast alone.
+        assert_eq!(bright.readable_on(BLUE, Color32::WHITE), Color32::WHITE);
+        // A picked accent turns the theme's active fill along with its accent.
+        bright.active = Some(bright.accent);
+        let red = bright.with_accent(Accent::Red.color());
+        assert!((hsl(red.active.unwrap())[0] - hsl(Accent::Red.color())[0]).abs() < 0.01);
+    }
 
     #[test]
     fn dark_palette_is_the_original_look() {

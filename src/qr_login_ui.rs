@@ -70,18 +70,25 @@ fn button(
     ui.add_enabled_ui(enabled, |ui| {
         ui.put(
             rect,
-            egui::Button::new(RichText::new(text).size(14.0).family(theme::semibold()))
-                .fill(if primary {
-                    theme::primary()
+            egui::Button::new({
+                let text = RichText::new(text).size(14.0).family(theme::semibold());
+                if primary {
+                    theme::on_primary_text(text)
                 } else {
-                    theme::tone(Color32::from_rgb(31, 38, 48))
-                })
-                .stroke(if primary {
-                    Stroke::NONE
-                } else {
-                    Stroke::new(1.0, theme::tone(BORDER))
-                })
-                .corner_radius(10),
+                    text
+                }
+            })
+            .fill(if primary {
+                theme::primary()
+            } else {
+                theme::tone(Color32::from_rgb(31, 38, 48))
+            })
+            .stroke(if primary {
+                Stroke::NONE
+            } else {
+                Stroke::new(1.0, theme::tone(BORDER))
+            })
+            .corner_radius(10),
         )
     })
     .inner

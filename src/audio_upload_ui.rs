@@ -146,11 +146,11 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                 .add_enabled_ui(!busy && (valid || view.uncertain), |ui| {
                     ui.add_sized(
                         egui::vec2(width, 38.0),
-                        egui::Button::new(if view.uncertain {
+                        egui::Button::new(theme::on_primary_text(if view.uncertain {
                             language.text("Обновить библиотеку", "Refresh library")
                         } else {
                             language.text("Загрузить в VK", "Upload to VK")
-                        })
+                        }))
                         .fill(theme::primary())
                         .corner_radius(8),
                     )

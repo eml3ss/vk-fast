@@ -3844,9 +3844,12 @@ impl MusicApp {
         if ui
             .add_enabled(
                 can_login,
-                egui::Button::new(t("Войти по QR-коду", "Sign in with QR code"))
-                    .fill(theme::primary())
-                    .min_size(button_size),
+                egui::Button::new(theme::on_primary_text(t(
+                    "Войти по QR-коду",
+                    "Sign in with QR code",
+                )))
+                .fill(theme::primary())
+                .min_size(button_size),
             )
             .clicked()
         {
@@ -8188,7 +8191,7 @@ impl MusicApp {
                 rect,
                 9.0,
                 if selected {
-                    theme::selected()
+                    theme::active()
                 } else {
                     theme::panel_hover()
                 },
@@ -8202,7 +8205,7 @@ impl MusicApp {
             ),
             icon,
             if selected {
-                theme::accent()
+                theme::on_active(theme::accent())
             } else {
                 theme::muted()
             },
@@ -8212,7 +8215,11 @@ impl MusicApp {
             egui::Align2::LEFT_CENTER,
             label,
             egui::TextStyle::Button.resolve(ui.style()),
-            ui.visuals().text_color(),
+            if selected {
+                theme::on_active(ui.visuals().text_color())
+            } else {
+                ui.visuals().text_color()
+            },
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)

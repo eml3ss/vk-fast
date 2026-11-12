@@ -265,6 +265,54 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_can_set_its_navigation_fill_and_text_on_filled_buttons() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("themes");
+        fs::create_dir(&directory).unwrap();
+        let mut theme = edited_dark("bright", "Яркая", "Bright");
+        theme["palette"]["active"] = "#76946a".into();
+        theme["palette"]["on_active"] = "#1f1f28".into();
+        theme["palette"]["on_primary"] = "#16161d".into();
+        fs::write(
+            directory.join("bright.json"),
+            serde_json::to_vec(&theme).unwrap(),
+        )
+        .unwrap();
+        let mut broken = edited_dark("broken", "Сломанная", "Broken");
+        broken["palette"]["on_primary"] = "dark".into();
+        fs::write(
+            directory.join("broken.json"),
+            serde_json::to_vec(&broken).unwrap(),
+        )
+        .unwrap();
+        let catalog = load_at(root.path()).unwrap();
+        let bright = catalog.iter().find(|theme| theme.id == "bright").unwrap();
+        assert_eq!(
+            bright.palette.active,
+            Some(Color32::from_rgb(0x76, 0x94, 0x6a))
+        );
+        assert_eq!(
+            bright.palette.on_active,
+            Some(Color32::from_rgb(0x1f, 0x1f, 0x28))
+        );
+        assert_eq!(
+            bright.palette.on_primary,
+            Some(Color32::from_rgb(0x16, 0x16, 0x1d))
+        );
+        assert!(catalog.iter().all(|theme| theme.id != "broken"));
+        // Themes without them keep the selected fill and their usual text.
+        let dark = catalog.iter().find(|theme| theme.id == "dark").unwrap();
+        assert_eq!(
+            (
+                dark.palette.active,
+                dark.palette.on_active,
+                dark.palette.on_primary
+            ),
+            (None, None, None)
+        );
+    }
+
+    #[test]
     fn invalid_files_and_duplicate_ids_do_not_break_the_default_catalog() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("themes");

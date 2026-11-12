@@ -718,6 +718,7 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     buttons.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     buttons.style_mut().visuals.widgets.hovered.bg_fill = theme::accent();
     buttons.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    theme::on_primary_widgets(buttons.style_mut());
     let (icon, label, action) = if !view.connected {
         (
             Icon::ArrowRight,

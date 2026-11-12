@@ -119,7 +119,7 @@ pub fn button(
         ui,
         egui::Rect::from_center_size(center, egui::Vec2::splat(glyph)),
         state,
-        Color32::WHITE,
+        theme::on_fill(fill, Color32::WHITE),
     );
     if response.has_focus() {
         ui.painter().circle_stroke(

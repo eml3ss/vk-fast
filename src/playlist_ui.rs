@@ -1067,7 +1067,7 @@ fn paint_entry(
             rect,
             8.0,
             if state.selected {
-                theme::selected()
+                theme::active()
             } else {
                 theme::tone(Color32::from_rgb(31, 38, 49))
             },
@@ -1106,11 +1106,16 @@ fn paint_entry(
         entry.title,
         FontId::new(14.0, theme::semibold()),
         if state.selected {
-            theme::accent()
+            theme::on_active(theme::accent())
         } else {
             ui.visuals().text_color()
         },
     );
+    let secondary = if state.selected {
+        theme::on_active(theme::muted())
+    } else {
+        theme::muted()
+    };
     let mut subtitle =
         egui::Rect::from_min_max(egui::pos2(text.left(), rect.center().y + 2.0), text.max);
     if entry.pinned {
@@ -1119,7 +1124,7 @@ fn paint_entry(
             egui::pos2(subtitle.left() + 6.0, subtitle.center().y),
             egui::vec2(12.0, 12.0),
         );
-        icons::paint(ui.painter(), pin, Icon::Pin, theme::muted());
+        icons::paint(ui.painter(), pin, Icon::Pin, secondary);
         subtitle.min.x = pin.right() + 4.0;
     }
     paint_line(
@@ -1127,7 +1132,7 @@ fn paint_entry(
         subtitle,
         entry.subtitle,
         egui::TextStyle::Small.resolve(ui.style()),
-        theme::muted(),
+        secondary,
     );
 }
 

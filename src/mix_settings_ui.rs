@@ -176,7 +176,7 @@ pub fn show(ctx: &egui::Context, view: View<'_>, selection: &mut Vec<(String, St
                 if ui
                     .add_enabled(
                         ready,
-                        egui::Button::new(t("Применить", "Apply"))
+                        egui::Button::new(theme::on_primary_text(t("Применить", "Apply")))
                             .fill(theme::primary())
                             .corner_radius(10)
                             .min_size(egui::vec2(120.0, 36.0)),

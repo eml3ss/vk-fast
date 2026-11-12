@@ -968,7 +968,11 @@ pub fn compact_button(
             ui.painter(),
             rect.shrink(inset),
             icon,
-            visuals.fg_stroke.color,
+            if primary {
+                crate::theme::on_fill(fill, visuals.fg_stroke.color)
+            } else {
+                visuals.fg_stroke.color
+            },
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)

@@ -94,9 +94,11 @@ pub fn show(ctx: &egui::Context, view: View<'_>) -> Option<Action> {
                     .add_enabled_ui(valid && !view.creating, |ui| {
                         ui.add_sized(
                             egui::vec2(104.0, 34.0),
-                            egui::Button::new(language.text("Создать", "Create"))
-                                .fill(theme::primary())
-                                .corner_radius(8),
+                            egui::Button::new(theme::on_primary_text(
+                                language.text("Создать", "Create"),
+                            ))
+                            .fill(theme::primary())
+                            .corner_radius(8),
                         )
                     })
                     .inner;

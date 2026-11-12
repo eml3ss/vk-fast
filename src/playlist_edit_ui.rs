@@ -185,9 +185,11 @@ pub fn show(ctx: &egui::Context, covers: &mut CoverCache, mut view: View<'_>) ->
                         |ui| {
                             ui.add_sized(
                                 egui::vec2(104.0, 34.0),
-                                egui::Button::new(language.text("Сохранить", "Save"))
-                                    .fill(theme::primary())
-                                    .corner_radius(8),
+                                egui::Button::new(theme::on_primary_text(
+                                    language.text("Сохранить", "Save"),
+                                ))
+                                .fill(theme::primary())
+                                .corner_radius(8),
                             )
                         },
                     )

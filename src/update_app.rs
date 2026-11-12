@@ -98,15 +98,13 @@ impl State {
         };
         let version = release.version.to_string();
         let (rect, response) = ui.allocate_exact_size(egui::vec2(104.0, 38.0), Sense::click());
-        ui.painter().rect_filled(
-            rect,
-            8,
-            if response.hovered() {
-                theme::accent()
-            } else {
-                theme::primary()
-            },
-        );
+        let fill = if response.hovered() {
+            theme::accent()
+        } else {
+            theme::primary()
+        };
+        let on = theme::on_fill(fill, Color32::WHITE);
+        ui.painter().rect_filled(rect, 8, fill);
         icons::paint(
             ui.painter(),
             egui::Rect::from_center_size(
@@ -114,7 +112,7 @@ impl State {
                 egui::vec2(18.0, 18.0),
             ),
             Icon::Refresh,
-            Color32::WHITE,
+            on,
         );
         let text_rect = egui::Rect::from_min_max(
             rect.min + egui::vec2(34.0, 0.0),
@@ -126,7 +124,7 @@ impl State {
                 .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             |ui| {
                 ui.add(
-                    egui::Label::new(RichText::new(&version).color(Color32::WHITE).strong())
+                    egui::Label::new(RichText::new(&version).color(on).strong())
                         .truncate()
                         .selectable(false),
                 );
@@ -504,7 +502,7 @@ impl State {
                     .add_enabled_ui(!self.busy(), |ui| {
                         ui.add_sized(
                             egui::vec2(width, 38.0),
-                            egui::Button::new(label)
+                            egui::Button::new(theme::on_primary_text(label))
                                 .fill(theme::primary())
                                 .corner_radius(8),
                         )

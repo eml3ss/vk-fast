@@ -45,6 +45,53 @@ pub fn primary() -> Color32 {
 pub fn selected() -> Color32 {
     crate::palette::current().selected
 }
+/// The chosen item of a navigation list: `selected` unless the theme sets it.
+pub fn active() -> Color32 {
+    let palette = crate::palette::current();
+    palette.active.unwrap_or(palette.selected)
+}
+/// Text and icons on [`active`] in place of `usual`: the theme's own
+/// colour, or one that reads on its own `active` fill; `usual` otherwise.
+pub fn on_active(usual: Color32) -> Color32 {
+    let palette = crate::palette::current();
+    palette.on_active.unwrap_or_else(|| {
+        palette
+            .active
+            .map_or(usual, |fill| palette.readable_on(fill, usual))
+    })
+}
+/// Text and icons on a primary or accent `fill` in place of `usual`.
+pub fn on_fill(fill: Color32, usual: Color32) -> Color32 {
+    crate::palette::current().readable_on(fill, usual)
+}
+/// Widgets in `style` filled with [`primary`] at rest and the accent when
+/// hovered (Play, the home card's action): their text and icons switch
+/// only where the usual text would not read on those fills.
+pub fn on_primary_widgets(style: &mut egui::Style) {
+    let palette = crate::palette::current();
+    let at_rest = palette.readable_on(palette.primary, palette.text);
+    let hovered = palette.readable_on(palette.accent, palette.text);
+    if at_rest == palette.text && hovered == palette.text {
+        return;
+    }
+    let widgets = &mut style.visuals.widgets;
+    widgets.inactive.fg_stroke.color = at_rest;
+    widgets.hovered.fg_stroke.color = hovered;
+    widgets.active.fg_stroke.color = hovered;
+    style.visuals.override_text_color = Some(at_rest);
+}
+/// A filled button's label on [`primary`]: recoloured only where the
+/// usual text would not read, so other themes keep egui's own text colour.
+pub fn on_primary_text(text: impl Into<egui::RichText>) -> egui::RichText {
+    let text = text.into();
+    let palette = crate::palette::current();
+    let on = palette.readable_on(palette.primary, palette.text);
+    if on == palette.text {
+        text
+    } else {
+        text.color(on)
+    }
+}
 /// A hovered item in a panel: darker than the panel, or lighter where the
 /// panel is already as dark as the page.
 pub fn panel_hover() -> Color32 {

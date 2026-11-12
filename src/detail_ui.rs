@@ -1060,6 +1060,7 @@ fn controls(
                 ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
                 ui.style_mut().visuals.widgets.hovered.bg_fill = theme::accent();
                 ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+                theme::on_primary_widgets(ui.style_mut());
                 icons::button(ui, icon, label, track_count > 0)
             })
             .inner;

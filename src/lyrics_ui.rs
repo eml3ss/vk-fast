@@ -380,9 +380,12 @@ pub fn show(
                 );
                 let response = ui.put(
                     follow,
-                    egui::Button::new(t("К текущей строке", "Follow current line"))
-                        .fill(theme::primary())
-                        .corner_radius(8),
+                    egui::Button::new(theme::on_primary_text(t(
+                        "К текущей строке",
+                        "Follow current line",
+                    )))
+                    .fill(theme::primary())
+                    .corner_radius(8),
                 );
                 if response.clicked() {
                     state.follow = true;
@@ -434,7 +437,7 @@ pub fn show(
                             center + egui::vec2(0.0, 18.0),
                             egui::vec2(content.width().min(220.0), 36.0),
                         ),
-                        egui::Button::new(t("Повторить", "Retry"))
+                        egui::Button::new(theme::on_primary_text(t("Повторить", "Retry")))
                             .fill(theme::primary())
                             .corner_radius(8),
                     )
