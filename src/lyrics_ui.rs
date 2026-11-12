@@ -55,6 +55,10 @@ pub struct State {
     followed: Option<Option<usize>>,
     last_position: Option<f64>,
     gap_clock: GapClock,
+    /// The primary button went down on the lines, judged where they were
+    /// at that moment: dragging a panel edge or the queue divider grows the
+    /// lines under a press that began outside them.
+    press_on_lines: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -68,6 +72,7 @@ impl Default for State {
             followed: None,
             last_position: None,
             gap_clock: GapClock::default(),
+            press_on_lines: false,
         }
     }
 }
@@ -546,6 +551,14 @@ fn lines(
     // of the lines or their scrollbar), leaves the current line. A button
     // held down elsewhere, such as on the seek bar, may pass over the lines.
     let manually_scrolling = ui.input(|input| {
+        if input.pointer.primary_pressed() {
+            state.press_on_lines = input
+                .pointer
+                .press_origin()
+                .is_some_and(|start| rect.contains(start));
+        } else if !input.pointer.primary_down() {
+            state.press_on_lines = false;
+        }
         let over = input
             .pointer
             .hover_pos()
@@ -554,10 +567,10 @@ fn lines(
             matches!(event, egui::Event::MouseWheel { delta, .. } if *delta != egui::Vec2::ZERO)
         });
         let dragged_here = input.pointer.primary_down()
+            && state.press_on_lines
             && input
                 .pointer
                 .press_origin()
-                .filter(|start| rect.contains(*start))
                 .zip(input.pointer.interact_pos())
                 .is_some_and(|(start, point)| {
                     start.x > rect.right() - 16.0 || point.distance(start) > 4.0
@@ -996,6 +1009,54 @@ mod tests {
             !follows_after(egui::pos2(300.0, 280.0)),
             "dragging the lines themselves"
         );
+    }
+
+    #[test]
+    fn widening_the_panel_under_the_pointer_keeps_following_the_current_line() {
+        let data = crate::lyrics::test_data(80, true);
+        let size = egui::vec2(800.0, 400.0);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = State::default();
+        let mut tick = 0;
+        let mut frame = |state: &mut State, left: f32, events: Vec<egui::Event>| {
+            tick += 1;
+            // The lines fill the panel from `left`: dragging its edge left
+            // widens them under the press that started on the edge.
+            let area = Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(800.0, 300.0));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    lines(ui, state, area, &data, 35.0, 18.0, false, true);
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let edge = egui::pos2(395.0, 150.0);
+        frame(&mut state, 400.0, vec![egui::Event::PointerMoved(edge)]);
+        frame(&mut state, 400.0, vec![button(edge, true)]);
+        for left in [380.0, 340.0, 300.0, 260.0] {
+            let point = egui::pos2(left - 5.0, 150.0);
+            frame(&mut state, left, vec![egui::Event::PointerMoved(point)]);
+            assert!(state.follow, "the lines grew under the pointer");
+        }
+        frame(
+            &mut state,
+            260.0,
+            vec![button(egui::pos2(255.0, 150.0), false)],
+        );
+        assert!(state.follow);
     }
 
     #[test]
