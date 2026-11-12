@@ -971,7 +971,14 @@ pub fn compact_button(
             // Play/Pause stands out on its circle: white or black by theme,
             // turned over where the accent's fill would swallow it.
             if primary {
-                crate::palette::current().play_icon_on(fill)
+                // Softened at rest, pure under the pointer: the hover shows
+                // as the icon brightening (or darkening) on its circle.
+                let pure = crate::palette::current().play_icon_on(fill);
+                if response.hovered() || response.is_pointer_button_down_on() {
+                    pure
+                } else {
+                    egui::lerp(egui::Rgba::from(pure)..=egui::Rgba::from(fill), 0.12).into()
+                }
             } else {
                 visuals.fg_stroke.color
             },
