@@ -39,7 +39,7 @@ mod owner_page;
 mod playlist_follow;
 #[path = "web_audio/playlist_manage.rs"]
 mod playlist_manage;
-pub use artist_follow::FollowedArtist;
+pub use artist_follow::{ArtistPicks, FollowedArtist};
 pub use home_catalog::MixTile;
 pub use home_catalog::{ArtistMix, CatalogMix, FriendPlaylist, HomeCatalog};
 pub use owner_page::{OwnerClosed, OwnerPage};
@@ -3922,6 +3922,7 @@ fn detail_method_is_readonly(method: &str) -> bool {
             | "audio.getById"
             | "audio.getFollowedArtists"
             | "audio.getLyrics"
+            | "audio.getOnboardingArtists"
             | "audio.getPlaylistById"
             | "audio.getPlaylists"
             | "audio.getSearchSuggestions"

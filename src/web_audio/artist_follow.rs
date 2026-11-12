@@ -233,6 +233,116 @@ impl WebAudioClient {
     }
 }
 
+/// One page of VK's "Кого вы слушаете?" artists for tuning recommendations.
+pub struct ArtistPicks {
+    pub artists: Vec<FollowedArtist>,
+    /// VK's opaque cursor for the next page; none after the last one.
+    pub next_from: Option<String>,
+}
+
+fn next_cursor(value: &Value) -> Result<Option<String>, WebAudioError> {
+    match value.get("next_from") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(cursor)) if cursor.is_empty() => Ok(None),
+        Some(Value::String(cursor))
+            if cursor.len() <= 512 && !cursor.chars().any(char::is_control) =>
+        {
+            Ok(Some(cursor.clone()))
+        }
+        Some(_) => Err(WebAudioError::Format),
+    }
+}
+
+impl WebAudioClient {
+    /// The artists VK's recommendation settings offer to pick from, a page
+    /// at a time (`audio.getOnboardingArtists`, as on vk.ru/music/profile).
+    pub fn artist_picks(
+        &self,
+        owner: i64,
+        start_from: Option<&str>,
+        canceled: &AtomicBool,
+    ) -> Result<ArtistPicks, WebAudioError> {
+        self.artist_picks_request(owner, start_from, canceled, |generation, method, params| {
+            self.detail_request(owner, generation, method, params, canceled)
+        })
+    }
+
+    fn artist_picks_request(
+        &self,
+        owner: i64,
+        start_from: Option<&str>,
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<ArtistPicks, WebAudioError> {
+        let generation = self.home_owner(owner, canceled)?;
+        let params = start_from
+            .map(|cursor| vec![("start_from", cursor.to_owned())])
+            .unwrap_or_default();
+        let value = request(generation, "audio.getOnboardingArtists", params)?;
+        self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
+        let (artists, _, _) = parse(&value)?;
+        Ok(ArtistPicks {
+            artists,
+            next_from: next_cursor(&value)?,
+        })
+    }
+
+    /// Artists matching `query` to pick for recommendations.
+    pub fn search_artist_picks(
+        &self,
+        owner: i64,
+        query: &str,
+        canceled: &AtomicBool,
+    ) -> Result<Vec<FollowedArtist>, WebAudioError> {
+        self.search_artist_picks_request(owner, query, canceled, |generation, method, params| {
+            self.detail_request(owner, generation, method, params, canceled)
+        })
+    }
+
+    fn search_artist_picks_request(
+        &self,
+        owner: i64,
+        query: &str,
+        canceled: &AtomicBool,
+        request: impl FnOnce(
+            u64,
+            &'static str,
+            Vec<(&'static str, String)>,
+        ) -> Result<Value, WebAudioError>,
+    ) -> Result<Vec<FollowedArtist>, WebAudioError> {
+        let query = search_query(query)?;
+        let generation = self.home_owner(owner, canceled)?;
+        let value = request(
+            generation,
+            "audio.searchArtists",
+            vec![("q", query.to_owned()), ("count", "50".into())],
+        )?;
+        self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;
+        Ok(parse(&value)?.0)
+    }
+
+    /// Follow `follow` and unfollow `unfollow`, one artist at a time, in
+    /// order; stops at the first failure (earlier changes stay applied).
+    pub fn update_followed_artists(
+        &self,
+        owner: i64,
+        follow: &[ArtistRef],
+        unfollow: &[ArtistRef],
+        canceled: &AtomicBool,
+    ) -> Result<(), WebAudioError> {
+        for (artists, state) in [(follow, true), (unfollow, false)] {
+            for artist in artists {
+                self.set_artist_follow(owner, artist, state, canceled)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl WebAudioClient {
     /// VK's "Не нравится" for one track, the signal its recommendations and
     /// mixes learn from. VK's web player sends `audio_ids=<owner>_<id>`.
@@ -392,6 +502,52 @@ mod tests {
             client.set_dislike_request(42, (0, 91), true, &canceled, |_, _, _| unreachable!()),
             Err(WebAudioError::Format)
         ));
+    }
+
+    #[test]
+    fn artist_picks_page_through_vks_cursor_and_search_by_name() {
+        let client = client();
+        let canceled = AtomicBool::new(false);
+        let first = client
+            .artist_picks_request(42, None, &canceled, |_, method, params| {
+                assert_eq!(method, "audio.getOnboardingArtists");
+                assert!(params.is_empty());
+                Ok(json!({"items":[
+                    {"id":"artist-1","name":"One","photo":[{"url":"https://sun.example.test/1.jpg","width":300,"height":300}]},
+                    {"id":"artist-2","name":"Two"}
+                ],"next_from":"page-2"}))
+            })
+            .unwrap();
+        assert_eq!(first.artists.len(), 2);
+        assert_eq!(first.artists[0].artist.name, "One");
+        assert!(first.artists[0].image_url.is_some());
+        assert_eq!(first.next_from.as_deref(), Some("page-2"));
+        let last = client
+            .artist_picks_request(42, Some("page-2"), &canceled, |_, _, params| {
+                assert_eq!(params, vec![("start_from", "page-2".to_owned())]);
+                Ok(json!({"items":[{"id":"artist-3","name":"Three"}],"next_from":""}))
+            })
+            .unwrap();
+        assert_eq!(last.next_from, None);
+        assert!(matches!(
+            client.artist_picks_request(42, None, &canceled, |_, _, _| {
+                Ok(json!({"items":[],"next_from":7}))
+            }),
+            Err(WebAudioError::Format)
+        ));
+        let found = client
+            .search_artist_picks_request(42, "  One ", &canceled, |_, method, params| {
+                assert_eq!(method, "audio.searchArtists");
+                assert!(params.contains(&("q", "One".into())));
+                Ok(json!({"count":1,"items":[{"id":"artist-1","name":"One"}]}))
+            })
+            .unwrap();
+        assert_eq!(found[0].artist.id, "artist-1");
+        assert!(
+            client
+                .search_artist_picks_request(42, "  ", &canceled, |_, _, _| unreachable!())
+                .is_err()
+        );
     }
 
     #[test]

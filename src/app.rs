@@ -47,6 +47,8 @@ mod playlist_actions;
 mod playlist_removal;
 #[path = "queue_app.rs"]
 mod queue_app;
+#[path = "recommendations_app.rs"]
+mod recommendations_app;
 #[path = "row_drag.rs"]
 mod row_drag;
 #[path = "screen_cache_app.rs"]
@@ -1267,6 +1269,7 @@ pub struct MusicApp {
     /// The user's VK Mix settings, sent with every VK Mix batch.
     mix_tuning: Option<crate::web_audio::MixTuning>,
     mix_settings: MixSettingsDialog,
+    recommendations: recommendations_app::State,
     home_request: Option<HomeRequest>,
     home_requested: bool,
     home_error: Option<WebAudioError>,
@@ -1707,6 +1710,7 @@ impl MusicApp {
             catalog_mix: None,
             mix_tuning: None,
             mix_settings: MixSettingsDialog::default(),
+            recommendations: recommendations_app::State::default(),
             home_request: None,
             home_requested: false,
             home_error: None,
@@ -1991,6 +1995,9 @@ impl MusicApp {
         if has("--fullscreen") {
             self.set_lyrics_fullscreen(ctx, true);
         }
+        if has("--recommendations") {
+            self.recommendations.demo();
+        }
         if has("--accent-picker") {
             egui::Popup::open_id(ctx, egui::Id::new(crate::appearance_ui::PICKER));
         }
@@ -2105,6 +2112,7 @@ impl MusicApp {
         self.dislike_request = None;
         self.disliked.clear();
         self.mix_settings.close();
+        self.recommendations.close();
         self.pending = None; // Discard any late response from the previous session.
         self.session = None;
         self.avatar_refresh_ready = false;
@@ -2762,6 +2770,7 @@ impl MusicApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if self.qr_open
             || self.mix_settings.open
+            || self.recommendations.open
             || self.playlist_create_form.is_some()
             || self.playlist_controls.has_modal()
             || egui::Popup::is_any_open(ctx)
@@ -8126,6 +8135,9 @@ impl MusicApp {
             }
             Some(home_ui::Action::PlayMix) => self.play_mix(&ctx),
             Some(home_ui::Action::ConfigureMix) => self.open_mix_settings(&ctx),
+            Some(home_ui::Action::ConfigureRecommendations) => {
+                self.open_recommendation_settings(&ctx);
+            }
             Some(home_ui::Action::PlayRecent) => {
                 self.leave_mix();
                 if !self.recent.is_empty() {
@@ -11658,6 +11670,7 @@ impl MusicApp {
         crate::track_drag::end_frame(ui.ctx(), &mut self.covers);
         let _ = self.qr_window(ui.ctx());
         self.mix_settings_window(ui.ctx());
+        self.recommendation_settings_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
         self.audio_upload_window(ui.ctx());
@@ -11991,6 +12004,7 @@ impl MusicApp {
         }
         self.poll_qr(ctx);
         self.poll_mix_settings();
+        self.poll_recommendation_settings(ctx);
         self.poll_cache(ctx);
         self.publish_system_media();
         self.publish_discord_rpc();
@@ -12542,6 +12556,7 @@ mod tests {
             catalog_mix: None,
             mix_tuning: None,
             mix_settings: MixSettingsDialog::default(),
+            recommendations: recommendations_app::State::default(),
             home_request: None,
             home_requested: false,
             home_error: None,

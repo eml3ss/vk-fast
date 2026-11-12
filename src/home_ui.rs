@@ -60,6 +60,8 @@ pub enum Action {
     SignIn,
     /// Open VK Mix settings: mood, familiarity and language.
     ConfigureMix,
+    /// Pick the artists "Made for you" is built from.
+    ConfigureRecommendations,
 }
 
 /// One vertical rhythm for Home: the gap above a section heading equals the
@@ -137,13 +139,16 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
         }
 
         ui.add_space(SECTION_GAP);
-        section_heading(
+        if section_heading(
             ui,
             Icon::Sparkles,
             view.language.text("Подборки для вас", "Made for you"),
-            None,
+            view.connected
+                .then(|| (Icon::Sliders, view.language.text("Настроить", "Configure"))),
             true,
-        );
+        ) {
+            action = Some(Action::ConfigureRecommendations);
+        }
         ui.add_space(SECTION_GAP);
         if view.collections.is_empty() {
             empty_collections(ui, &view);
@@ -718,6 +723,9 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     buttons.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     buttons.style_mut().visuals.widgets.hovered.bg_fill = theme::accent();
     buttons.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    // Configure sits on a dark veil over the covers: it keeps the light text
+    // that Play may give up for dark text on a bright accent.
+    let veil_style = buttons.style().clone();
     theme::on_primary_widgets(buttons.style_mut());
     let (icon, label, action) = if !view.connected {
         (
@@ -754,6 +762,7 @@ fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
     .then_some(action);
     if view.connected {
         buttons.add_space(8.0);
+        buttons.set_style(veil_style);
         let widgets = &mut buttons.style_mut().visuals.widgets;
         widgets.inactive.bg_fill = Color32::from_black_alpha(72);
         widgets.hovered.bg_fill = Color32::from_black_alpha(110);
@@ -1729,6 +1738,86 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    #[test]
+    fn made_for_you_has_a_configure_button_that_opens_recommendation_settings() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let collections = eight_collections();
+        let mut frame = |tick: u32, events: Vec<egui::Event>| {
+            let mut action = None;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(660.0, 1100.0),
+                    )),
+                    time: Some(f64::from(tick) / 60.0),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action = show(
+                        ui,
+                        &mut covers,
+                        HomeView {
+                            language: Language::Russian,
+                            library: &[],
+                            library_total: None,
+                            recent: &[],
+                            playing: None,
+                            connected: true,
+                            loading: false,
+                            mix_loading: false,
+                            mix_playing: false,
+                            collections: &collections,
+                            active_collection: None,
+                            pending_collection: None,
+                            catalog: &HomeCatalog::default(),
+                            active_mix: None,
+                            active_mix_playing: false,
+                            pending_mix: None,
+                            error: None,
+                        },
+                    );
+                },
+            );
+            let mut output = output;
+            output.textures_delta.clear();
+            (output, action)
+        };
+        let mut output = frame(1, Vec::new()).0;
+        for tick in 2..4 {
+            output = frame(tick, Vec::new()).0;
+        }
+        let heading = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Подборки для вас" => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("Made for you heading");
+        // The VK Mix card has its own Configure above; this one shares the
+        // heading's line on the right.
+        let configure = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Настроить" => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .find(|center| (center.y - heading.y).abs() < 6.0 && center.x > heading.x)
+            .expect("Configure next to Made for you");
+        frame(4, pointer(configure, true));
+        let (_, action) = frame(5, pointer(configure, false));
+        assert_eq!(action, Some(Action::ConfigureRecommendations));
     }
 
     fn eight_collections() -> Vec<Collection> {

@@ -53,6 +53,7 @@ mod preferences;
 mod qr_auth;
 mod qr_login_ui;
 mod recent_cache;
+mod recommendations_ui;
 mod release_info;
 mod repaint_target;
 mod screen_cache;
