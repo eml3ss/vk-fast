@@ -39,6 +39,8 @@ fn pending_id() -> egui::Id {
 pub enum KeyScroll {
     /// About a screen down (1) or up (-1).
     Page(f32),
+    /// A held Page key: this many points this frame, down when positive.
+    Glide(f32),
     Top,
 }
 

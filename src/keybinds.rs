@@ -54,7 +54,11 @@ fn binding(key: Key, modifiers: Modifiers) -> Option<Binding> {
     };
     Some(Binding {
         command,
-        repeat: !matches!(key, Key::Space | Key::F5 | Key::Home),
+        // A held Page key glides on instead of repeating page jumps.
+        repeat: !matches!(
+            key,
+            Key::Space | Key::F5 | Key::Home | Key::PageDown | Key::PageUp
+        ),
     })
 }
 
@@ -197,8 +201,8 @@ mod tests {
             [Command::Page(1.0), Command::Page(-1.0), Command::Top]
         );
         assert!(remaining.is_empty());
-        // Holding Page Down keeps paging; Home does not repeat.
-        let (commands, _) = frame(
+        // Held keys do not repeat: a held Page key glides on instead.
+        let (commands, remaining) = frame(
             &context,
             vec![
                 key(Key::PageDown, Modifiers::NONE, true, true),
@@ -207,7 +211,7 @@ mod tests {
             true,
             |_| {},
         );
-        assert_eq!(commands, [Command::Page(1.0)]);
+        assert!(commands.is_empty() && remaining.is_empty());
         // A focused text field keeps Home for its cursor.
         let mut text = String::from("search");
         let context = egui::Context::default();

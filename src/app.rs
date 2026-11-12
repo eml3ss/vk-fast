@@ -1416,6 +1416,8 @@ pub struct MusicApp {
     autoscroll: crate::autoscroll::Autoscroll,
     /// The page area of the last frame, where a middle click autoscrolls.
     page_rect: egui::Rect,
+    /// A Page key held down: its direction and when it was pressed.
+    page_key: Option<(f32, f64)>,
     mix_after_queue: bool,
     mix_after_queue_save_failed: bool,
     /// Tracks crossfade over `crossfade_seconds` when one ends by itself.
@@ -1838,6 +1840,7 @@ impl MusicApp {
             seek_pixels: 0.0,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
+            page_key: None,
             mix_after_queue: preferences::load_mix_after_queue(),
             mix_after_queue_save_failed: false,
             crossfade,
@@ -2797,13 +2800,40 @@ impl MusicApp {
                     self.reload_page(ctx)
                 }
                 keybinds::Command::Page(direction) => {
-                    self.key_scroll(ctx, crate::autoscroll::KeyScroll::Page(direction))
+                    self.page_key = Some((direction, ctx.input(|input| input.time)));
+                    self.key_scroll(ctx, crate::autoscroll::KeyScroll::Page(direction));
                 }
                 keybinds::Command::Top => self.key_scroll(ctx, crate::autoscroll::KeyScroll::Top),
                 _ => {}
             }
             ctx.request_repaint();
         }
+        self.glide_page_key(ctx);
+    }
+
+    /// After a Page key's jump, holding it scrolls on smoothly at an even
+    /// speed until it is released, instead of jumping page by page.
+    fn glide_page_key(&mut self, ctx: &egui::Context) {
+        const DELAY: f64 = 0.35;
+        const SPEED: f32 = 1600.0;
+        let Some((direction, since)) = self.page_key else {
+            return;
+        };
+        let key = if direction > 0.0 {
+            egui::Key::PageDown
+        } else {
+            egui::Key::PageUp
+        };
+        let (held, now, dt) = ctx.input(|input| (input.key_down(key), input.time, input.stable_dt));
+        if !held || ctx.egui_wants_keyboard_input() {
+            self.page_key = None;
+            return;
+        }
+        if now - since >= DELAY {
+            let points = direction * SPEED * dt.min(0.05);
+            self.key_scroll(ctx, crate::autoscroll::KeyScroll::Glide(points));
+        }
+        ctx.request_repaint();
     }
 
     /// Page Up/Down and Home scroll the list under the pointer, or the page
@@ -8094,6 +8124,7 @@ impl MusicApp {
                 library_total: self.library.total,
                 recent: &self.recent,
                 playing: self.playing.as_ref(),
+                queue_origin: self.queue_origin.as_deref(),
                 connected: self.session.is_some() || self.demo,
                 mix_loading: self
                     .mix_request
@@ -12711,6 +12742,7 @@ mod tests {
             seek_pixels: 0.0,
             autoscroll: Default::default(),
             page_rect: egui::Rect::NOTHING,
+            page_key: None,
             mix_after_queue: false,
             mix_after_queue_save_failed: false,
             crossfade: false,

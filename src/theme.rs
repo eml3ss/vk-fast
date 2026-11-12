@@ -605,6 +605,12 @@ fn after_contents(ui: &mut egui::Ui) {
         Some(crate::autoscroll::KeyScroll::Page(direction)) => {
             ui.scroll_with_delta(egui::vec2(0.0, -direction * ui.clip_rect().height() * 0.85));
         }
+        Some(crate::autoscroll::KeyScroll::Glide(points)) => {
+            ui.scroll_with_delta_animation(
+                egui::vec2(0.0, -points),
+                egui::style::ScrollAnimation::none(),
+            );
+        }
         Some(crate::autoscroll::KeyScroll::Top) => {
             ui.scroll_to_rect(
                 egui::Rect::from_min_size(ui.min_rect().min, egui::vec2(1.0, 1.0)),

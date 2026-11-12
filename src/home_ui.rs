@@ -29,6 +29,8 @@ pub struct HomeView<'a> {
     pub library_total: Option<usize>,
     pub recent: &'a [Track],
     pub playing: Option<&'a Track>,
+    /// Where the playing queue came from: "recent", "friend-playlist:…".
+    pub queue_origin: Option<&'a str>,
     pub connected: bool,
     pub loading: bool,
     pub mix_loading: bool,
@@ -129,7 +131,7 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                     ui.spacing_mut().item_spacing.x = 16.0;
                     for (column, track) in tracks.iter().enumerate() {
                         ui.push_id(("home-recent", row, column, track.key()), |ui| {
-                            let state = track_state(&view, track.key());
+                            let state = track_state(&view, track.key(), "recent");
                             if recent_card(ui, covers, track, width, state).clicked() {
                                 action = Some(Action::PlayTrack(track.key()));
                             }
@@ -215,11 +217,12 @@ fn mix_state(view: &HomeView<'_>, mix: &CatalogMix) -> PlayState {
     )
 }
 
-/// A single track on Home: the one playing now, audible or paused.
-fn track_state(view: &HomeView<'_>, key: (i64, i64)) -> PlayState {
+/// A single track on Home: the one playing now, audible or paused, when
+/// it was started from this very section (`origin` of the queue).
+fn track_state(view: &HomeView<'_>, key: (i64, i64), origin: &str) -> PlayState {
     PlayState::new(
         false,
-        view.playing.is_some_and(|track| track.key() == key),
+        view.queue_origin == Some(origin) && view.playing.is_some_and(|track| track.key() == key),
         view.active_mix_playing,
     )
 }
@@ -526,7 +529,14 @@ fn friend_card(
         }
         let art = egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0));
         image(ui, covers, art, track.cover_url.as_deref(), index + 1);
-        let state = track_state(view, track.key());
+        let state = track_state(
+            view,
+            track.key(),
+            &format!(
+                "friend-playlist:{}_{}",
+                friend.playlist.owner_id, friend.playlist.id
+            ),
+        );
         track_cover_state(ui.painter(), art, state, hit.hovered());
         let top = centred_text_top(ui, art.height(), &egui::FontId::proportional(14.0), 1.0);
         let mut line = ui.new_child(
@@ -1291,6 +1301,7 @@ mod tests {
                         library_total: None,
                         recent: &[],
                         playing: None,
+                        queue_origin: None,
                         connected: state.connected,
                         loading: true,
                         mix_loading: state.loading,
@@ -1425,6 +1436,7 @@ mod tests {
                         library_total: None,
                         recent: &[],
                         playing: None,
+                        queue_origin: None,
                         connected: true,
                         loading: true,
                         mix_loading: false,
@@ -1473,6 +1485,7 @@ mod tests {
                         library_total: None,
                         recent: &[],
                         playing: None,
+                        queue_origin: None,
                         connected: true,
                         loading: false,
                         mix_loading: false,
@@ -1553,6 +1566,7 @@ mod tests {
                                 library_total: None,
                                 recent: &[],
                                 playing: None,
+                                queue_origin: None,
                                 connected: true,
                                 loading: false,
                                 mix_loading: false,
@@ -1795,6 +1809,7 @@ mod tests {
                         library_total: None,
                         recent: &[],
                         playing: None,
+                        queue_origin: None,
                         connected: true,
                         loading: false,
                         mix_loading: false,
@@ -1816,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn the_track_playing_now_shows_as_playing_or_paused_on_home() {
+    fn a_track_shows_as_playing_on_home_only_in_the_section_it_was_started_from() {
         let tracks = crate::model::demo_tracks();
         let catalog = HomeCatalog::default();
         let view = |audible: bool| HomeView {
@@ -1825,6 +1840,7 @@ mod tests {
             library_total: None,
             recent: &tracks,
             playing: Some(&tracks[1]),
+            queue_origin: Some("recent"),
             connected: true,
             loading: false,
             mix_loading: false,
@@ -1839,15 +1855,21 @@ mod tests {
             error: None,
         };
         assert_eq!(
-            track_state(&view(true), tracks[1].key()),
+            track_state(&view(true), tracks[1].key(), "recent"),
             cover_play::PlayState::Playing
         );
         assert_eq!(
-            track_state(&view(false), tracks[1].key()),
+            track_state(&view(false), tracks[1].key(), "recent"),
             cover_play::PlayState::Paused
         );
         assert_eq!(
-            track_state(&view(true), tracks[0].key()),
+            track_state(&view(true), tracks[0].key(), "recent"),
+            cover_play::PlayState::Idle
+        );
+        // The same track playing from elsewhere (My music, a friend's
+        // playlist) does not light up Recently played.
+        assert_eq!(
+            track_state(&view(true), tracks[1].key(), "friend-playlist:1_2"),
             cover_play::PlayState::Idle
         );
     }
@@ -1880,6 +1902,7 @@ mod tests {
                             library_total: None,
                             recent: &[],
                             playing: None,
+                            queue_origin: None,
                             connected: true,
                             loading: false,
                             mix_loading: false,
@@ -2087,6 +2110,7 @@ mod tests {
                             library_total: None,
                             recent: &recent,
                             playing: Some(&track),
+                            queue_origin: None,
                             connected: true,
                             loading: false,
                             mix_loading: false,
@@ -2182,6 +2206,7 @@ mod tests {
                             library_total: None,
                             recent: tracks,
                             playing: None,
+                            queue_origin: None,
                             connected: true,
                             loading: false,
                             mix_loading: false,
@@ -2341,6 +2366,7 @@ mod tests {
                                     library_total: total,
                                     recent: &[],
                                     playing: None,
+                                    queue_origin: None,
                                     connected: true,
                                     loading: false,
                                     mix_loading: false,
