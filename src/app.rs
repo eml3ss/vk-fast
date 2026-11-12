@@ -8163,6 +8163,15 @@ impl MusicApp {
             Some(home_ui::Action::OpenPlaylist(reference)) => {
                 self.navigate_music(&ctx, MusicPage::Playlist(reference));
             }
+            Some(home_ui::Action::PlayFriendTrack(_, key))
+                if self
+                    .playing
+                    .as_ref()
+                    .is_some_and(|track| track.key() == key) =>
+            {
+                // Like Recently played: the playing track pauses and resumes.
+                self.toggle_playback(&ctx);
+            }
             Some(home_ui::Action::PlayFriendTrack(playlist, key)) => {
                 let tracks = self
                     .home_catalog

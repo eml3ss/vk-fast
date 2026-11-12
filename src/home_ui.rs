@@ -129,7 +129,8 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                     ui.spacing_mut().item_spacing.x = 16.0;
                     for (column, track) in tracks.iter().enumerate() {
                         ui.push_id(("home-recent", row, column, track.key()), |ui| {
-                            if recent_card(ui, covers, track, width).clicked() {
+                            let state = track_state(&view, track.key());
+                            if recent_card(ui, covers, track, width, state).clicked() {
                                 action = Some(Action::PlayTrack(track.key()));
                             }
                         });
@@ -214,6 +215,15 @@ fn mix_state(view: &HomeView<'_>, mix: &CatalogMix) -> PlayState {
     )
 }
 
+/// A single track on Home: the one playing now, audible or paused.
+fn track_state(view: &HomeView<'_>, key: (i64, i64)) -> PlayState {
+    PlayState::new(
+        false,
+        view.playing.is_some_and(|track| track.key() == key),
+        view.active_mix_playing,
+    )
+}
+
 fn collection_state(view: &HomeView<'_>, id: &str) -> PlayState {
     PlayState::new(
         view.pending_collection == Some(id),
@@ -292,7 +302,7 @@ fn catalog_sections(
                 let friend = &friends[index];
                 let key = (friend.playlist.owner_id, friend.playlist.id);
                 ui.push_id(("home-friend", key), |ui| {
-                    if let Some(intent) = friend_card(ui, covers, friend, width, language) {
+                    if let Some(intent) = friend_card(ui, covers, friend, width, view) {
                         action = Some(intent);
                     }
                 });
@@ -434,8 +444,9 @@ fn friend_card(
     covers: &mut CoverCache,
     friend: &FriendPlaylist,
     width: f32,
-    language: Language,
+    view: &HomeView<'_>,
 ) -> Option<Action> {
+    let language = view.language;
     let rows = friend.tracks.len().min(3);
     let height = friend_card_height(friend);
     let (rect, response) = card(ui, egui::vec2(width, height), &friend.playlist.title);
@@ -515,9 +526,8 @@ fn friend_card(
         }
         let art = egui::Rect::from_min_size(row.min + egui::vec2(6.0, 6.0), egui::vec2(32.0, 32.0));
         image(ui, covers, art, track.cover_url.as_deref(), index + 1);
-        if hit.hovered() {
-            hover_play(ui.painter(), art);
-        }
+        let state = track_state(view, track.key());
+        track_cover_state(ui.painter(), art, state, hit.hovered());
         let top = centred_text_top(ui, art.height(), &egui::FontId::proportional(14.0), 1.0);
         let mut line = ui.new_child(
             egui::UiBuilder::new()
@@ -533,7 +543,11 @@ fn friend_card(
         line.add(
             egui::Label::new(theme::track_title(
                 track,
-                line.visuals().text_color(),
+                if state == PlayState::Idle {
+                    line.visuals().text_color()
+                } else {
+                    theme::accent()
+                },
                 egui::FontId::proportional(14.0),
             ))
             .truncate()
@@ -1010,22 +1024,49 @@ fn shortcuts(ui: &mut egui::Ui, covers: &mut CoverCache, view: &HomeView<'_>) ->
 /// A hovered track's cover, as in a queue row: dimmed under a play sign
 /// half its size.
 fn hover_play(painter: &egui::Painter, art: egui::Rect) {
+    cover_icon(painter, art, Icon::Play);
+}
+
+fn cover_icon(painter: &egui::Painter, art: egui::Rect, icon: Icon) {
     painter.rect_filled(art, 6.0, Color32::from_black_alpha(165));
     icons::paint(
         painter,
         art.shrink(art.width() * 0.25),
-        Icon::Play,
+        icon,
         Color32::WHITE,
     );
 }
 
-fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width: f32) -> Response {
+/// The cover of a track on Home: Pause over the one playing, Play over the
+/// paused one and over any other under the pointer.
+fn track_cover_state(painter: &egui::Painter, art: egui::Rect, state: PlayState, hovered: bool) {
+    match state {
+        PlayState::Playing => cover_icon(painter, art, Icon::Pause),
+        PlayState::Paused | PlayState::Pending => cover_icon(painter, art, Icon::Play),
+        PlayState::Idle if hovered => hover_play(painter, art),
+        PlayState::Idle => {}
+    }
+}
+
+fn recent_card(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    track: &Track,
+    width: f32,
+    state: PlayState,
+) -> Response {
     let (rect, response) = card(ui, egui::vec2(width, 72.0), &track.title);
+    if state != PlayState::Idle {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, theme::accent()),
+            egui::StrokeKind::Inside,
+        );
+    }
     let art = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), egui::vec2(48.0, 48.0));
     image(ui, covers, art, track.cover_url.as_deref(), 0);
-    if response.hovered() {
-        hover_play(ui.painter(), art);
-    }
+    track_cover_state(ui.painter(), art, state, response.hovered());
     let badge = theme::explicit_badge(
         ui.ctx(),
         Some(track),
@@ -1039,7 +1080,15 @@ fn recent_card(ui: &mut egui::Ui, covers: &mut CoverCache, track: &Track, width:
             egui::pos2(rect.left() + 72.0, art.top() + top),
             rect.max - egui::vec2(12.0, 0.0),
         ),
-        theme::track_title(track, ui.visuals().text_color(), title_font),
+        theme::track_title(
+            track,
+            if state == PlayState::Idle {
+                ui.visuals().text_color()
+            } else {
+                theme::accent()
+            },
+            title_font,
+        ),
         &track.artist,
         badge,
     );
@@ -1497,9 +1546,35 @@ mod tests {
                     },
                     |ui| {
                         if friend_row {
-                            friend_card(ui, &mut covers, &friend, 300.0, Language::English);
+                            let catalog = HomeCatalog::default();
+                            let view = HomeView {
+                                language: Language::English,
+                                library: &[],
+                                library_total: None,
+                                recent: &[],
+                                playing: None,
+                                connected: true,
+                                loading: false,
+                                mix_loading: false,
+                                mix_playing: false,
+                                collections: &[],
+                                active_collection: None,
+                                pending_collection: None,
+                                catalog: &catalog,
+                                active_mix: None,
+                                active_mix_playing: false,
+                                pending_mix: None,
+                                error: None,
+                            };
+                            friend_card(ui, &mut covers, &friend, 300.0, &view);
                         } else {
-                            recent_card(ui, &mut covers, &track, 300.0);
+                            recent_card(
+                                ui,
+                                &mut covers,
+                                &track,
+                                300.0,
+                                cover_play::PlayState::Idle,
+                            );
                         }
                     },
                 );
@@ -1738,6 +1813,43 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    #[test]
+    fn the_track_playing_now_shows_as_playing_or_paused_on_home() {
+        let tracks = crate::model::demo_tracks();
+        let catalog = HomeCatalog::default();
+        let view = |audible: bool| HomeView {
+            language: Language::Russian,
+            library: &[],
+            library_total: None,
+            recent: &tracks,
+            playing: Some(&tracks[1]),
+            connected: true,
+            loading: false,
+            mix_loading: false,
+            mix_playing: false,
+            collections: &[],
+            active_collection: None,
+            pending_collection: None,
+            catalog: &catalog,
+            active_mix: None,
+            active_mix_playing: audible,
+            pending_mix: None,
+            error: None,
+        };
+        assert_eq!(
+            track_state(&view(true), tracks[1].key()),
+            cover_play::PlayState::Playing
+        );
+        assert_eq!(
+            track_state(&view(false), tracks[1].key()),
+            cover_play::PlayState::Paused
+        );
+        assert_eq!(
+            track_state(&view(true), tracks[0].key()),
+            cover_play::PlayState::Idle
+        );
     }
 
     #[test]
