@@ -33,6 +33,65 @@ fn pending_id() -> egui::Id {
     egui::Id::new("middle-autoscroll-pending")
 }
 
+/// Page Up/Down or Home, asked for at the end of a frame and carried out in
+/// the next one by the innermost vertical list that shows `anchor`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KeyScroll {
+    /// About a screen down (1) or up (-1).
+    Page(f32),
+    Top,
+}
+
+#[derive(Clone, Copy)]
+struct KeyRequest {
+    anchor: Pos2,
+    scroll: KeyScroll,
+    frame: u64,
+}
+
+fn key_request_id() -> egui::Id {
+    egui::Id::new("keyboard-page-scroll")
+}
+
+/// Ask the list at `anchor` to scroll by a page or to its top next frame.
+pub fn request_key_scroll(ctx: &Context, anchor: Pos2, scroll: KeyScroll) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            key_request_id(),
+            KeyRequest {
+                anchor,
+                scroll,
+                frame,
+            },
+        );
+    });
+    ctx.request_repaint();
+}
+
+/// The keyboard scroll for this list, if it is the innermost one that shows
+/// the anchor and can scroll vertically: call it after the list's contents.
+/// A request no list took in the frame after it is dropped.
+pub fn take_key_scroll_for(ui: &egui::Ui) -> Option<KeyScroll> {
+    let request = ui
+        .ctx()
+        .data(|data| data.get_temp::<KeyRequest>(key_request_id()))?;
+    if request.frame + 1 < ui.ctx().cumulative_frame_nr() {
+        ui.ctx()
+            .data_mut(|data| data.remove::<KeyRequest>(key_request_id()));
+        return None;
+    }
+    // A sideways carousel shows the anchor too, but has nothing to scroll
+    // up or down.
+    let vertical = ui.min_rect().height() > ui.clip_rect().height() + 1.0;
+    if !vertical || !ui.clip_rect().contains(request.anchor) {
+        return None;
+    }
+    ui.ctx()
+        .data_mut(|data| data.remove::<KeyRequest>(key_request_id()));
+    Some(request.scroll)
+}
+
 /// This frame's autoscroll, for the innermost list that shows the anchor:
 /// call it after the list's contents. Other lists get nothing.
 pub fn take_for(ui: &egui::Ui) -> Option<f32> {

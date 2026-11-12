@@ -600,6 +600,19 @@ fn after_contents(ui: &mut egui::Ui) {
             egui::style::ScrollAnimation::none(),
         );
     }
+    match crate::autoscroll::take_key_scroll_for(ui) {
+        // Most of a screen, leaving a little of the previous one in view.
+        Some(crate::autoscroll::KeyScroll::Page(direction)) => {
+            ui.scroll_with_delta(egui::vec2(0.0, -direction * ui.clip_rect().height() * 0.85));
+        }
+        Some(crate::autoscroll::KeyScroll::Top) => {
+            ui.scroll_to_rect(
+                egui::Rect::from_min_size(ui.min_rect().min, egui::vec2(1.0, 1.0)),
+                Some(egui::Align::Min),
+            );
+        }
+        None => {}
+    }
 }
 
 pub fn scroll_area<R>(
@@ -764,6 +777,76 @@ pub fn visuals(palette: &crate::palette::Palette) -> egui::Visuals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_keys_scroll_the_list_under_the_pointer_and_home_returns_to_the_top() {
+        use crate::autoscroll::{KeyScroll, request_key_scroll};
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut tick = 0;
+        let mut frame = |ask: Option<KeyScroll>| {
+            tick += 1;
+            let mut offset = 0.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    // Long frames let egui's scroll animation finish.
+                    time: Some(f64::from(tick)),
+                    events: vec![egui::Event::PointerMoved(egui::pos2(100.0, 100.0))],
+                    ..Default::default()
+                },
+                |ui| {
+                    // A sideways strip above the list never takes the scroll.
+                    let output =
+                        scroll_area(ui, egui::ScrollArea::vertical().id_salt("page"), |ui| {
+                            scroll_area(
+                                ui,
+                                egui::ScrollArea::horizontal().id_salt("strip"),
+                                |ui| {
+                                    ui.allocate_exact_size(
+                                        egui::vec2(900.0, 140.0),
+                                        egui::Sense::hover(),
+                                    );
+                                },
+                            );
+                            ui.allocate_exact_size(egui::vec2(380.0, 3000.0), egui::Sense::hover());
+                        });
+                    offset = output.state.offset.y;
+                    if let Some(scroll) = ask {
+                        request_key_scroll(ui.ctx(), egui::pos2(100.0, 100.0), scroll);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            offset
+        };
+        frame(None);
+        frame(Some(KeyScroll::Page(1.0)));
+        let mut offset = 0.0;
+        for _ in 0..5 {
+            offset = frame(None);
+        }
+        // About a screen, keeping a little of the previous one.
+        assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
+        frame(Some(KeyScroll::Page(1.0)));
+        for _ in 0..5 {
+            offset = frame(None);
+        }
+        assert!((offset - 600.0 * 0.85).abs() < 2.0, "{offset}");
+        frame(Some(KeyScroll::Page(-1.0)));
+        for _ in 0..5 {
+            offset = frame(None);
+        }
+        assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
+        frame(Some(KeyScroll::Top));
+        for _ in 0..5 {
+            offset = frame(None);
+        }
+        assert_eq!(offset, 0.0);
+    }
+
     use super::*;
 
     #[test]

@@ -2796,9 +2796,30 @@ impl MusicApp {
                 keybinds::Command::Reload if !self.demo && self.session.is_some() => {
                     self.reload_page(ctx)
                 }
+                keybinds::Command::Page(direction) => {
+                    self.key_scroll(ctx, crate::autoscroll::KeyScroll::Page(direction))
+                }
+                keybinds::Command::Top => self.key_scroll(ctx, crate::autoscroll::KeyScroll::Top),
                 _ => {}
             }
             ctx.request_repaint();
+        }
+    }
+
+    /// Page Up/Down and Home scroll the list under the pointer, or the page
+    /// when the pointer is elsewhere.
+    fn key_scroll(&self, ctx: &egui::Context, scroll: crate::autoscroll::KeyScroll) {
+        let window = ctx.content_rect();
+        let anchor = ctx
+            .input(|input| input.pointer.hover_pos())
+            .filter(|point| window.contains(*point))
+            .or_else(|| {
+                self.page_rect
+                    .is_positive()
+                    .then(|| self.page_rect.center())
+            });
+        if let Some(anchor) = anchor {
+            crate::autoscroll::request_key_scroll(ctx, anchor, scroll);
         }
     }
 

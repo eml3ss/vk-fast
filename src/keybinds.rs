@@ -11,6 +11,11 @@ pub enum Command {
     Next,
     /// Ctrl+R or F5: refresh the open page, like its Refresh button.
     Reload,
+    /// Page Down (1) or Page Up (-1): scroll the list under the pointer by
+    /// about a screen.
+    Page(f32),
+    /// Home: back to the top of the list under the pointer.
+    Top,
 }
 
 struct Binding {
@@ -42,11 +47,14 @@ fn binding(key: Key, modifiers: Modifiers) -> Option<Binding> {
         Key::ArrowDown => Command::Volume(-0.05),
         // F5 refreshes the open page, like Ctrl+R.
         Key::F5 => Command::Reload,
+        Key::PageDown => Command::Page(1.0),
+        Key::PageUp => Command::Page(-1.0),
+        Key::Home => Command::Top,
         _ => return None,
     };
     Some(Binding {
         command,
-        repeat: !matches!(key, Key::Space | Key::F5),
+        repeat: !matches!(key, Key::Space | Key::F5 | Key::Home),
     })
 }
 
@@ -174,6 +182,47 @@ mod tests {
             ]
         );
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn page_keys_scroll_and_home_goes_to_the_top_but_not_while_typing() {
+        let context = egui::Context::default();
+        let events = [Key::PageDown, Key::PageUp, Key::Home]
+            .into_iter()
+            .map(|key_name| key(key_name, Modifiers::NONE, true, false))
+            .collect();
+        let (commands, remaining) = frame(&context, events, true, |_| {});
+        assert_eq!(
+            commands,
+            [Command::Page(1.0), Command::Page(-1.0), Command::Top]
+        );
+        assert!(remaining.is_empty());
+        // Holding Page Down keeps paging; Home does not repeat.
+        let (commands, _) = frame(
+            &context,
+            vec![
+                key(Key::PageDown, Modifiers::NONE, true, true),
+                key(Key::Home, Modifiers::NONE, true, true),
+            ],
+            true,
+            |_| {},
+        );
+        assert_eq!(commands, [Command::Page(1.0)]);
+        // A focused text field keeps Home for its cursor.
+        let mut text = String::from("search");
+        let context = egui::Context::default();
+        let mut field = |ui: &mut egui::Ui| {
+            let response = ui.text_edit_singleline(&mut text);
+            response.request_focus();
+        };
+        frame(&context, Vec::new(), true, &mut field);
+        let (commands, _) = frame(
+            &context,
+            vec![key(Key::Home, Modifiers::NONE, true, false)],
+            true,
+            &mut field,
+        );
+        assert!(commands.is_empty());
     }
 
     #[test]
