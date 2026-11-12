@@ -978,7 +978,7 @@ pub fn compact_button(
                     pure
                 } else {
                     // White gives way a little more than black to show.
-                    let rest = if pure.r() > 127 { 0.22 } else { 0.12 };
+                    let rest = if pure.r() > 127 { 0.35 } else { 0.12 };
                     egui::lerp(egui::Rgba::from(pure)..=egui::Rgba::from(fill), rest).into()
                 }
             } else {
