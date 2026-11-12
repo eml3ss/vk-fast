@@ -362,17 +362,67 @@ impl Biquad {
         coefficients: [1.0, 0.0, 0.0, 0.0, 0.0],
     };
 
-    /// A peaking filter an octave wide (RBJ audio EQ cookbook). The
-    /// bandwidth form keeps it an octave wide after the bilinear transform:
-    /// set by Q, the top bands come out much narrower than their neighbours
-    /// (16 kHz about 2.7 times), so a flat top sagged between 8 and 16 kHz.
-    /// Below a few kilohertz both forms give the same filter.
+    /// A peaking filter an octave wide whose shape near the top end
+    /// follows the analog filter it stands for (Orfanidis, "Digital
+    /// Parametric Equalizer Design with Prescribed Nyquist-Frequency Gain",
+    /// 1997). The usual bilinear designs pin every filter to 0 dB at the
+    /// Nyquist frequency, 24 kHz: raised bands then fell off a cliff
+    /// towards 20 kHz while the bottom end sloped gently. Below a few
+    /// kilohertz it is the same filter as the RBJ cookbook's.
     fn band(band: usize, gain: f32) -> Self {
         if gain == 0.0 {
             return Self::IDENTITY;
         }
-        let a = 10.0_f64.powf(f64::from(gain) / 40.0);
         let w0 = std::f64::consts::TAU * f64::from(BANDS[band]) / f64::from(SAMPLE_RATE);
+        // Tiny gains, left over while neighbours are balanced, lose
+        // precision in the formulas below; there the two designs agree.
+        if gain.abs() < 0.05 {
+            return Self::cookbook(w0, gain);
+        }
+        let pi = std::f64::consts::PI;
+        // Gains as amplitudes: the reference (flat) level, the peak, and
+        // the level at the band's edges, half the peak in decibels, as in
+        // the cookbook's definition of bandwidth.
+        let g0 = 1.0_f64;
+        let g = 10.0_f64.powf(f64::from(gain) / 20.0);
+        let gb = g.sqrt();
+        let dw =
+            w0 * (2.0_f64.powf(BANDWIDTH_OCTAVES / 2.0) - 2.0_f64.powf(-BANDWIDTH_OCTAVES / 2.0));
+        let f = (g * g - gb * gb).abs();
+        let g00 = (g * g - g0 * g0).abs();
+        let f00 = (gb * gb - g0 * g0).abs();
+        // The analog filter's gain at the Nyquist frequency.
+        let num = g0 * g0 * (w0 * w0 - pi * pi).powi(2) + g * g * f00 * pi * pi * dw * dw / f;
+        let den = (w0 * w0 - pi * pi).powi(2) + f00 * pi * pi * dw * dw / f;
+        let g1 = (num / den).sqrt();
+        let g01 = (g * g - g0 * g1).abs();
+        let g11 = (g * g - g1 * g1).abs();
+        let f01 = (gb * gb - g0 * g1).abs();
+        let f11 = (gb * gb - g1 * g1).abs();
+        let w2 = (g11 / g00).sqrt() * (w0 / 2.0).tan().powi(2);
+        let dww = (1.0 + (f00 / f11).sqrt() * w2) * (dw / 2.0).tan();
+        let c = f11 * dww * dww - 2.0 * w2 * (f01 - (f00 * f11).sqrt());
+        let d = 2.0 * w2 * (g01 - (g00 * g11).sqrt());
+        let a = ((c + d) / f).sqrt();
+        let b = ((g * g * c + gb * gb * d) / f).sqrt();
+        let n = 1.0 + w2 + a;
+        let coefficients = [
+            (g1 + g0 * w2 + b) / n,
+            -2.0 * (g1 - g0 * w2) / n,
+            (g1 - b + g0 * w2) / n,
+            -2.0 * (1.0 - w2) / n,
+            (1.0 + w2 - a) / n,
+        ];
+        if coefficients.iter().all(|value| value.is_finite()) {
+            Self { coefficients }
+        } else {
+            Self::cookbook(w0, gain)
+        }
+    }
+
+    /// The RBJ cookbook's peaking filter, its bandwidth in octaves.
+    fn cookbook(w0: f64, gain: f32) -> Self {
+        let a = 10.0_f64.powf(f64::from(gain) / 40.0);
         let (cos, sin) = (w0.cos(), w0.sin());
         let alpha = sin * (std::f64::consts::LN_2 / 2.0 * BANDWIDTH_OCTAVES * w0 / sin).sinh();
         let [b0, b1, b2, a0, a1, a2] = [
@@ -616,6 +666,34 @@ mod tests {
         assert!(highest - lowest < 1.5, "{dips:?}");
         for freq in BANDS {
             assert!((curve.db(freq) - MAX_DB).abs() < 0.01, "{freq}");
+        }
+        // The top end slopes off like the bottom one instead of dropping
+        // to nothing before 20 kHz.
+        assert!(curve.db(20.0) > 4.0, "{}", curve.db(20.0));
+        assert!(curve.db(20_000.0) > 6.0, "{}", curve.db(20_000.0));
+    }
+
+    #[test]
+    fn filters_match_the_cookbook_low_down_and_keep_their_shape_up_top() {
+        for gain in [-12.0, -3.0, 0.5, 6.0, 12.0] {
+            let ours = Biquad::band(5, gain);
+            let w0 = std::f64::consts::TAU * 1_000.0 / f64::from(SAMPLE_RATE);
+            let cookbook = Biquad::cookbook(w0, gain);
+            for freq in [100.0, 500.0, 1_000.0, 2_000.0, 5_000.0] {
+                assert!(
+                    (ours.db(freq) - cookbook.db(freq)).abs() < 0.05,
+                    "{gain} {freq}"
+                );
+            }
+            // Each band peaks exactly at its value.
+            let top = Biquad::band(9, gain);
+            assert!((top.db(16_000.0) - f64::from(gain)).abs() < 0.01, "{gain}");
+            // Half the peak an octave apart, near enough even at 16 kHz.
+            let edge = top.db(16_000.0 * std::f32::consts::SQRT_2);
+            assert!(
+                (edge - f64::from(gain) / 2.0).abs() < f64::from(gain.abs()) * 0.1,
+                "{gain} {edge}"
+            );
         }
     }
 
