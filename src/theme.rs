@@ -368,11 +368,7 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
             pill.center().y,
         ),
         8.0,
-        if *value {
-            on_fill(fill, Color32::WHITE)
-        } else {
-            Color32::WHITE
-        },
+        Color32::WHITE,
     );
     let label_rect = egui::Rect::from_min_max(egui::pos2(rect.left() + 50.0, rect.top()), rect.max);
     let mut text = egui::text::LayoutJob::simple_singleline(
