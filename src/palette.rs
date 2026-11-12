@@ -492,6 +492,27 @@ impl Palette {
         }
     }
 
+    /// The player's Play/Pause icon on its `fill`: white in dark themes and
+    /// black in light ones, the opposite where that would not read on the
+    /// accent's fill (contrast below 3:1), or the theme's own `on_primary`.
+    pub fn play_icon_on(&self, fill: Color32) -> Color32 {
+        if let Some(on) = self.on_primary
+            && (fill == self.primary || fill == self.accent)
+        {
+            return on;
+        }
+        let (usual, other) = if self.light {
+            (Color32::BLACK, Color32::WHITE)
+        } else {
+            (Color32::WHITE, Color32::BLACK)
+        };
+        if contrast(usual, fill) < 3.0 && contrast(other, fill) > contrast(usual, fill) {
+            other
+        } else {
+            usual
+        }
+    }
+
     /// `color`, a colour of the blue accent family (a lighter blue, a dark
     /// blue backdrop), in the same place of the active accent's family: its
     /// hue turned by as much as the accent's, its saturation scaled alike.
@@ -639,6 +660,24 @@ mod tests {
             catppuccin.readable_on(catppuccin.accent, Color32::WHITE),
             catppuccin.background
         );
+        let light = Theme::from_code("light").unwrap().palette();
+        // Play/Pause: white in dark themes, black in light ones, turned over
+        // only where the accent's fill would swallow it.
+        assert_eq!(
+            original_dark().play_icon_on(original_dark().primary),
+            Color32::WHITE
+        );
+        assert_eq!(light.play_icon_on(light.primary), Color32::BLACK);
+        let pale = original_dark().with_accent(rgb(0xb8, 0xbb, 0x26));
+        assert_eq!(
+            pale.play_icon_on(pale.primary),
+            pale.play_icon_on(pale.primary)
+        );
+        assert_eq!(
+            original_dark().play_icon_on(rgb(0xd8, 0xe5, 0xf8)),
+            Color32::BLACK
+        );
+        assert_eq!(light.play_icon_on(rgb(0x10, 0x18, 0x40)), Color32::WHITE);
         // A bright theme accent like Noctalia's buttons gets dark text...
         let mut bright = *original_dark();
         bright.primary = rgb(0xb8, 0xbb, 0x26);

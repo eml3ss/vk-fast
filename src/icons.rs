@@ -968,9 +968,13 @@ pub fn compact_button(
             ui.painter(),
             rect.shrink(inset),
             icon,
-            // Play/Pause keeps the colour of Previous/Next next to it in
-            // every theme; only its circle is filled.
-            visuals.fg_stroke.color,
+            // Play/Pause stands out on its circle: white or black by theme,
+            // turned over where the accent's fill would swallow it.
+            if primary {
+                crate::palette::current().play_icon_on(fill)
+            } else {
+                visuals.fg_stroke.color
+            },
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
