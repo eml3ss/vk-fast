@@ -34,6 +34,9 @@ const MAX_HIGH_RES_BODY: u64 = 8 * 1024 * 1024;
 const MAX_DECODE: u64 = 32 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
 const TEXTURE_SIZE: u32 = 256;
+/// The edge of a small picture painted to fill a rect (a card's header);
+/// such textures stay ordinary ones, not counted as high resolution.
+const FILL_TEXTURE_SIZE: u32 = 512;
 const HIGH_RES_TEXTURE_SIZE: u32 = 2048;
 const CACHE_SIZES: [u32; 6] = [96, 160, 256, 512, 1024, HIGH_RES_TEXTURE_SIZE];
 use crate::cover_cache::KEEP_ASPECT;
@@ -152,17 +155,21 @@ impl CoverCache {
                 continue;
             }
             let state = if let Some(image) = reply.image {
-                if reply.key.edge > TEXTURE_SIZE
+                // `KEEP_ASPECT` is a flag bit, not part of the size: counted
+                // in, every picture painted to fill a rect was "high
+                // resolution", and a third card on screen evicted the first,
+                // which loaded again at once — the cards kept blinking.
+                if high_resolution(&reply.key)
                     && self
                         .entries
                         .iter()
                         .filter(|(key, entry)| {
-                            key.edge > TEXTURE_SIZE && matches!(entry.state, State::Ready(..))
+                            high_resolution(key) && matches!(entry.state, State::Ready(..))
                         })
                         .count()
                         >= MAX_HIGH_RES_TEXTURES
                 {
-                    self.evict_oldest(true, TEXTURE_SIZE + 1);
+                    self.evict_oldest(true, true);
                 }
                 if self
                     .entries
@@ -171,7 +178,7 @@ impl CoverCache {
                     .count()
                     >= MAX_TEXTURES
                 {
-                    self.evict_oldest(true, 0);
+                    self.evict_oldest(true, false);
                 }
                 let image = Arc::new(image);
                 let texture =
@@ -205,12 +212,12 @@ impl CoverCache {
         self.receive(context);
     }
 
-    fn evict_oldest(&mut self, textures_only: bool, min_edge: u32) -> bool {
+    fn evict_oldest(&mut self, textures_only: bool, high_resolution_only: bool) -> bool {
         let oldest = self
             .entries
             .iter()
             .filter(|(key, entry)| {
-                key.edge >= min_edge
+                (!high_resolution_only || high_resolution(key))
                     && match entry.state {
                         State::Pending => false,
                         State::Ready(..) => true,
@@ -236,7 +243,7 @@ impl CoverCache {
         if self.entries.contains_key(&key) || self.pending >= MAX_PENDING {
             return;
         }
-        if self.entries.len() >= MAX_ENTRIES && !self.evict_oldest(false, 0) {
+        if self.entries.len() >= MAX_ENTRIES && !self.evict_oldest(false, false) {
             return;
         }
         let valid =
@@ -375,8 +382,10 @@ impl CoverCache {
         let pixels = rect.width().max(rect.height()) * ui.ctx().pixels_per_point();
         let edge = if pixels > 1024.0 {
             HIGH_RES_TEXTURE_SIZE
-        } else {
+        } else if pixels > FILL_TEXTURE_SIZE as f32 {
             1024
+        } else {
+            FILL_TEXTURE_SIZE
         };
         let key = Key {
             url: url.to_owned(),
@@ -850,6 +859,11 @@ fn decode_sized(bytes: &[u8], edge: u32) -> Result<ColorImage, ()> {
         [size as usize, size as usize],
         image.as_raw(),
     ))
+}
+
+/// Larger than a card's picture: only a few such textures stay resident.
+fn high_resolution(key: &Key) -> bool {
+    key.edge & !KEEP_ASPECT > FILL_TEXTURE_SIZE
 }
 
 fn texture_edge(size: f32) -> u32 {
@@ -1508,6 +1522,48 @@ mod tests {
         assert!(cache.entries.contains_key(&Key {
             url: small.into(),
             edge: 96
+        }));
+    }
+
+    #[test]
+    fn card_pictures_painted_to_fill_stay_resident_side_by_side() {
+        // Friends' cards: more filled pictures than the high resolution
+        // limit, all on screen together, none evicts another.
+        let ctx = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let (sender, replies) = mpsc::sync_channel(MAX_PENDING);
+        cache.replies = replies;
+        let keys: Vec<_> = (0..MAX_HIGH_RES_TEXTURES + 4)
+            .map(|index| Key {
+                url: format!("https://images.example.test/card-{index}.jpg"),
+                edge: FILL_TEXTURE_SIZE | KEEP_ASPECT,
+            })
+            .collect();
+        for (index, key) in keys.iter().enumerate() {
+            cache.entries.insert(
+                key.clone(),
+                Entry {
+                    state: State::Pending,
+                    touched: index as u64,
+                },
+            );
+            sender
+                .send(Reply {
+                    key: key.clone(),
+                    image: Some(ColorImage::filled([4, 2], Color32::RED)),
+                    color: None,
+                })
+                .unwrap();
+            cache.receive(&ctx);
+        }
+        assert!(keys.iter().all(|key| matches!(
+            cache.entries.get(key).map(|entry| &entry.state),
+            Some(State::Ready(..))
+        )));
+        // A wide banner still counts as high resolution.
+        assert!(high_resolution(&Key {
+            url: String::new(),
+            edge: 1024 | KEEP_ASPECT,
         }));
     }
 
