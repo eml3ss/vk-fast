@@ -131,10 +131,8 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                     );
                 });
             } else if view.playlists.is_empty() {
-                // Item spacing, the separator's space and half its height
-                // leave 10 px below; match it on the top and left (the menu
-                // frame itself adds 6).
-                ui.add_space(4.0);
+                // 6 px above and below, as around the playlists; 10 on the
+                // left, where the rows' icons start (the frame adds 6).
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     ui.add(theme::wrapped_body(
@@ -174,7 +172,12 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                     },
                 );
             }
-            separator(ui);
+            // The menu frame leaves 6 px above the first playlist; the line
+            // keeps the same 6 px on both sides (2 of item spacing, 1 here and
+            // half the separator's own 6).
+            ui.add_space(1.0);
+            ui.separator();
+            ui.add_space(1.0);
             if row(
                 ui,
                 Icon::Refresh,
