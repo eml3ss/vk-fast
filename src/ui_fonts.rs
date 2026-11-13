@@ -63,6 +63,56 @@ static WAKE: Mutex<Option<egui::Context>> = Mutex::new(None);
 /// Set on a context whose fonts include the fallbacks.
 const COMPLETE: &str = "vk-fast-script-fallbacks";
 
+/// Inter, the primary font every other one lines up with.
+pub const INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
+
+/// A font's ascent and line height (ascent, descent and gap), in em.
+fn em_metrics(face: &skrifa::FontRef) -> Option<(f32, f32)> {
+    let metrics = face.metrics(
+        skrifa::instance::Size::unscaled(),
+        skrifa::instance::LocationRef::default(),
+    );
+    let em = f32::from(metrics.units_per_em);
+    (em > 0.0).then(|| {
+        (
+            metrics.ascent / em,
+            (metrics.ascent - metrics.descent + metrics.leading) / em,
+        )
+    })
+}
+
+/// egui puts a fallback glyph's baseline at that font's own ascent plus half
+/// the difference of the line heights. That meets Inter's baseline only when
+/// both fonts balance ascent and descent alike; Japanese, Chinese and Korean
+/// fonts, among others, do not, and their glyphs sat well below Latin ones
+/// on the same line. This is the drawing offset (egui's `y_offset_factor`,
+/// which leaves layout alone) that puts the baseline on Inter's.
+fn baseline_offset(face: &skrifa::FontRef, scale: f32) -> f32 {
+    static PRIMARY: OnceLock<Option<(f32, f32)>> = OnceLock::new();
+    let primary = *PRIMARY.get_or_init(|| {
+        skrifa::FontRef::new(INTER)
+            .ok()
+            .and_then(|face| em_metrics(&face))
+    });
+    let (Some((ascent, height)), Some((own_ascent, own_height))) = (primary, em_metrics(face))
+    else {
+        return 0.0;
+    };
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    // In em of the requested size; the font's own metrics follow its scale.
+    let shift = ascent - scale * own_ascent - (height - scale * own_height) / 2.0;
+    (shift / scale).clamp(-0.5, 0.5)
+}
+
+/// Line `data` up with Inter on the baseline, keeping its other tweaks.
+pub fn align_baseline(data: &mut FontData) {
+    if let Ok(face) = skrifa::FontRef::from_index(&data.font, data.index) {
+        data.tweak.y_offset_factor = baseline_offset(&face, data.tweak.scale);
+    }
+}
+
 /// Starts finding the fallbacks; the window does not wait for them.
 pub fn preload() {
     let Ok(mut loader) = LOADER.lock() else {
@@ -200,6 +250,7 @@ fn load_candidates(candidates: Vec<Candidate>, mut missing: HashSet<char>) -> Ve
         total += bytes.len();
         let mut data = FontData::from_static(bytes.leak());
         data.index = index;
+        align_baseline(&mut data);
         fonts.push(Fallback {
             name: format!("VK Fast script fallback {}", fonts.len()),
             data: Arc::new(data),
@@ -443,6 +494,30 @@ mod tests {
         }
         assert!(Arc::ptr_eq(&definitions.font_data[&font.name], &font.data));
     }
+    #[test]
+    fn fallback_glyphs_are_drawn_on_inter_s_baseline() {
+        let inter = skrifa::FontRef::new(INTER).unwrap();
+        assert_eq!(baseline_offset(&inter, 1.0), 0.0);
+        let (ascent, height) = em_metrics(&inter).unwrap();
+        // egui's own fallbacks, scaled emoji fonts among them, once aligned:
+        // where egui puts their baseline, plus the drawing offset, is Inter's.
+        let mut definitions = FontDefinitions::default();
+        for name in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+            let data = Arc::make_mut(definitions.font_data.get_mut(name).unwrap());
+            align_baseline(data);
+            let face = skrifa::FontRef::from_index(&data.font, data.index).unwrap();
+            let (own_ascent, own_height) = em_metrics(&face).unwrap();
+            let scale = data.tweak.scale;
+            let baseline = scale * own_ascent
+                + (height - scale * own_height) / 2.0
+                + scale * data.tweak.y_offset_factor;
+            assert!(
+                (baseline - ascent).abs() < 1e-4,
+                "{name}: {baseline} vs {ascent}"
+            );
+        }
+    }
+
     #[test]
     fn invalid_fonts_are_skipped_and_repeated_files_are_loaded_once() {
         let mut suffix = [0_u8; 8];

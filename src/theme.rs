@@ -710,7 +710,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let fallback = fonts.families[&FontFamily::Proportional].clone();
     for (name, weight) in [("Inter", 400.0), ("Inter Semibold", 600.0)] {
-        let mut data = FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf"));
+        let mut data = FontData::from_static(crate::ui_fonts::INTER);
         data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", weight)]);
         fonts.font_data.insert(name.into(), data.into());
         let mut family = fallback.clone();
@@ -722,6 +722,12 @@ pub fn install_fonts(ctx: &egui::Context) {
         .get_mut(&FontFamily::Proportional)
         .unwrap()
         .insert(0, "Inter".into());
+    // egui's own fallbacks (symbols, emoji) sit on Inter's baseline too.
+    for name in &fallback {
+        if let Some(data) = fonts.font_data.get_mut(name) {
+            crate::ui_fonts::align_baseline(std::sync::Arc::make_mut(data));
+        }
+    }
     crate::ui_fonts::append(&mut fonts);
     ctx.set_fonts(fonts);
     crate::ui_fonts::mark(ctx);
