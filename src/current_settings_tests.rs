@@ -921,3 +921,43 @@ fn settings_search_finds_the_equalizer_by_sound_words() {
         );
     }
 }
+
+#[test]
+fn interface_scale_applies_from_settings_and_follows_the_zoom_keys() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    let size = egui::vec2(1100.0, 800.0);
+    let mut tick = 0;
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Interface;
+    app.settings_query = "scale".into();
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    content_text(&settings, "Interface scale: 100 %");
+
+    app.apply_ui_scale(&ctx, 125);
+    assert!(app.ui_scale_save_at.is_some());
+    // egui puts a new zoom into effect from the next frame; until then the
+    // old one is not taken for a zoom key.
+    app.follow_keyboard_zoom(&ctx);
+    assert_eq!(app.ui_scale, 125);
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    assert_eq!(ctx.zoom_factor(), 1.25);
+    content_text(&settings, "Interface scale: 125 %");
+    // Back to 100 % from its own button.
+    let reset = content_text(&settings, "Reset").center();
+    account_ui_click(&ctx, &mut app, size, &mut tick, reset);
+    warm(&ctx, &mut app, size, &mut tick);
+    assert_eq!((app.ui_scale, ctx.zoom_factor()), (100, 1.0));
+
+    // egui's zoom keys: kept, within the same range.
+    ctx.set_zoom_factor(1.1);
+    warm(&ctx, &mut app, size, &mut tick);
+    app.follow_keyboard_zoom(&ctx);
+    assert_eq!((app.ui_scale, app.ui_scale_applied), (110, 110));
+    ctx.set_zoom_factor(4.0);
+    warm(&ctx, &mut app, size, &mut tick);
+    app.follow_keyboard_zoom(&ctx);
+    assert_eq!(app.ui_scale, 250);
+    warm(&ctx, &mut app, size, &mut tick);
+    assert_eq!(ctx.zoom_factor(), 2.5);
+}

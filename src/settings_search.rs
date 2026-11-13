@@ -12,6 +12,7 @@ pub enum Setting {
     Language,
     Theme,
     Accent,
+    UiScale,
     SystemTitlebar,
     CompactSeek,
     DoubleClickPlay,
@@ -67,6 +68,9 @@ impl Query {
             }
             Setting::Accent => {
                 "интерфейс цвет акцента акцент основной оттенок синий фиолетовый розовый красный оранжевый зелёный зеленый бирюзовый кнопки ссылки выделение тема оформление interface accent colour color main tint hue blue violet purple pink red orange green teal buttons links highlight theme appearance"
+            }
+            Setting::UiScale => {
+                "интерфейс масштаб масштабирование размер крупнее мельче увеличить уменьшить шрифт текст зум приближение interface scale scaling size zoom bigger smaller larger font text"
             }
             Setting::SystemTitlebar => {
                 "интерфейс системный заголовок окна панель оформление рамка кнопки interface system title bar titlebar custom window decoration frame caption controls"

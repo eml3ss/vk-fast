@@ -1406,6 +1406,15 @@ pub struct MusicApp {
     accent: Color32,
     accent_save_at: Option<Instant>,
     theme_save_failed: bool,
+    /// The interface scale in percent as set in Settings (while its slider
+    /// is dragged it runs ahead of `ui_scale_applied`, the zoom in effect).
+    ui_scale: u16,
+    ui_scale_applied: u16,
+    ui_scale_save_at: Option<Instant>,
+    ui_scale_save_failed: bool,
+    /// The frame in which the app last set the zoom: egui puts it into effect
+    /// from the next frame, so until then the old zoom is not a key press.
+    ui_scale_set_frame: Option<u64>,
     animated_backdrop_save_failed: bool,
     /// Ctrl + the keyboard's volume keys change VK Fast's own volume.
     volume_keys_enabled: bool,
@@ -1650,6 +1659,12 @@ impl MusicApp {
         crate::palette::set_active(appearance);
         crate::palette::set_accent(accent);
         theme::install(ctx);
+        let ui_scale = if cfg!(test) {
+            preferences::DEFAULT_UI_SCALE
+        } else {
+            preferences::load_ui_scale()
+        };
+        ctx.set_zoom_factor(f32::from(ui_scale) / 100.0);
         let cache_limit_mb = preferences::load_cache_limit_mb();
         #[cfg(not(test))]
         let audio_cache = AudioCache::new(u64::from(cache_limit_mb) * 1024 * 1024).ok();
@@ -1833,6 +1848,11 @@ impl MusicApp {
             accent,
             accent_save_at: None,
             theme_save_failed: false,
+            ui_scale,
+            ui_scale_applied: ui_scale,
+            ui_scale_save_at: None,
+            ui_scale_save_failed: false,
+            ui_scale_set_frame: Some(ctx.cumulative_frame_nr()),
             animated_backdrop_save_failed: false,
             volume_keys_enabled: preferences::load_volume_keys(),
             volume_keys_save_failed: false,
@@ -1944,6 +1964,7 @@ impl MusicApp {
                 data.remove::<(usize, f32)>(egui::Id::new("track-index-width"));
             });
             theme::install(ctx);
+            self.set_zoom(ctx, self.ui_scale_applied);
             crate::app_icon::rebind(&self.ui_context);
             crate::app_icon::rebind(ctx);
             self.covers.rebind_context(ctx);
@@ -10682,6 +10703,58 @@ impl MusicApp {
         );
     }
 
+    /// The interface scale: a slider in steps of 5 %, put into effect when
+    /// it settles (a drag would rescale the slider under the pointer), and a
+    /// button back to 100 %.
+    fn ui_scale_settings(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
+        let t = |ru, en| language.text(ru, en);
+        ui.label(format!(
+            "{}: {} %",
+            t("Масштаб интерфейса", "Interface scale"),
+            self.ui_scale
+        ));
+        let mut scale = self.ui_scale;
+        let mut apply = None;
+        ui.horizontal(|ui| {
+            // Forty steps of 5 %: wide enough to pick each one.
+            ui.spacing_mut().slider_width = 260.0_f32.min(ui.available_width() - 110.0).max(80.0);
+            let slider = theme::slider(ui, &mut scale, preferences::UI_SCALE_RANGE, 5.0);
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                apply = Some(scale);
+            }
+            if scale != preferences::DEFAULT_UI_SCALE
+                && ui
+                    .button(t("Сбросить", "Reset"))
+                    .on_hover_text("100 %")
+                    .clicked()
+            {
+                apply = Some(preferences::DEFAULT_UI_SCALE);
+            }
+        });
+        self.ui_scale = scale;
+        if let Some(percent) = apply {
+            self.apply_ui_scale(ui.ctx(), percent);
+        }
+        ui.label(
+            RichText::new(t(
+                "Размер текста и всех элементов окна. Также Ctrl + плюс и Ctrl + минус, Ctrl + 0 — 100 %.",
+                "The size of text and everything in the window. Also Ctrl + plus and Ctrl + minus; Ctrl + 0 is 100 %.",
+            ))
+            .small()
+            .color(theme::muted()),
+        );
+        if self.ui_scale_save_failed {
+            ui.colored_label(
+                theme::error(),
+                t(
+                    "Не удалось сохранить настройку.",
+                    "Could not save the setting.",
+                ),
+            );
+        }
+    }
+
     /// The crossfade switch and, while it is on, its length.
     fn crossfade_settings(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
@@ -10752,6 +10825,52 @@ impl MusicApp {
         }
     }
 
+    fn save_ui_scale_now(&mut self) {
+        self.ui_scale_save_failed =
+            !cfg!(test) && preferences::save_ui_scale(self.ui_scale_applied).is_err();
+    }
+
+    /// Put `percent` into effect and save it shortly (or at exit).
+    fn apply_ui_scale(&mut self, ctx: &egui::Context, percent: u16) {
+        let percent = percent.clamp(
+            *preferences::UI_SCALE_RANGE.start(),
+            *preferences::UI_SCALE_RANGE.end(),
+        );
+        self.ui_scale = percent;
+        if percent != self.ui_scale_applied {
+            self.ui_scale_applied = percent;
+            self.set_zoom(ctx, percent);
+            self.ui_scale_save_at = Some(Instant::now() + Duration::from_millis(600));
+        }
+    }
+
+    fn set_zoom(&mut self, ctx: &egui::Context, percent: u16) {
+        ctx.set_zoom_factor(f32::from(percent) / 100.0);
+        self.ui_scale_set_frame = Some(ctx.cumulative_frame_nr());
+    }
+
+    /// egui's own zoom keys (Ctrl + plus, minus or 0) change the scale like
+    /// Settings do, kept within the same range and saved the same way.
+    fn follow_keyboard_zoom(&mut self, ctx: &egui::Context) {
+        if self.ui_scale_set_frame == Some(ctx.cumulative_frame_nr()) {
+            return;
+        }
+        let zoom = ctx.zoom_factor();
+        if (zoom * 100.0 - f32::from(self.ui_scale_applied)).abs() < 0.5 {
+            return;
+        }
+        let percent = (zoom * 100.0).round().clamp(0.0, f32::from(u16::MAX)) as u16;
+        let clamped = percent.clamp(
+            *preferences::UI_SCALE_RANGE.start(),
+            *preferences::UI_SCALE_RANGE.end(),
+        );
+        // The applied value is the old one here, so the change is saved.
+        self.apply_ui_scale(ctx, clamped);
+        if clamped != percent {
+            self.set_zoom(ctx, clamped);
+        }
+    }
+
     fn save_accent_now(&mut self) {
         self.theme_save_failed = !cfg!(test) && preferences::save_accent(self.accent).is_err();
     }
@@ -10794,6 +10913,7 @@ impl MusicApp {
             ],
             SettingsSection::Appearance => &[Setting::Theme, Setting::Accent],
             SettingsSection::Interface => &[
+                Setting::UiScale,
                 Setting::SystemTitlebar,
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
@@ -11061,6 +11181,19 @@ impl MusicApp {
                 }
             }
             SettingsSection::Interface => {
+                if query.matches(Setting::UiScale) {
+                    self.ui_scale_settings(ui);
+                    if query.matches(Setting::SystemTitlebar)
+                        || query.matches(Setting::CompactSeek)
+                        || query.matches(Setting::DoubleClickPlay)
+                        || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
                 if query.matches(Setting::SystemTitlebar) {
                     let label = t("Системный заголовок окна", "System title bar");
                     if theme::switch(ui, &mut self.system_titlebar, label).changed() {
@@ -12086,6 +12219,15 @@ impl MusicApp {
         if self.qr_open {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.follow_keyboard_zoom(ctx);
+        if let Some(deadline) = self.ui_scale_save_at {
+            if Instant::now() >= deadline {
+                self.ui_scale_save_at = None;
+                self.save_ui_scale_now();
+            } else {
+                ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+            }
+        }
         if let Some(deadline) = self.equalizer_save_at {
             if Instant::now() >= deadline {
                 self.equalizer_save_at = None;
@@ -12236,6 +12378,9 @@ impl Drop for MusicApp {
         }
         if self.accent_save_at.take().is_some() {
             self.save_accent_now();
+        }
+        if self.ui_scale_save_at.take().is_some() {
+            self.save_ui_scale_now();
         }
         if self.cache_save_at.is_some() {
             let _ = preferences::save_cache_limit_mb(self.cache_limit_mb);
@@ -12749,6 +12894,11 @@ mod tests {
             accent: theme::Accent::default().color(),
             accent_save_at: None,
             theme_save_failed: false,
+            ui_scale: preferences::DEFAULT_UI_SCALE,
+            ui_scale_applied: preferences::DEFAULT_UI_SCALE,
+            ui_scale_save_at: None,
+            ui_scale_save_failed: false,
+            ui_scale_set_frame: None,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: false,
             volume_keys_save_failed: false,

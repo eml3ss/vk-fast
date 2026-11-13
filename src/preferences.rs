@@ -30,6 +30,9 @@ const DEFAULT_AUTO_UPDATES: bool = true;
 const DEFAULT_SEARCH_ON_ENTER: bool = true;
 const DEFAULT_MIX_AFTER_QUEUE: bool = true;
 pub const DEFAULT_CROSSFADE_SECONDS: u8 = 6;
+/// The interface scale in percent: 100 is egui's own size.
+pub const DEFAULT_UI_SCALE: u16 = 100;
+pub const UI_SCALE_RANGE: std::ops::RangeInclusive<u16> = 50..=250;
 pub const MAX_CROSSFADE_SECONDS: u8 = 12;
 const DEFAULT_EXPLICIT_BADGE: bool = true;
 const DEFAULT_ANIMATED_BACKDROP: bool = true;
@@ -87,6 +90,8 @@ struct Preferences {
     crossfade_seconds: u8,
     #[serde(deserialize_with = "deserialize_explicit_badge")]
     explicit_badge: bool,
+    #[serde(deserialize_with = "deserialize_ui_scale")]
+    ui_scale: u16,
     #[serde(deserialize_with = "deserialize_animated_backdrop")]
     animated_backdrop: bool,
     /// Off unless turned on: it takes Ctrl + volume keys from the system.
@@ -129,6 +134,7 @@ impl Default for Preferences {
             crossfade: false,
             crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
+            ui_scale: DEFAULT_UI_SCALE,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
             volume_keys: false,
             broadcast: false,
@@ -307,6 +313,16 @@ fn deserialize_crossfade_seconds<'de, D: serde::Deserializer<'de>>(
         .as_u64()
         .filter(|seconds| (1..=u64::from(MAX_CROSSFADE_SECONDS)).contains(seconds))
         .map_or(DEFAULT_CROSSFADE_SECONDS, |seconds| seconds as u8))
+}
+
+fn deserialize_ui_scale<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u16, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_u64()
+        .and_then(|scale| u16::try_from(scale).ok())
+        .filter(|scale| UI_SCALE_RANGE.contains(scale))
+        .unwrap_or(DEFAULT_UI_SCALE))
 }
 
 fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
@@ -893,6 +909,20 @@ pub fn save_crossfade(enabled: bool, seconds: u8) -> io::Result<()> {
     })
 }
 
+/// The interface scale in percent.
+pub fn load_ui_scale() -> u16 {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or(DEFAULT_UI_SCALE, |preferences| preferences.ui_scale)
+}
+
+pub fn save_ui_scale(scale: u16) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.ui_scale = scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
+    })
+}
+
 pub fn save_mix_after_queue(enabled: bool) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.mix_after_queue = enabled
@@ -1239,6 +1269,25 @@ mod tests {
             assert_eq!(restored.theme, "oled");
             assert_eq!(restored.volume, 0.375);
         }
+    }
+
+    #[test]
+    fn ui_scale_defaults_to_100_and_ignores_values_out_of_range() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [
+            r#"{}"#,
+            r#"{"ui_scale":"big"}"#,
+            r#"{"ui_scale":10}"#,
+            r#"{"ui_scale":900}"#,
+            r#"{"ui_scale":-5}"#,
+        ] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert_eq!(preferences.ui_scale, DEFAULT_UI_SCALE, "{json}");
+        }
+        update_at(&path, |preferences| preferences.ui_scale = 125).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(restored.ui_scale, 125);
     }
 
     #[test]
