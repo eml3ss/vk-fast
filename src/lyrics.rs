@@ -304,7 +304,56 @@ impl Provider {
                 break;
             }
         }
+        if matches!(result, Err(Error::NotFound)) {
+            result = self.fetch_searched(config, query, canceled);
+        }
         result
+    }
+
+    /// Musixmatch's matcher can miss a song it has: it answered "Execution
+    /// Clap" with another artist's 119-second record while "Execution Clap
+    /// (feat. Kasane Teto)" by the same artist sat in its search. Its search
+    /// then picks the record, and its lyrics come by that record's id.
+    fn fetch_searched(
+        &self,
+        config: &store::Config,
+        query: &Query,
+        canceled: &impl Fn() -> bool,
+    ) -> Result<Arc<Lyrics>, Error> {
+        let found = self.request(
+            ANONYMOUS_API,
+            "track.search",
+            &[
+                ("q_track", query.title.as_str()),
+                ("q_artist", query.artist.as_str()),
+                ("page_size", "10"),
+                ("s_track_rating", "desc"),
+                ("format", "json"),
+                ("app_id", APP_ID),
+                ("usertoken", config.user_token.as_str()),
+            ],
+            canceled,
+        )?;
+        let id = best_searched(&found, query)
+            .ok_or(Error::NotFound)?
+            .to_string();
+        let duration = query.duration.to_string();
+        let deviation = length_deviation(query.duration).to_string();
+        let mut params = vec![
+            ("track_id", id.as_str()),
+            ("format", "json"),
+            ("app_id", APP_ID),
+            ("usertoken", config.user_token.as_str()),
+            ("subtitle_format", "mxm"),
+        ];
+        if query.duration > 0 {
+            params.extend([
+                ("f_subtitle_length", duration.as_str()),
+                ("f_subtitle_length_max_deviation", deviation.as_str()),
+            ]);
+        }
+        let value = self.request(ANONYMOUS_API, "macro.subtitles.get", &params, canceled)?;
+        parse_macro(&value, query).map(Arc::new)
     }
 
     fn fetch_as(
@@ -315,7 +364,7 @@ impl Provider {
         canceled: &impl Fn() -> bool,
     ) -> Result<Arc<Lyrics>, Error> {
         let duration = query.duration.to_string();
-        let deviation = query.duration.div_ceil(20).max(8).to_string();
+        let deviation = length_deviation(query.duration).to_string();
         let mut params = vec![
             ("q_track", query.title.as_str()),
             ("q_artist", artist),
@@ -339,6 +388,37 @@ impl Provider {
         let value = self.request(ANONYMOUS_API, "macro.subtitles.get", &params, canceled)?;
         parse_macro(&value, query).map(Arc::new)
     }
+}
+
+/// How far a record's length may be from the track's: 5 %, at least 8 s.
+fn length_deviation(duration: u32) -> u32 {
+    duration.div_ceil(20).max(8)
+}
+
+/// The search result that is this song: same title and main artist, not an
+/// instrumental, of about the same length, with lyrics; synced ones first.
+fn best_searched(found: &Value, query: &Query) -> Option<u64> {
+    found
+        .get("track_list")
+        .and_then(Value::as_array)?
+        .iter()
+        .take(20)
+        .filter_map(|item| item.get("track"))
+        .filter(|track| validate_match(track, query).is_ok())
+        .filter(|track| {
+            query.duration == 0
+                || track
+                    .get("track_length")
+                    .and_then(number)
+                    .is_none_or(|length| {
+                        length.abs_diff(u64::from(query.duration))
+                            <= u64::from(length_deviation(query.duration))
+                    })
+        })
+        .filter(|track| flag(track.get("has_subtitles")) || flag(track.get("has_lyrics")))
+        .max_by_key(|track| flag(track.get("has_subtitles")))
+        .and_then(|track| track.get("track_id").and_then(number))
+        .filter(|id| *id > 0)
 }
 
 fn status_error(code: u16, wait: u64) -> Error {
@@ -996,6 +1076,35 @@ mod tests {
             "Approve Please, Genie!"
         ));
         assert!(same_title("Song (Instrumental)", "Song - Instrumental"));
+    }
+
+    #[test]
+    fn a_search_finds_the_song_the_matcher_missed() {
+        let query = Query {
+            title: "Execution Clap".into(),
+            artist: "TRAP CHICK".into(),
+            artists: "TRAP CHICK, 重音テト".into(),
+            duration: 191,
+            ..query()
+        };
+        let found = json!({"track_list":[
+            {"track":{"track_id":1,"track_name":"Execution Clap","artist_name":"TRAPCHICK",
+                "track_length":119,"has_subtitles":0,"has_lyrics":0}},
+            {"track":{"track_id":2,"track_name":"Execution Clap (Instrumental)",
+                "artist_name":"TRAP CHICK","track_length":191,"has_subtitles":0,"has_lyrics":0}},
+            {"track":{"track_id":3,"track_name":"Execution Clap (feat. Kasane Teto)",
+                "artist_name":"TRAP CHICK","track_length":240,"has_subtitles":1,"has_lyrics":1}},
+            {"track":{"track_id":4,"track_name":"Execution Clap (feat. Kasane Teto)",
+                "artist_name":"TRAP CHICK","track_length":191,"has_subtitles":0,"has_lyrics":1}},
+            {"track":{"track_id":5,"track_name":"Execution Clap (feat. Kasane Teto)",
+                "artist_name":"TRAP CHICK","track_length":190,"has_subtitles":1,"has_lyrics":1}}
+        ]});
+        // Another artist, the instrumental and a much longer record are
+        // passed over; of the rest, the one with synced lyrics wins.
+        assert_eq!(best_searched(&found, &query), Some(5));
+        let plain_only = json!({"track_list":[found["track_list"][3].clone()]});
+        assert_eq!(best_searched(&plain_only, &query), Some(4));
+        assert_eq!(best_searched(&json!({"track_list":[]}), &query), None);
     }
 
     #[test]
