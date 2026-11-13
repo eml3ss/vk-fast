@@ -2,7 +2,7 @@
 //! output callback never waits for network, decoding or a mutex.
 pub(crate) use crate::audio_cache::completed_duration_plausible;
 use crate::{
-    audio_cache::{AudioCache, CacheKey, CachePin},
+    audio_cache::{AudioCache, CacheKey, CachePin, MediaStore},
     audio_output::{self, CHANNELS, OutputStream, SAMPLE_RATE},
     i18n::Language,
 };
@@ -249,6 +249,7 @@ impl Player {
                 url: Some(Zeroizing::new(url)),
                 duration,
                 key: None,
+                store: None,
             },
             offset,
         );
@@ -259,6 +260,7 @@ impl Player {
                 url: url.map(Zeroizing::new),
                 duration: key.duration,
                 key: Some(key),
+                store: None,
             },
             offset,
         );
@@ -273,6 +275,7 @@ impl Player {
                 url: url.map(Zeroizing::new),
                 duration: key.duration,
                 key: Some(key),
+                store: None,
             },
             0.0,
             seconds,
@@ -286,6 +289,7 @@ impl Player {
             url: url.map(Zeroizing::new),
             duration: key.duration,
             key: Some(key),
+            store: None,
         })));
     }
 
@@ -441,6 +445,67 @@ struct Source {
     url: Option<Zeroizing<String>>,
     duration: u32,
     key: Option<CacheKey>,
+    /// A plain file (MP3) is cached as VK's original file and decoded on
+    /// each play; without one, a playlist (HLS) caches its decoded PCM.
+    store: Option<MediaStore>,
+}
+/// Give `source` its original-file store when it is a plain file: a link
+/// that is not an HLS playlist, or, without a link, a file stored whole.
+fn attach_store(mut source: Source, cache: Option<&AudioCache>) -> Source {
+    let (Some(cache), Some(key)) = (cache, source.key) else {
+        return source;
+    };
+    let store = MediaStore::new(cache.clone(), key);
+    let plain = match source.url.as_deref() {
+        Some(url) => !playlist_url(url),
+        None => store.complete().is_some(),
+    };
+    if plain {
+        source.store = Some(store);
+    }
+    source
+}
+fn playlist_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| url.path().ends_with(".m3u8"))
+}
+/// Fetches the rest of a plain file into its store while it plays, so seeks
+/// and later plays need no network; the counterpart of `Prefetch` for PCM.
+struct Download {
+    cancellation: crate::media_decoder::Cancellation,
+    worker: Option<JoinHandle<()>>,
+}
+impl Download {
+    fn start(url: &str, store: &MediaStore) -> Option<Self> {
+        let store = store.at_current_revision().ok()?;
+        let url = Zeroizing::new(url.to_owned());
+        let cancellation = crate::media_decoder::Cancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let worker = thread::Builder::new()
+            .name("vk-track-download".into())
+            .spawn(move || {
+                match crate::media_decoder::download(&url, &store, &worker_cancellation) {
+                    Ok(()) if store.complete().is_some() => {
+                        crate::diagnostics::event("decoder", "download_complete");
+                    }
+                    Ok(()) => crate::diagnostics::event("decoder", "download_stopped no_room"),
+                    Err(_) if worker_cancellation.is_canceled() => {}
+                    Err(error) => log_decoder_io_error("download_failed", &error),
+                }
+            })
+            .ok()?;
+        Some(Self {
+            cancellation,
+            worker: Some(worker),
+        })
+    }
+}
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 // Relative frames use 48 bits (more than every u32-second 48 kHz track);
 // the remaining bits version refills so an in-flight callback cannot overwrite
@@ -1037,8 +1102,11 @@ fn pump_mode(
                 return Ok(());
             }
         }
-        let url = source.url.as_ref().ok_or(PlaybackError::CacheMiss)?;
-        if !valid_url(url) {
+        let url = source.url.as_deref();
+        if source.store.is_none() && url.is_none() {
+            return Err(PlaybackError::CacheMiss);
+        }
+        if url.is_some_and(|url| !valid_url(url)) {
             return Err(PlaybackError::InvalidUrl);
         }
         let next_cached = cache
@@ -1055,7 +1123,17 @@ fn pump_mode(
             frame,
             source.duration,
         );
-        let stream = decoder(url, frame_time(frame)).map_err(|error| {
+        let stream = match (&source.store, url) {
+            // The original file: from disk where stored, from VK otherwise.
+            (Some(store), url) => crate::media_decoder::open_stored(
+                url.map(String::as_str),
+                frame_time(frame),
+                Some(store.clone()),
+            ),
+            (None, Some(url)) => decoder(url, frame_time(frame)),
+            (None, None) => return Err(PlaybackError::CacheMiss),
+        }
+        .map_err(|error| {
             log_decoder_io_error("open_failed", &error);
             PlaybackError::Decoder
         })?;
@@ -1489,6 +1567,8 @@ struct Running {
     duration: u32,
     cache: Option<CacheBinding>,
     prefetch: Option<Arc<Prefetch>>,
+    store: Option<MediaStore>,
+    _download: Option<Download>,
     _pin: Option<CachePin>,
 }
 impl Running {
@@ -1516,6 +1596,11 @@ impl Running {
         paused: bool,
         control: Arc<Control>,
     ) -> Result<bool, PlaybackError> {
+        if self.cache.is_none()
+            && let Some(store) = &self.store
+        {
+            return self.seek_stored(store.clone(), source, offset, paused, control);
+        }
         let Some(cache) = &self.cache else {
             return Ok(false);
         };
@@ -1542,8 +1627,50 @@ impl Running {
         self.pcm.paused.store(paused, Ordering::Relaxed);
         Ok(true)
     }
+    /// A seek into a stored part of the original file: the output stays, a
+    /// new decoder starts there from disk. Elsewhere the track restarts as
+    /// for any stream (false).
+    fn seek_stored(
+        &mut self,
+        store: MediaStore,
+        source: &Source,
+        offset: f64,
+        paused: bool,
+        control: Arc<Control>,
+    ) -> Result<bool, PlaybackError> {
+        let Some(byte) = stored_byte(&store, offset, self.duration) else {
+            return Ok(false);
+        };
+        if !store.has_byte(byte) {
+            return Ok(false);
+        }
+        self.pcm.paused.store(true, Ordering::Relaxed);
+        self.pump = None;
+        let was_started = self.pcm.started.load(Ordering::Relaxed);
+        prefill(&self.pcm, &[], was_started);
+        let frame = frame_at(offset);
+        self.offset = frame_time(frame);
+        self.pump = Some(Pump::new(
+            source.clone(),
+            None,
+            frame,
+            self.pcm.clone(),
+            control,
+            None,
+        )?);
+        self.pcm.paused.store(paused, Ordering::Relaxed);
+        Ok(true)
+    }
     fn progress(&self) -> (f64, f64, bool) {
         let (position, mut end, ready) = self.pcm.buffered_range(self.offset, self.duration);
+        if let Some(store) = &self.store
+            && let Some(total) = store.total()
+            && let Some(byte) = stored_byte(store, position, self.duration)
+        {
+            // Bytes stand for time in proportion: close enough for the bar.
+            let stored = store.contiguous_end(byte) as f64 / total as f64;
+            end = end.max(stored * f64::from(self.duration));
+        }
         if let Some(cache) = &self.cache
             && let Ok(cached) = cache.cache.contiguous_end(&cache.key, frame_at(position))
         {
@@ -1556,6 +1683,15 @@ impl Running {
         }
         (position, end, ready)
     }
+}
+/// Where `offset` falls in the stored file, in proportion to the duration.
+fn stored_byte(store: &MediaStore, offset: f64, duration: u32) -> Option<u64> {
+    let total = store.total()?;
+    if duration == 0 {
+        return None;
+    }
+    let share = (offset / f64::from(duration)).clamp(0.0, 1.0);
+    Some(((total as f64 * share) as u64).min(total.saturating_sub(1)))
 }
 impl Running {
     /// Still playing out loud: worth fading rather than cutting.
@@ -1670,14 +1806,23 @@ fn start(
     control: Arc<Control>,
     cache: Option<&AudioCache>,
 ) -> Result<Running, PlaybackError> {
-    let cache = binding(source, cache);
-    let pin = cache.as_ref().map(|cache| cache.cache.pin(&cache.key));
+    // A plain file keeps its original bytes, not decoded PCM.
+    let cache = if source.store.is_some() {
+        None
+    } else {
+        binding(source, cache)
+    };
+    let pin = match &source.store {
+        Some(store) => Some(store.pin()),
+        None => cache.as_ref().map(|cache| cache.cache.pin(&cache.key)),
+    };
     let frame = frame_at(offset);
     let bytes = cache
         .as_ref()
         .map_or_else(Vec::new, |cache| cache.read(frame));
     if bytes.is_empty()
         && source.url.is_none()
+        && source.store.is_none()
         && cache
             .as_ref()
             .and_then(CacheBinding::complete)
@@ -1705,6 +1850,10 @@ fn start(
         control,
         prefetch.clone(),
     )?;
+    let download = match (&source.store, source.url.as_deref()) {
+        (Some(store), Some(url)) if store.complete().is_none() => Download::start(url, store),
+        _ => None,
+    };
     Ok(Running {
         pump: Some(pump),
         _stream: Some(stream),
@@ -1715,6 +1864,8 @@ fn start(
         duration: source.duration,
         cache,
         prefetch,
+        store: source.store.clone(),
+        _download: download,
         _pin: pin,
     })
 }
@@ -1783,7 +1934,7 @@ fn controller(
                     continue;
                 }
                 let duration = selected.duration;
-                source = Some(selected);
+                source = Some(attach_store(selected, cache.as_ref()));
                 // A crossfade keeps the audible track playing on its own
                 // output until the new one is heard; anything else stops it.
                 let frames = (f64::from(crossfade) * f64::from(SAMPLE_RATE)) as u64;
@@ -1836,6 +1987,7 @@ fn controller(
                 }
             }
             Ok(Command::Preload(next)) => {
+                let next = next.map(|next| attach_store(next, cache.as_ref()));
                 ready = next.and_then(|next| {
                     match start(
                         &next,
@@ -2837,6 +2989,7 @@ mod tests {
             url: None,
             duration: key.duration,
             key: Some(key),
+            store: None,
         };
         let pcm = pcm(2);
         let control = Control::default();
@@ -2873,6 +3026,7 @@ mod tests {
             url: None,
             duration: key.duration,
             key: Some(key),
+            store: None,
         };
         let pcm = pcm(2);
         let control = Control::default();
@@ -2982,6 +3136,7 @@ mod tests {
             url: Some(Zeroizing::new("https://example.test/synthetic".into())),
             duration: 24,
             key: Some(key),
+            store: None,
         };
         (
             source,
@@ -3293,6 +3448,48 @@ mod tests {
             track_id: 7,
             duration,
         }
+    }
+
+    #[test]
+    fn plain_files_keep_their_original_bytes_and_playlists_keep_pcm() {
+        let directory = CacheDirectory::new();
+        let cache = AudioCache::test_at(directory.0.join("audio"), 4 * 1024 * 1024).unwrap();
+        let key = cache_key(30);
+        let source = |url: Option<&str>| Source {
+            url: url.map(|url| Zeroizing::new(url.into())),
+            duration: key.duration,
+            key: Some(key),
+            store: None,
+        };
+        let mp3 = attach_store(
+            source(Some("https://cs.example.test/audios/a.mp3?extra=1")),
+            Some(&cache),
+        );
+        assert!(mp3.store.is_some());
+        let hls = attach_store(
+            source(Some("https://cs.example.test/a/index.m3u8?extra=1")),
+            Some(&cache),
+        );
+        assert!(hls.store.is_none());
+        // Without a link, only a file stored whole plays from its store.
+        assert!(attach_store(source(None), Some(&cache)).store.is_none());
+        let store = MediaStore::new(cache.clone(), key);
+        let total = crate::audio_cache::MEDIA_CHUNK + 10;
+        assert!(store.write(total, 0, &vec![1; crate::audio_cache::MEDIA_CHUNK as usize]));
+        assert!(attach_store(source(None), Some(&cache)).store.is_none());
+        assert!(store.write(total, 1, &[2; 10]));
+        assert!(attach_store(source(None), Some(&cache)).store.is_some());
+        // No cache, or no key: nothing to keep.
+        assert!(
+            attach_store(source(Some("https://cs.example.test/a.mp3")), None)
+                .store
+                .is_none()
+        );
+        // Time maps onto the file in proportion.
+        assert_eq!(stored_byte(&store, 0.0, 30), Some(0));
+        assert_eq!(stored_byte(&store, 15.0, 30), Some(total / 2));
+        assert_eq!(stored_byte(&store, 99.0, 30), Some(total - 1));
+        assert_eq!(stored_byte(&store, 5.0, 0), None);
     }
 
     #[test]

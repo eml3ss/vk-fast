@@ -30,7 +30,6 @@ impl Cancellation {
         self.0.store(true, Ordering::Release);
     }
 }
-#[cfg(test)]
 impl Cancellation {
     pub fn is_canceled(&self) -> bool {
         self.0.load(Ordering::Acquire)
@@ -42,28 +41,57 @@ pub struct Stream {
 }
 
 pub fn open(url: &str, offset: f64) -> io::Result<Stream> {
-    if !offset.is_finite()
-        || offset < 0.0
-        || !net::valid_url(&reqwest::Url::parse(url).map_err(|_| invalid())?)
+    open_stored(Some(url), offset, None)
+}
+/// Decode a track whose original file the cache keeps (or fills): a file
+/// stored whole plays from disk without `url`, otherwise chunks come from
+/// disk where stored and from VK where not, and are stored as they arrive.
+pub fn open_stored(
+    url: Option<&str>,
+    offset: f64,
+    store: Option<crate::audio_cache::MediaStore>,
+) -> io::Result<Stream> {
+    if !offset.is_finite() || offset < 0.0 {
+        return Err(invalid());
+    }
+    if let Some(url) = url
+        && !net::valid_url(&reqwest::Url::parse(url).map_err(|_| invalid())?)
     {
+        return Err(invalid());
+    }
+    if url.is_none() && store.is_none() {
         return Err(invalid());
     }
     let cancellation = Cancellation::default();
     Ok(Stream {
         reader: Box::new(Lazy {
-            url: Zeroizing::new(url.into()),
+            url: url.map(|url| Zeroizing::new(url.into())),
             offset,
             canceled: cancellation.0.clone(),
             pipeline: None,
+            store,
         }),
         cancellation,
     })
 }
+/// Fetch the chunks of `url`'s file that the store lacks, on this thread,
+/// until done, canceled, or the cache has no room or was changed.
+pub fn download(
+    url: &str,
+    store: &crate::audio_cache::MediaStore,
+    cancellation: &Cancellation,
+) -> io::Result<()> {
+    if !net::valid_url(&reqwest::Url::parse(url).map_err(|_| invalid())?) {
+        return Err(invalid());
+    }
+    source::download(net::Net::new(cancellation.0.clone())?, url, store)
+}
 struct Lazy {
-    url: Zeroizing<String>,
+    url: Option<Zeroizing<String>>,
     offset: f64,
     canceled: Arc<AtomicBool>,
     pipeline: Option<Pipeline>,
+    store: Option<crate::audio_cache::MediaStore>,
 }
 impl Read for Lazy {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
@@ -74,7 +102,20 @@ impl Read for Lazy {
             return Err(canceled());
         }
         if self.pipeline.is_none() {
-            let (source, origin) = source::open(&self.url, self.offset, self.canceled.clone())?;
+            let stored = self
+                .store
+                .clone()
+                .and_then(|store| source::stored(store, self.offset));
+            let (source, origin) = match (stored, &self.url) {
+                (Some(stored), _) => (stored, 0.0),
+                (None, Some(url)) => {
+                    source::open(url, self.offset, self.canceled.clone(), self.store.clone())?
+                }
+                (None, None) => {
+                    crate::diagnostics::event("decoder", "cache_incomplete_without_url");
+                    return Err(invalid());
+                }
+            };
             let pipeline = Pipeline::new(source, origin, self.offset, self.canceled.clone())?;
             self.pipeline = Some(pipeline);
         }

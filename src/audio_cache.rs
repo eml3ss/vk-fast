@@ -1,5 +1,7 @@
-//! Account-isolated, bounded PCM cache. Filenames contain only numeric frame
-//! offsets and a hash of the track identity; URLs and credentials are not stored.
+//! Account-isolated, bounded audio cache. Each track has a folder named by a
+//! hash of its identity: either the original compressed file from VK, in
+//! numbered chunks (`media_*`, used for plain files such as MP3), or decoded
+//! PCM ranges by frame offset (HLS). URLs and credentials are not stored.
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
@@ -16,6 +18,14 @@ pub const DEFAULT_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_LIMIT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub const BYTES_PER_FRAME: u64 = 8; // 48 kHz, stereo, little-endian f32.
 const MAX_READ_FRAMES: usize = 48_000 * 30;
+/// The original file is kept in chunks of this size: the same ranges the
+/// player asks VK for, so each answer is stored as it arrives.
+pub const MEDIA_CHUNK: u64 = 256 * 1024;
+/// Larger files are not media from VK.
+pub const MAX_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
+/// Set once the decoded PCM of earlier versions was removed: compressed files
+/// take about a tenth of its room, and those tracks simply load again.
+const MEDIA_FORMAT_MARKER: &str = ".media-v1";
 
 /// Metadata duration is rounded by VK; a successful but implausibly short EOF
 /// must never make a truncated track look permanently complete.
@@ -34,11 +44,18 @@ pub struct CacheKey {
 
 impl CacheKey {
     fn name(self) -> io::Result<String> {
+        self.hashed(b"vk-fast-pcm-v1-48000-stereo-f32le")
+    }
+    /// The folder of the track's original file, apart from its PCM.
+    fn media_name(self) -> io::Result<String> {
+        self.hashed(b"vk-fast-media-v1-chunks-256k")
+    }
+    fn hashed(self, domain: &[u8]) -> io::Result<String> {
         if self.account_id <= 0 || self.owner_id == 0 || self.track_id <= 0 {
             return Err(invalid());
         }
         let mut hash = Sha256::new();
-        hash.update(b"vk-fast-pcm-v1-48000-stereo-f32le");
+        hash.update(domain);
         hash.update(self.account_id.to_le_bytes());
         hash.update(self.owner_id.to_le_bytes());
         hash.update(self.track_id.to_le_bytes());
@@ -304,6 +321,121 @@ fn range_end(segments: &[Segment], start: u64) -> u64 {
     end
 }
 
+/// The length of chunk `index` of a `total`-byte file, if it has one.
+fn chunk_len(total: u64, index: u64) -> Option<u64> {
+    let start = index.checked_mul(MEDIA_CHUNK)?;
+    (start < total).then(|| (total - start).min(MEDIA_CHUNK))
+}
+fn chunk_path(folder: &Path, index: u64) -> PathBuf {
+    folder.join(format!("{index:08}.chunk"))
+}
+fn read_total(folder: &Path) -> io::Result<Option<u64>> {
+    let path = folder.join(".total");
+    if !private_file(&path)?.is_some_and(|metadata| metadata.len() == 8) {
+        return Ok(None);
+    }
+    let mut bytes = [0_u8; 8];
+    File::open(path)?.read_exact(&mut bytes)?;
+    let total = u64::from_le_bytes(bytes);
+    Ok((1..=MAX_MEDIA_BYTES).contains(&total).then_some(total))
+}
+/// Whether chunk `index` is stored whole.
+fn has_chunk(folder: &Path, total: u64, index: u64) -> io::Result<bool> {
+    let Some(len) = chunk_len(total, index) else {
+        return Ok(false);
+    };
+    Ok(private_file(&chunk_path(folder, index))?.is_some_and(|metadata| metadata.len() == len))
+}
+/// The bytes of a folder's chunks, which count toward the limit like PCM.
+fn chunk_bytes(folder: &Path) -> io::Result<u64> {
+    let mut bytes = 0_u64;
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".chunk"))
+            && let Some(metadata) = private_file(&entry.path())?
+        {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(bytes)
+}
+
+/// One track's original file in the cache, as the media decoder reads and
+/// fills it. Writes from a background download carry the cache's revision,
+/// so a clear or a new limit stops them.
+#[derive(Clone)]
+pub struct MediaStore {
+    cache: AudioCache,
+    key: CacheKey,
+    revision: Option<u64>,
+}
+impl MediaStore {
+    pub fn new(cache: AudioCache, key: CacheKey) -> Self {
+        Self {
+            cache,
+            key,
+            revision: None,
+        }
+    }
+    /// The same store for a background download: it stops at a cache change.
+    pub fn at_current_revision(&self) -> io::Result<Self> {
+        let (_, revision) = self.cache.policy()?;
+        Ok(Self {
+            revision: Some(revision),
+            ..self.clone()
+        })
+    }
+    /// Whether the cache has room for a whole file, by its policy.
+    pub fn fits(&self, total: u64) -> bool {
+        self.cache
+            .policy()
+            .is_ok_and(|(limit, _)| limit >= total.saturating_add(MEDIA_CHUNK))
+    }
+    pub fn pin(&self) -> CachePin {
+        self.cache.pin_media(&self.key)
+    }
+    /// The file's size once every chunk is stored.
+    pub fn complete(&self) -> Option<u64> {
+        self.cache.media_complete(&self.key).ok().flatten()
+    }
+    pub fn total(&self) -> Option<u64> {
+        self.cache.media_total(&self.key).ok().flatten()
+    }
+    pub fn read(&self, total: u64, index: u64) -> Option<Vec<u8>> {
+        self.cache
+            .read_media_chunk(&self.key, total, index)
+            .ok()
+            .flatten()
+    }
+    /// Store one chunk; false when it was not stored (no room, a changed
+    /// cache, a disk error). The player goes on either way.
+    pub fn write(&self, total: u64, index: u64, bytes: &[u8]) -> bool {
+        self.cache
+            .write_media_chunk(&self.key, total, index, bytes, self.revision)
+            .unwrap_or(false)
+    }
+    /// How far the stored chunks run on, without a gap, from `byte`.
+    pub fn contiguous_end(&self, byte: u64) -> u64 {
+        self.cache
+            .media_contiguous_end(&self.key, byte)
+            .unwrap_or(byte)
+    }
+    /// Whether the chunk holding `byte` is stored.
+    pub fn has_byte(&self, byte: u64) -> bool {
+        self.contiguous_end(byte) > byte
+    }
+    pub fn revision_current(&self) -> bool {
+        self.revision.is_none_or(|revision| {
+            self.cache
+                .policy()
+                .is_ok_and(|(_, current)| current == revision)
+        })
+    }
+}
+
 impl AudioCache {
     #[cfg(test)]
     pub(crate) fn test_at(root: PathBuf, limit: u64) -> io::Result<Self> {
@@ -324,8 +456,31 @@ impl AudioCache {
                 pins: HashMap::new(),
             }),
         }));
+        cache.forget_pcm_once()?;
         cache.set_limit(limit)?;
         Ok(cache)
+    }
+    /// Remove the decoded PCM of earlier versions, once: it filled the limit
+    /// ten times faster than the original files that replace it.
+    fn forget_pcm_once(&self) -> io::Result<()> {
+        let marker = self.0.root.join(MEDIA_FORMAT_MARKER);
+        if private_file(&marker)?.is_some() {
+            return Ok(());
+        }
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let mut removed = 0_u64;
+        for track in self.tracks()? {
+            if !segments(&track.path)?.is_empty() {
+                removed = removed.saturating_add(track.bytes);
+                fs::remove_dir_all(&track.path)?;
+            }
+        }
+        crate::diagnostics::event(
+            "cache",
+            &format!("old_pcm_removed mib={:.0}", removed as f64 / 1_048_576.0),
+        );
+        atomic_write(&marker, &[1])
     }
     fn process_lock(&self) -> io::Result<ProcessLock> {
         private_dir(&self.0.root, false)?;
@@ -354,7 +509,7 @@ impl AudioCache {
             };
             private_dir(&entry.path(), false)?;
             let parts = segments(&entry.path())?;
-            let mut bytes = 0_u64;
+            let mut bytes = chunk_bytes(&entry.path())?;
             for segment in &parts {
                 bytes =
                     bytes.saturating_add(private_file(&segment.path)?.ok_or_else(invalid)?.len());
@@ -420,6 +575,154 @@ impl AudioCache {
             inner: self.0.clone(),
             name,
         }
+    }
+    pub fn pin_media(&self, key: &CacheKey) -> CachePin {
+        let name = key.media_name().ok();
+        if let Some(name) = &name
+            && let Ok(mut state) = self.0.state.lock()
+        {
+            *state.pins.entry(name.clone()).or_default() += 1;
+        }
+        CachePin {
+            inner: self.0.clone(),
+            name,
+        }
+    }
+    pub fn media_total(&self, key: &CacheKey) -> io::Result<Option<u64>> {
+        let name = key.media_name()?;
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        private_dir(&path, false)?;
+        read_total(&path)
+    }
+    /// The file's size when every one of its chunks is stored.
+    pub fn media_complete(&self, key: &CacheKey) -> io::Result<Option<u64>> {
+        let name = key.media_name()?;
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        private_dir(&path, false)?;
+        let Some(total) = read_total(&path)? else {
+            return Ok(None);
+        };
+        for index in 0..total.div_ceil(MEDIA_CHUNK) {
+            if !has_chunk(&path, total, index)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(total))
+    }
+    pub fn media_contiguous_end(&self, key: &CacheKey, byte: u64) -> io::Result<u64> {
+        let name = key.media_name()?;
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(name);
+        if !path.exists() {
+            return Ok(byte);
+        }
+        private_dir(&path, false)?;
+        let Some(total) = read_total(&path)? else {
+            return Ok(byte);
+        };
+        let mut index = byte / MEDIA_CHUNK;
+        while has_chunk(&path, total, index)? {
+            index += 1;
+        }
+        Ok((index * MEDIA_CHUNK).min(total).max(byte))
+    }
+    pub fn read_media_chunk(
+        &self,
+        key: &CacheKey,
+        total: u64,
+        index: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let name = key.media_name()?;
+        let Some(len) = chunk_len(total, index) else {
+            return Err(invalid());
+        };
+        let _state = self.0.state.lock().map_err(|_| locked())?;
+        let _lock = self.process_lock()?;
+        let path = self.0.root.join(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        private_dir(&path, false)?;
+        if read_total(&path)? != Some(total) || !has_chunk(&path, total, index)? {
+            return Ok(None);
+        }
+        let mut bytes = vec![0; len as usize];
+        File::open(chunk_path(&path, index))?.read_exact(&mut bytes)?;
+        Self::touch(&path)?;
+        Ok(Some(bytes))
+    }
+    /// Store chunk `index` of a `total`-byte file. A file of another size
+    /// replaces what was kept (VK changed it); a full budget evicts older
+    /// tracks, and when that is not enough the chunk is not stored.
+    pub fn write_media_chunk(
+        &self,
+        key: &CacheKey,
+        total: u64,
+        index: u64,
+        bytes: &[u8],
+        revision: Option<u64>,
+    ) -> io::Result<bool> {
+        let name = key.media_name()?;
+        if !(1..=MAX_MEDIA_BYTES).contains(&total)
+            || chunk_len(total, index) != Some(bytes.len() as u64)
+        {
+            return Err(invalid());
+        }
+        let state = self.0.state.lock().map_err(|_| locked())?;
+        if revision.is_some_and(|revision| revision != state.revision) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Audio cache policy changed",
+            ));
+        }
+        let _lock = self.process_lock()?;
+        if state.limit == 0 {
+            return Ok(false);
+        }
+        let path = self.0.root.join(&name);
+        private_dir(&path, true)?;
+        match read_total(&path)? {
+            Some(known) if known == total => {}
+            known => {
+                if known.is_some() {
+                    for entry in fs::read_dir(&path)? {
+                        let entry = entry?;
+                        if entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.ends_with(".chunk"))
+                        {
+                            fs::remove_file(entry.path())?;
+                        }
+                    }
+                }
+                atomic_write(&path.join(".total"), &total.to_le_bytes())?;
+            }
+        }
+        if has_chunk(&path, total, index)? {
+            Self::touch(&path)?;
+            return Ok(true);
+        }
+        let length = bytes.len() as u64;
+        let target = state.limit.saturating_sub(length.min(state.limit));
+        let used = self.prune(&state, target, Some(&name), false)?;
+        if state.limit.saturating_sub(used) < length {
+            return Ok(false);
+        }
+        atomic_write(&chunk_path(&path, index), bytes)?;
+        Self::touch(&path)?;
+        Ok(true)
     }
     pub fn stats(&self) -> CacheStats {
         let Ok(state) = self.0.state.lock() else {
@@ -791,6 +1094,98 @@ mod tests {
         assert!(cache.mark_complete(&key(1), 10).is_err());
         assert!(cache.write_range(&key(1), 0, &[1]).is_err());
     }
+    fn chunk(index: u64, total: u64) -> Vec<u8> {
+        let len = chunk_len(total, index).unwrap();
+        (0..len).map(|byte| (byte + index) as u8).collect()
+    }
+
+    #[test]
+    fn media_chunks_store_a_whole_file_and_a_new_size_replaces_it() {
+        let directory = TestDirectory::new();
+        let cache = directory.cache(4 * MEDIA_CHUNK);
+        let total = 2 * MEDIA_CHUNK + 100;
+        let store = MediaStore::new(cache.clone(), key(1));
+        assert!(store.total().is_none() && store.complete().is_none());
+        assert!(store.write(total, 0, &chunk(0, total)));
+        assert!(store.write(total, 2, &chunk(2, total)));
+        assert_eq!(store.total(), Some(total));
+        assert!(store.complete().is_none());
+        assert_eq!(store.contiguous_end(0), MEDIA_CHUNK);
+        assert!(store.has_byte(2 * MEDIA_CHUNK + 50) && !store.has_byte(MEDIA_CHUNK));
+        assert!(store.read(total, 1).is_none());
+        assert!(store.write(total, 1, &chunk(1, total)));
+        assert_eq!(store.complete(), Some(total));
+        assert_eq!(store.read(total, 2), Some(chunk(2, total)));
+        assert_eq!(store.contiguous_end(10), total);
+        // A wrong length, or a chunk past the end, is refused.
+        assert!(!store.write(total, 1, &chunk(0, total)[..10]));
+        assert!(!store.write(total, 3, &[1]));
+        // The same file under another account or length is another track.
+        let mut other = key(1);
+        other.account_id += 1;
+        assert!(MediaStore::new(cache.clone(), other).total().is_none());
+        // VK sends a file of another size: what was kept goes.
+        assert!(store.write(MEDIA_CHUNK, 0, &chunk(0, MEDIA_CHUNK)));
+        assert_eq!(store.complete(), Some(MEDIA_CHUNK));
+        assert!(store.read(total, 2).is_none());
+        // The PCM of the same track lives apart and is untouched.
+        cache.write_range(&key(1), 0, &bytes(0, 4)).unwrap();
+        assert_eq!(store.complete(), Some(MEDIA_CHUNK));
+        assert_eq!(cache.ranges(&key(1)).unwrap(), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn media_chunks_share_the_limit_eviction_and_pins_with_pcm() {
+        let directory = TestDirectory::new();
+        let cache = directory.cache(2 * MEDIA_CHUNK);
+        let total = MEDIA_CHUNK;
+        let first = MediaStore::new(cache.clone(), key(1));
+        let second = MediaStore::new(cache.clone(), key(2));
+        let third = MediaStore::new(cache.clone(), key(3));
+        assert!(first.write(total, 0, &chunk(0, total)));
+        let pin = first.pin();
+        assert!(second.write(total, 0, &chunk(0, total)));
+        // Full: the oldest unpinned track makes room, the pinned one stays.
+        assert!(third.write(total, 0, &chunk(0, total)));
+        assert!(first.complete().is_some() && second.complete().is_none());
+        assert!(third.complete().is_some());
+        assert!(cache.stats().used_bytes <= 2 * MEDIA_CHUNK);
+        drop(pin);
+        cache.set_limit(MEDIA_CHUNK / 2).unwrap();
+        assert!(cache.stats().used_bytes <= MEDIA_CHUNK / 2);
+        // A chunk larger than the whole limit is not stored at all.
+        assert!(!first.write(total, 0, &chunk(0, total)));
+        cache.set_limit(2 * MEDIA_CHUNK).unwrap();
+        assert!(first.write(total, 0, &chunk(0, total)));
+        // A clear stops a download that started before it.
+        let download = first.at_current_revision().unwrap();
+        cache.clear().unwrap();
+        assert_eq!(cache.stats().used_bytes, 0);
+        assert!(!download.write(total, 0, &chunk(0, total)));
+        assert!(first.write(total, 0, &chunk(0, total)));
+    }
+
+    #[test]
+    fn old_decoded_pcm_is_removed_once_and_original_files_stay() {
+        let directory = TestDirectory::new();
+        let root = directory.0.join("audio");
+        let cache = directory.cache(4 * MEDIA_CHUNK);
+        let store = MediaStore::new(cache.clone(), key(2));
+        assert!(store.write(MEDIA_CHUNK, 0, &chunk(0, MEDIA_CHUNK)));
+        cache.write_range(&key(1), 0, &bytes(0, 4)).unwrap();
+        // As an older version left it: PCM, and no marker yet.
+        fs::remove_file(root.join(MEDIA_FORMAT_MARKER)).unwrap();
+        drop(cache);
+        let cache = directory.cache(4 * MEDIA_CHUNK);
+        assert!(cache.ranges(&key(1)).unwrap().is_empty());
+        assert_eq!(store.complete(), Some(MEDIA_CHUNK));
+        // Later PCM (an HLS track) is kept on the next start.
+        cache.write_range(&key(1), 0, &bytes(0, 4)).unwrap();
+        drop(cache);
+        let cache = directory.cache(4 * MEDIA_CHUNK);
+        assert_eq!(cache.ranges(&key(1)).unwrap(), vec![(0, 4)]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_files_and_symlink_rejection() {

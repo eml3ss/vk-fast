@@ -2632,8 +2632,16 @@ impl MusicApp {
                     if cancel.load(Ordering::Acquire) {
                         return Err(UiError::Interrupted);
                     }
+                    // The original file kept whole plays from disk too.
+                    let media = !complete
+                        && cache.as_ref().is_some_and(|cache| {
+                            cache.media_complete(&cache_key).ok().flatten().is_some()
+                        });
                     let url = if complete {
                         crate::diagnostics::event("playback", "resolve: complete_pcm_cache");
+                        None
+                    } else if media {
+                        crate::diagnostics::event("playback", "resolve: complete_media_cache");
                         None
                     } else if let Some(music) = music {
                         crate::diagnostics::event("playback", "resolve: vk_session");

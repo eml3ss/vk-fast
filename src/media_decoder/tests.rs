@@ -353,7 +353,7 @@ fn direct_http_range_and_no_range_sources_decode_seek_and_keep_credentials_priva
     ]));
     for path in ["tone.wav", "no-range.wav"] {
         let (source, origin) =
-            source::from_net(server.net(), server.url.join(path).unwrap(), 0.5).unwrap();
+            source::from_net(server.net(), server.url.join(path).unwrap(), 0.5, None).unwrap();
         let actual = decode(source, origin, 0.5);
         assert_eq!(actual.len(), reference.len());
         assert!(
@@ -414,4 +414,101 @@ fn a_missing_hls_segment_is_logged_with_where_and_why_but_no_address() {
         !log.contains("127.0.0.1") && !log.contains("segment04"),
         "{log}"
     );
+}
+
+fn media_store(
+    directory: &std::path::Path,
+) -> (
+    crate::audio_cache::AudioCache,
+    crate::audio_cache::MediaStore,
+) {
+    let cache =
+        crate::audio_cache::AudioCache::test_at(directory.join("audio"), 64 * 1024 * 1024).unwrap();
+    let key = crate::audio_cache::CacheKey {
+        account_id: 42,
+        owner_id: -7,
+        track_id: 9,
+        duration: 36,
+    };
+    let store = crate::audio_cache::MediaStore::new(cache.clone(), key);
+    (cache, store)
+}
+/// Three copies of the tone: more than one 256 KiB chunk. Its header still
+/// says 12 seconds, which is what the decoder plays.
+fn long_tone() -> Vec<u8> {
+    std::fs::read(fixture("tone.mp3")).unwrap().repeat(3)
+}
+
+#[test]
+fn a_played_mp3_is_kept_whole_and_plays_again_from_disk_alone() {
+    let file = long_tone();
+    assert!(file.len() as u64 > crate::audio_cache::MEDIA_CHUNK);
+    let server = Server::new(HashMap::from([("/track.mp3".into(), file.clone())]));
+    let directory = tempfile::tempdir().unwrap();
+    let (_cache, store) = media_store(directory.path());
+    let url = server.url.join("track.mp3").unwrap();
+    assert!(source::stored(store.clone(), 0.0).is_none());
+    let (input, origin) =
+        source::from_net(server.net(), url.clone(), 0.0, Some(store.clone())).unwrap();
+    let online = decode(input, origin, 0.0);
+    // Every chunk the decoder read is stored: the whole file.
+    assert_eq!(store.complete(), Some(file.len() as u64));
+    drop(server);
+    // No server now: the stored file decodes to the very same samples, and
+    // a seek inside it lands where it does online.
+    let offline = decode(source::stored(store.clone(), 0.0).unwrap(), 0.0, 0.0);
+    assert_eq!(offline, online);
+    let tail = decode(source::stored(store.clone(), 8.0).unwrap(), 0.0, 8.0);
+    let reference = &online[8 * 48000 * 2..];
+    assert!((tail.len() / 2).abs_diff(reference.len() / 2) < 64);
+    // A chunk lost since (a cleared cache) is an error, not silence.
+    let path = directory.path().join("audio");
+    for entry in std::fs::read_dir(&path).unwrap() {
+        let folder = entry.unwrap().path();
+        if folder.is_dir() {
+            let _ = std::fs::remove_file(folder.join("00000001.chunk"));
+        }
+    }
+    assert!(store.complete().is_none());
+}
+
+#[test]
+fn a_background_download_stores_the_file_and_skips_playlists() {
+    let file = long_tone();
+    let playlist = b"#EXTM3U\n#EXT-X-ENDLIST\n".to_vec();
+    let server = Server::new(HashMap::from([
+        ("/track.mp3".into(), file.clone()),
+        ("/index.m3u8".into(), playlist),
+    ]));
+    let directory = tempfile::tempdir().unwrap();
+    let (cache, store) = media_store(directory.path());
+    let url = server.url.join("track.mp3").unwrap();
+    source::download(
+        server.net(),
+        url.as_str(),
+        &store.at_current_revision().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(store.complete(), Some(file.len() as u64));
+    let bytes = decode(source::stored(store.clone(), 0.0).unwrap(), 0.0, 0.0);
+    assert!((bytes.len() / 2).abs_diff(12 * 48000) < 4800);
+    // A cleared cache stops a download that started before it.
+    cache.clear().unwrap();
+    let stale = store.at_current_revision().unwrap();
+    cache.clear().unwrap();
+    assert!(source::download(server.net(), url.as_str(), &stale).is_err());
+    assert!(store.complete().is_none());
+    // A playlist is not a file to keep.
+    let other = crate::audio_cache::MediaStore::new(
+        cache.clone(),
+        crate::audio_cache::CacheKey {
+            account_id: 42,
+            owner_id: -7,
+            track_id: 10,
+            duration: 36,
+        },
+    );
+    let playlist_url = server.url.join("index.m3u8").unwrap();
+    source::download(server.net(), playlist_url.as_str(), &other).unwrap();
+    assert!(other.total().is_none());
 }

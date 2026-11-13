@@ -901,16 +901,21 @@ fn check_audio_cache() -> Result<(), String> {
     wait_audio(&player, |snapshot| {
         matches!(snapshot.state, PlaybackState::Playing) && snapshot.position > 0.3
     })?;
-    let starts = player.decoder_starts();
+    // A plain file (MP3) is kept as VK's original file: it downloads in the
+    // background while playing, and seeks within it read the disk.
+    let stored = || cache.media_complete(&key).ok().flatten().is_some();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !stored() {
+        if std::time::Instant::now() >= deadline {
+            return Err("Трек не загрузился в кэш целиком за минуту.".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     for target in [10.0, 20.0, 30.0, 40.0] {
-        wait_audio(&player, |snapshot| snapshot.buffered_until > target + 1.0)?;
         player.seek(target);
         wait_audio(&player, |snapshot| {
             matches!(snapshot.state, PlaybackState::Playing) && snapshot.position > target + 0.15
         })?;
-    }
-    if player.decoder_starts() != starts {
-        return Err("Перемотка по готовому аудио перезапустила декодер.".into());
     }
     player.pause();
     wait_audio(&player, |snapshot| {
@@ -920,35 +925,25 @@ fn check_audio_cache() -> Result<(), String> {
     wait_audio(&player, |snapshot| {
         matches!(snapshot.state, PlaybackState::Paused) && (snapshot.position - 1.0).abs() < 0.005
     })?;
-    if player.decoder_starts() != starts {
-        return Err("Возврат на старый участок дискового кэша перезапустил декодер.".into());
-    }
     player.stop();
     drop(player);
-    if let Some(end) = cache
-        .complete_frames(&key)
-        .map_err(|_| "Не удалось проверить окончание кэша.")?
-        && !cache
-            .contains_range(&key, 0, end)
-            .map_err(|_| "Не удалось проверить диапазоны кэша.")?
-    {
-        return Err("В полностью загруженном треке обнаружен пропуск кэша.".into());
-    }
     drop(cache);
     let cache =
         AudioCache::new(DEFAULT_LIMIT_BYTES).map_err(|_| "Не удалось заново открыть аудиокэш.")?;
+    if cache.media_complete(&key).ok().flatten().is_none() {
+        return Err("После повторного открытия кэша трек в нём неполон.".into());
+    }
+    // Without a link at all: only the disk can play it.
     let mut replay = Player::with_cache(cache);
     replay.set_volume(0.0);
-    replay.play_cached(key, Some(url), 1.0);
+    replay.play_cached(key, None, 1.0);
     wait_audio(&replay, |snapshot| {
         matches!(snapshot.state, PlaybackState::Playing) && snapshot.position > 1.3
     })?;
-    if replay.decoder_starts() != 0 {
-        return Err("Повторное воспроизведение старого участка не использовало диск.".into());
-    }
     replay.stop();
+    drop(url);
     println!(
-        "Дисковый кэш работает: возврат с 40-й на 1-ю секунду и повторное открытие кэша не запускают декодер. Проверка выполнена без звука."
+        "Дисковый кэш работает: трек сохранён целиком, перемотка по нему и повторное воспроизведение без ссылки идут с диска. Проверка выполнена без звука."
     );
     Ok(())
 }
