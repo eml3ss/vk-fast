@@ -364,6 +364,16 @@ fn collection_header(
         egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size))
     };
     let bottom = if wide { art.bottom() } else { inner.bottom() };
+    // The cover rests on the card with a soft shadow beneath it.
+    ui.painter().add(
+        egui::Shadow {
+            offset: [0, 8],
+            blur: 28,
+            spread: 0,
+            color: Color32::from_black_alpha(150),
+        }
+        .as_shape(art, 6),
+    );
     artwork(ui, covers, art, view.image_url, "album-cover");
     if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
         cover_viewer(ui, covers, art, url, view.language);
@@ -1008,15 +1018,16 @@ fn cover_viewer(
     ui.data_mut(|data| data.insert_temp(id, frame));
     let screen = ui.ctx().content_rect();
     let size = (screen.width().min(screen.height()) * 0.82).clamp(120.0, 512.0);
-    // A soft drop shadow lifts the cover off the darkened page.
+    // A deep drop shadow lifts the cover off the page; the page is dimmed a
+    // little less than black so the shadow shows on it.
     let modal = egui::Modal::new(id.with("modal"))
         .frame(egui::Frame::NONE.corner_radius(10).shadow(egui::Shadow {
-            offset: [0, 12],
-            blur: 48,
-            spread: 2,
-            color: Color32::from_black_alpha(220),
+            offset: [0, 18],
+            blur: 72,
+            spread: 10,
+            color: Color32::BLACK,
         }))
-        .backdrop_color(Color32::from_black_alpha(205))
+        .backdrop_color(Color32::from_black_alpha(165))
         .show(ui.ctx(), |ui| {
             let image = covers.show_high_resolution(ui, Some(url), Some(url), size, 10);
             ui.interact(image.rect, id.with("image"), Sense::click())
