@@ -1022,9 +1022,9 @@ fn cover_viewer(
     // little less than black so the shadow shows on it.
     let modal = egui::Modal::new(id.with("modal"))
         .frame(egui::Frame::NONE.corner_radius(10).shadow(egui::Shadow {
-            offset: [0, 15],
-            blur: 60,
-            spread: 6,
+            offset: [0, 18],
+            blur: 72,
+            spread: 10,
             color: Color32::BLACK,
         }))
         .backdrop_color(Color32::from_black_alpha(165))
