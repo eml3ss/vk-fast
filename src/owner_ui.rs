@@ -262,7 +262,7 @@ fn header(
     let small = egui::TextStyle::Small.resolve(ui.style());
     let title_font = FontId::new(if width >= 520.0 { 30.0 } else { 24.0 }, theme::semibold());
     // The title's letters sit midway between the kicker and the line below.
-    let (above, below) = (10.5, 7.5);
+    let (above, below) = (9.0, 9.0);
     // The letters, not the line boxes, are centred on the avatar: from the
     // top of the kicker's capitals to the baseline of the last line.
     let lay = |text: &str, font: &FontId| {
@@ -587,6 +587,25 @@ mod tests {
             let baseline = total.y + row.pos.y + row.row.glyphs[0].pos.y;
             let middle = (cap_top + baseline) * 0.5;
             assert!((middle - 91.0).abs() < 1.0, "{middle}");
+            // Capital tops and baselines of each line.
+            let span = |label: &str| {
+                let (pos, galley) = text(label);
+                let row = &galley.rows[0];
+                let base = pos.y + row.pos.y + row.row.glyphs[0].pos.y;
+                let top = row
+                    .row
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| glyph.chr.is_uppercase())
+                    .map(|glyph| pos.y + row.pos.y + glyph.pos.y + glyph.uv_rect.offset.y)
+                    .fold(f32::INFINITY, f32::min);
+                (top, base)
+            };
+            let (_, kicker_base) = span("VK COMMUNITY");
+            let (name_top, name_base) = span("Test community");
+            let (total_top, _) = span("Playlists: 3");
+            let (above, below) = (name_top - kicker_base, total_top - name_base);
+            assert!((above - below).abs() < 1.0, "{above} {below}");
         }
     }
 
