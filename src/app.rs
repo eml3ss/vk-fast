@@ -7448,11 +7448,13 @@ impl MusicApp {
             self.player.snapshot().state,
             PlaybackState::Playing | PlaybackState::Loading
         );
-        let playing = active
-            && self
-                .playing
-                .as_ref()
-                .is_some_and(|playing| tracks.iter().any(|track| track.key() == playing.key()));
+        // The current track (playing or paused) is one of this page's: Play
+        // resumes it instead of starting the page over.
+        let current = self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| tracks.iter().any(|track| track.key() == playing.key()));
+        let playing = active && current;
         let (artist, artist_image, albums, album, album_artists, year) = match (&page, data) {
             (_, Some(DetailPage::Artist(data))) => (
                 Some(data.artist.clone()),
@@ -7773,7 +7775,7 @@ impl MusicApp {
             Some(detail_ui::Action::OpenCreator(creator)) if creator.owner_id != 0 => {
                 self.navigate_music(&ctx, MusicPage::Owner(creator));
             }
-            Some(detail_ui::Action::Play) if playing => self.toggle_playback(&ctx),
+            Some(detail_ui::Action::Play) if current => self.toggle_playback(&ctx),
             Some(detail_ui::Action::Play | detail_ui::Action::Shuffle) if !tracks.is_empty() => {
                 self.leave_mix();
                 if matches!(action, Some(detail_ui::Action::Shuffle)) {

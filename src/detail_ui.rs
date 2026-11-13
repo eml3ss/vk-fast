@@ -390,7 +390,9 @@ fn collection_header(
         ),
     );
     kicker(&mut text, kind);
-    text.add_space(if wide { 12.0 } else { 2.0 });
+    // Wide, the title's letters sit midway between the kicker and the
+    // artist line (29 px above and 23 below before).
+    text.add_space(if wide { 9.0 } else { 2.0 });
     text.add(
         egui::Label::new(
             RichText::new(view.title)
@@ -400,7 +402,7 @@ fn collection_header(
         .truncate()
         .selectable(false),
     );
-    text.add_space(3.0);
+    text.add_space(if wide { 6.0 } else { 3.0 });
     let mut action = if playlist {
         view.creator
             .and_then(|creator| playlist_creator(&mut text, view.language, creator))
