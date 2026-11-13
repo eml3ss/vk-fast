@@ -1,6 +1,7 @@
 //! The last Home and library sidebar, shown at startup before VK answers and
 //! replaced by the fresh pages as soon as they arrive. Only display metadata
-//! is stored: no access keys, audio links or tracks.
+//! is stored: no access keys or audio links, and of tracks only the few a
+//! friend's card shows, as their title, artists, length and cover.
 use std::io;
 
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,30 @@ pub struct Friend {
     pub owner_photo: Option<String>,
     pub match_percent: Option<u8>,
     pub color: Option<[u8; 3]>,
+    /// The tracks on the card; an older snapshot has none.
+    #[serde(default)]
+    pub tracks: Vec<FriendTrack>,
 }
+
+/// A track as a friend's card shows it: no link, no access key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendTrack {
+    pub owner_id: i64,
+    pub id: i64,
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    pub artist: String,
+    #[serde(default)]
+    pub artists: Vec<(String, String)>,
+    pub duration: u32,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub explicit: bool,
+}
+/// The most tracks a friend's card shows.
+pub const FRIEND_TRACKS: usize = 3;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Home {
@@ -216,6 +240,46 @@ mod tests {
         assert_eq!(restored.data, home);
         assert_eq!(restored.account_id, 42);
         assert!(!String::from_utf8(bytes).unwrap().contains("access"));
+    }
+
+    #[test]
+    fn friends_keep_their_card_tracks_without_links_and_old_snapshots_still_load() {
+        let home = Home {
+            friends: vec![Friend {
+                owner_id: 7,
+                playlist_id: 3,
+                title: "Synthetic friend list".into(),
+                tracks: vec![FriendTrack {
+                    owner_id: 7,
+                    id: 11,
+                    title: "Synthetic track".into(),
+                    artist: "Synthetic artist".into(),
+                    artists: vec![("1".into(), "Synthetic artist".into())],
+                    duration: 120,
+                    explicit: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&Stored {
+            format_version: FORMAT_VERSION,
+            account_id: 42,
+            data: &home,
+        })
+        .unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("url\":\"http") && !text.contains("access"));
+        let restored: Stored<Home> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.data, home);
+        // A snapshot from before card tracks were kept.
+        let old = r#"{"format_version":1,"account_id":42,"data":{"cards":[],"genres":[],
+            "moods":[],"artist_mixes":[],"friends":[{"owner_id":7,"playlist_id":3,
+            "title":"T","cover_url":null,"owner_name":"N","owner_photo":null,
+            "match_percent":90,"color":null}]}}"#;
+        let restored: Stored<Home> = serde_json::from_str(old).unwrap();
+        assert!(restored.data.friends[0].tracks.is_empty());
     }
 
     #[test]

@@ -11,6 +11,33 @@ pub(super) type Snapshot = (
     Option<screen_cache::AlbumNames>,
 );
 
+/// A friend's card track from the snapshot: what it shows, nothing to play
+/// it with; VK's fresh answer replaces it.
+fn friend_track(track: screen_cache::FriendTrack) -> Track {
+    Track {
+        id: track.id,
+        owner_id: track.owner_id,
+        artist: track.artist,
+        title: track.title,
+        subtitle: track.subtitle,
+        duration: track.duration,
+        url: None,
+        cover_url: track.cover_url,
+        artists: track
+            .artists
+            .into_iter()
+            .map(|(id, name)| ArtistRef { id, name })
+            .collect(),
+        album: None,
+        library_liked: None,
+        release_key: None,
+        library_source_key: None,
+        unavailable: None,
+        added: None,
+        explicit: track.explicit,
+    }
+}
+
 fn playlist_key(reference: &AlbumRef) -> String {
     format!("{}_{}", reference.owner_id, reference.id)
 }
@@ -152,7 +179,7 @@ impl MusicApp {
                         owner_photo: friend.owner_photo,
                         match_percent: friend.match_percent,
                         color: friend.color,
-                        tracks: Vec::new(),
+                        tracks: friend.tracks.into_iter().map(friend_track).collect(),
                     })
                     .collect();
             }
@@ -337,6 +364,26 @@ impl MusicApp {
                     owner_photo: friend.owner_photo.clone(),
                     match_percent: friend.match_percent,
                     color: friend.color,
+                    tracks: friend
+                        .tracks
+                        .iter()
+                        .take(screen_cache::FRIEND_TRACKS)
+                        .map(|track| screen_cache::FriendTrack {
+                            owner_id: track.owner_id,
+                            id: track.id,
+                            title: track.title.clone(),
+                            subtitle: track.subtitle.clone(),
+                            artist: track.artist.clone(),
+                            artists: track
+                                .artists
+                                .iter()
+                                .map(|artist| (artist.id.clone(), artist.name.clone()))
+                                .collect(),
+                            duration: track.duration,
+                            cover_url: track.cover_url.clone(),
+                            explicit: track.explicit,
+                        })
+                        .collect(),
                 })
                 .collect(),
         };

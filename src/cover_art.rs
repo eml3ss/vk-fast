@@ -25,6 +25,9 @@ use crate::{
 };
 
 const WORKERS: usize = 3;
+/// Threads that only look on disk: a stored cover never waits behind a
+/// download, so what was seen before shows at once on the next start.
+const DISK_WORKERS: usize = 2;
 const MAX_PENDING: usize = 48;
 const MAX_TEXTURES: usize = 128;
 const MAX_HIGH_RES_TEXTURES: usize = 2;
@@ -112,8 +115,26 @@ impl CoverCache {
         });
         let mut workers = Vec::new();
         if enabled {
-            for index in 0..WORKERS {
+            // Every request is looked up on disk first; only misses queue for
+            // the network.
+            let (network_sender, network) = mpsc::sync_channel::<Job>(MAX_PENDING);
+            let network = Arc::new(Mutex::new(network));
+            for index in 0..DISK_WORKERS {
                 let receiver = receiver.clone();
+                let network = network_sender.clone();
+                let replies = reply_sender.clone();
+                let canceled = canceled.clone();
+                let disk = disk.clone();
+                if let Ok(worker) = thread::Builder::new()
+                    .name(format!("vk-cover-disk-{index}"))
+                    .spawn(move || disk_worker(receiver, network, replies, canceled, disk))
+                {
+                    workers.push(worker);
+                }
+            }
+            drop(network_sender);
+            for index in 0..WORKERS {
+                let receiver = network.clone();
                 let replies = reply_sender.clone();
                 let canceled = canceled.clone();
                 let client = client.clone();
@@ -605,6 +626,46 @@ impl Drop for CoverCache {
     }
 }
 
+fn disk_worker(
+    jobs: Arc<Mutex<Receiver<Job>>>,
+    network: SyncSender<Job>,
+    replies: SyncSender<Reply>,
+    canceled: Arc<AtomicBool>,
+    disk: Arc<DiskCache>,
+) {
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            break;
+        }
+        let job = match jobs.lock() {
+            Ok(receiver) => match receiver.recv() {
+                Ok(job) => job,
+                Err(_) => break,
+            },
+            Err(_) => break,
+        };
+        let Some(image) = load_cached(&disk, &job.key.url, job.key.edge) else {
+            if network.send(job).is_err() {
+                break;
+            }
+            continue;
+        };
+        let color = representative_color(&image);
+        if canceled.load(Ordering::Acquire)
+            || replies
+                .send(Reply {
+                    key: job.key,
+                    image: Some(image),
+                    color,
+                })
+                .is_err()
+        {
+            break;
+        }
+        job.context.request_repaint();
+    }
+}
+
 fn worker(
     jobs: Arc<Mutex<Receiver<Job>>>,
     replies: SyncSender<Reply>,
@@ -876,18 +937,14 @@ fn texture_edge(size: f32) -> u32 {
     }
 }
 
-fn load_cover(
-    disk: &DiskCache,
-    url: &str,
-    edge: u32,
-    fetcher: impl FnOnce() -> Result<ColorImage, ()>,
-) -> Result<ColorImage, ()> {
+/// The cover from disk alone, if it is there.
+fn load_cached(disk: &DiskCache, url: &str, edge: u32) -> Option<ColorImage> {
     // A larger existing thumbnail satisfies a smaller view without HTTP.
     // Square thumbnails never stand in for a proportional image.
     let keep_aspect = edge & KEEP_ASPECT != 0;
     if keep_aspect && let Ok(bytes) = disk.load(url, edge) {
         if let Ok(image) = decode_sized(&bytes, edge) {
-            return Ok(image);
+            return Some(image);
         }
         disk.remove(url, edge);
     }
@@ -897,11 +954,24 @@ fn load_cover(
     {
         if let Ok(bytes) = disk.load(url, candidate) {
             if let Ok(image) = decode_sized(&bytes, edge) {
-                return Ok(image);
+                return Some(image);
             }
             disk.remove(url, candidate);
         }
     }
+    None
+}
+
+fn load_cover(
+    disk: &DiskCache,
+    url: &str,
+    edge: u32,
+    fetcher: impl FnOnce() -> Result<ColorImage, ()>,
+) -> Result<ColorImage, ()> {
+    if let Some(image) = load_cached(disk, url, edge) {
+        return Ok(image);
+    }
+    let keep_aspect = edge & KEEP_ASPECT != 0;
     match fetcher() {
         Ok(image) => {
             if let Ok(bytes) = jpeg(&image) {
@@ -1523,6 +1593,22 @@ mod tests {
             url: small.into(),
             edge: 96
         }));
+    }
+
+    #[test]
+    fn a_stored_cover_is_found_on_disk_without_the_network() {
+        let fixture = CacheFixture::new();
+        let disk = fixture.disk();
+        let url = "https://images.example.test/card.jpg";
+        let edge = 512 | KEEP_ASPECT;
+        assert!(load_cached(&disk, url, edge).is_none());
+        let image = ColorImage::filled([8, 4], Color32::RED);
+        load_cover(&disk, url, edge, || Ok(image)).unwrap();
+        // What the disk stage answers on the next start, network or not.
+        let stored = load_cached(&disk, url, edge).unwrap();
+        assert_eq!(stored.size, [8, 4]);
+        // A proportional picture never stands in for a square cover.
+        assert!(load_cached(&disk, url, 96).is_none());
     }
 
     #[test]
