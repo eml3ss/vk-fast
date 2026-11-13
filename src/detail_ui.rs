@@ -353,13 +353,23 @@ fn collection_header(
         None
     };
     background(ui.painter(), rect, color);
-    let art = egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size));
+    // Wide, the cover sits in the middle of the card's height, and the text
+    // and buttons beside it span exactly its top to its bottom.
+    let art = if wide {
+        egui::Rect::from_min_size(
+            egui::pos2(inner.left(), rect.center().y - art_size * 0.5),
+            egui::Vec2::splat(art_size),
+        )
+    } else {
+        egui::Rect::from_min_size(inner.min, egui::Vec2::splat(art_size))
+    };
+    let bottom = if wide { art.bottom() } else { inner.bottom() };
     artwork(ui, covers, art, view.image_url, "album-cover");
     if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
         cover_viewer(ui, covers, art, url, view.language);
     }
     let text_origin = if wide {
-        egui::pos2(art.right() + 24.0, inner.top() + 4.0)
+        egui::pos2(art.right() + 24.0, art.top() + 2.0)
     } else {
         egui::pos2(inner.left(), art.bottom() + 14.0)
     };
@@ -375,7 +385,7 @@ fn collection_header(
                     } else {
                         0.0
                     },
-                inner.bottom() - 45.0,
+                bottom - 45.0,
             ),
         ),
     );
@@ -407,7 +417,10 @@ fn collection_header(
     let mut buttons = child(
         ui,
         "album-controls",
-        egui::Rect::from_min_max(egui::pos2(text_origin.x, inner.bottom() - 38.0), inner.max),
+        egui::Rect::from_min_max(
+            egui::pos2(text_origin.x, bottom - 38.0),
+            egui::pos2(inner.right(), bottom),
+        ),
     );
     action = controls(
         &mut buttons,
