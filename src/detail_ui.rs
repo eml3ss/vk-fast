@@ -367,10 +367,10 @@ fn collection_header(
     // The cover rests on the card with a soft shadow beneath it.
     ui.painter().add(
         egui::Shadow {
-            offset: [0, 8],
-            blur: 28,
+            offset: [0, 7],
+            blur: 24,
             spread: 0,
-            color: Color32::from_black_alpha(150),
+            color: Color32::from_black_alpha(130),
         }
         .as_shape(art, 6),
     );
@@ -1022,9 +1022,9 @@ fn cover_viewer(
     // little less than black so the shadow shows on it.
     let modal = egui::Modal::new(id.with("modal"))
         .frame(egui::Frame::NONE.corner_radius(10).shadow(egui::Shadow {
-            offset: [0, 18],
-            blur: 72,
-            spread: 10,
+            offset: [0, 15],
+            blur: 60,
+            spread: 6,
             color: Color32::BLACK,
         }))
         .backdrop_color(Color32::from_black_alpha(165))
