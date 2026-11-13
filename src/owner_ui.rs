@@ -256,25 +256,49 @@ fn header(
     } else {
         &creator.name
     };
-    let total = page.and_then(|page| page.total);
+    let total = page
+        .and_then(|page| page.total)
+        .map(|total| format!("{}: {total}", language.text("Плейлисты", "Playlists")));
     let small = egui::TextStyle::Small.resolve(ui.style());
     let title_font = FontId::new(if width >= 520.0 { 30.0 } else { 24.0 }, theme::semibold());
     // The title's letters sit midway between the kicker and the line below.
     let (above, below) = (10.5, 7.5);
-    // The text column is centred on the avatar's height.
-    let (small_row, title_row) =
-        ui.fonts_mut(|fonts| (fonts.row_height(&small), fonts.row_height(&title_font)));
+    // The letters, not the line boxes, are centred on the avatar: from the
+    // top of the kicker's capitals to the baseline of the last line.
+    let lay = |text: &str, font: &FontId| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+    };
+    let kicker_galley = lay(kicker, &small);
+    let cap_top = kicker_galley
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.row
+                .glyphs
+                .iter()
+                .map(move |glyph| row.pos.y + glyph.pos.y + glyph.uv_rect.offset.y)
+        })
+        .fold(f32::INFINITY, f32::min);
+    let cap_top = if cap_top.is_finite() { cap_top } else { 0.0 };
+    let baseline = |galley: &std::sync::Arc<egui::Galley>| {
+        galley
+            .rows
+            .first()
+            .and_then(|row| row.row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
+            .unwrap_or(galley.size().y)
+    };
+    let title_galley = lay(name, &title_font);
     // egui also puts its item spacing between each pair of lines.
     let gap = ui.spacing().item_spacing.y;
-    let column = small_row
-        + gap
-        + above
-        + title_row
-        + if total.is_some() {
-            gap + below + small_row
-        } else {
-            0.0
-        };
+    let title_top = kicker_galley.size().y + gap + above;
+    let last_baseline = match &total {
+        Some(total) => {
+            title_top + title_galley.size().y + gap + below + baseline(&lay(total, &small))
+        }
+        None => title_top + baseline(&title_galley),
+    };
+    let column = cap_top + last_baseline;
     let text_rect = egui::Rect::from_min_max(
         egui::pos2(art.right() + 20.0, art.center().y - column * 0.5),
         egui::pos2(rect.right() - 20.0, rect.bottom() - 20.0),
@@ -315,14 +339,7 @@ fn header(
     text.allocate_exact_size(egui::vec2(0.0, title.min_rect().height()), Sense::hover());
     if let Some(total) = total {
         text.add_space(below);
-        text.label(
-            RichText::new(format!(
-                "{}: {total}",
-                language.text("Плейлисты", "Playlists")
-            ))
-            .small()
-            .color(theme::muted()),
-        );
+        text.label(RichText::new(total).small().color(theme::muted()));
     }
 }
 
@@ -558,11 +575,17 @@ mod tests {
                 pos.x + glyph.pos.x + glyph.uv_rect.offset.x
             };
             assert!((ink("Test community") - ink("VK COMMUNITY")).abs() < 0.75);
-            let (kicker, _) = text("VK COMMUNITY");
+            let (kicker, kicker_galley) = text("VK COMMUNITY");
             let (total, total_galley) = text("Playlists: 3");
             assert_eq!(total.x, kicker.x);
-            // The header is 182 points tall from the top of the window.
-            let middle = (kicker.y + total.y + total_galley.size().y) * 0.5;
+            // From the top of the kicker's capitals to the last baseline, the
+            // letters are centred on the 182-point header.
+            let row = &kicker_galley.rows[0];
+            let glyph = &row.row.glyphs[0];
+            let cap_top = kicker.y + row.pos.y + glyph.pos.y + glyph.uv_rect.offset.y;
+            let row = &total_galley.rows[0];
+            let baseline = total.y + row.pos.y + row.row.glyphs[0].pos.y;
+            let middle = (cap_top + baseline) * 0.5;
             assert!((middle - 91.0).abs() < 1.0, "{middle}");
         }
     }
