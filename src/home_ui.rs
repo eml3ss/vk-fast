@@ -454,18 +454,39 @@ fn friend_card(
     let height = friend_card_height(friend);
     let (rect, response) = card(ui, egui::vec2(width, height), &friend.playlist.title);
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(width, FRIEND_HEADER));
-    if let Some([red, green, blue]) = friend.color {
+    // VK's own picture for the playlist fills the header, rounded at the
+    // bottom as at the top; a light shade keeps the white text readable.
+    let pictured = friend
+        .playlist
+        .cover_url
+        .as_deref()
+        .is_some_and(|url| covers.paint_fill(ui, url, header, 12));
+    if pictured {
+        ui.painter()
+            .rect_filled(header, 12.0, Color32::from_black_alpha(56));
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                12.0,
+                Stroke::new(1.0, theme::primary()),
+                egui::StrokeKind::Inside,
+            );
+        }
+    } else if let Some([red, green, blue]) = friend.color {
         ui.painter().rect_filled(
             header,
-            egui::CornerRadius {
-                nw: 12,
-                ne: 12,
-                sw: 0,
-                se: 0,
-            },
+            12.0,
             Color32::from_rgba_unmultiplied(red, green, blue, 46),
         );
     }
+    // On the picture the text is white in every theme.
+    let on_picture = |usual: Color32, alpha: u8| {
+        if pictured {
+            Color32::from_white_alpha(alpha)
+        } else {
+            usual
+        }
+    };
     let mut text = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("home-friend-text")
@@ -482,7 +503,10 @@ fn friend_card(
                     language.text("совпадение с вашим вкусом", "match with your taste")
                 ))
                 .small()
-                .color(theme::tone(Color32::from_rgb(196, 210, 230))),
+                .color(on_picture(
+                    theme::tone(Color32::from_rgb(196, 210, 230)),
+                    235,
+                )),
             )
             .truncate()
             .selectable(false),
@@ -492,7 +516,8 @@ fn friend_card(
         egui::Label::new(
             RichText::new(&friend.playlist.title)
                 .size(16.0)
-                .family(theme::semibold()),
+                .family(theme::semibold())
+                .color(on_picture(text.visuals().text_color(), 255)),
         )
         .truncate()
         .selectable(false),
@@ -506,7 +531,7 @@ fn friend_card(
             egui::Label::new(
                 RichText::new(&friend.owner_name)
                     .small()
-                    .color(theme::muted()),
+                    .color(on_picture(theme::muted(), 215)),
             )
             .truncate()
             .selectable(false),
