@@ -774,7 +774,7 @@ mod tests {
             assert_eq!(palette.with_accent(THEME_ACCENT), *palette);
             assert_eq!(palette.with_accent(BLUE), *palette);
         }
-        // Kanagawa's and Tokyo Night's pale blues are accents of their own.
+        // Kanagawa's green and Tokyo Night's pale blue are accents of their own.
         for code in ["kanagawa", "tokyo-night", "catppuccin", "rose-pine"] {
             let theme = Theme::all().find(|theme| theme.code() == code).unwrap();
             assert_eq!(

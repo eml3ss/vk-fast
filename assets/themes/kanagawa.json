@@ -5,7 +5,7 @@
     "en": "Kanagawa"
   },
   "palette": {
-    "accent": "#7e9cd8",
+    "accent": "#98bb6c",
     "muted": "#a09f93",
     "text": "#dcd7ba",
     "strong": "#f2ecd0",
@@ -16,8 +16,8 @@
     "panel": "#1f1f28",
     "panel_line": null,
     "surface": "#1f1f28",
-    "primary": "#3f5e9d",
-    "selected": "#223249",
+    "primary": "#76946a",
+    "selected": "#2b3328",
     "scroll_handle": "#363646",
     "scroll_hovered": "#54546d",
     "scroll_active": "#727169",
@@ -26,7 +26,7 @@
     "control": "#2a2a37",
     "control_stroke": "#363646",
     "control_hovered": "#363646",
-    "control_hovered_stroke": "#3f5e9d",
+    "control_hovered_stroke": "#76946a",
     "chroma": 0.8,
     "tint": [
       0.0,
