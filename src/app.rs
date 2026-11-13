@@ -10717,8 +10717,6 @@ impl MusicApp {
         let mut scale = self.ui_scale;
         let mut apply = None;
         ui.horizontal(|ui| {
-            // Forty steps of 5 %: wide enough to pick each one.
-            ui.spacing_mut().slider_width = 260.0_f32.min(ui.available_width() - 110.0).max(80.0);
             let slider = theme::slider(ui, &mut scale, preferences::UI_SCALE_RANGE, 5.0);
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 apply = Some(scale);
