@@ -33,6 +33,8 @@ pub struct OwnerPage {
     pub retry_offset: Option<usize>,
     /// The owner's first tracks, read with the first playlist batch.
     pub tracks: Vec<Track>,
+    /// How many tracks the owner has in all, as VK counts them.
+    pub track_total: Option<usize>,
     pub tracks_error: Option<WebAudioError>,
 }
 
@@ -127,6 +129,7 @@ impl WebAudioClient {
             playlists_error: None,
             retry_offset: None,
             tracks: Vec::new(),
+            track_total: None,
             tracks_error: None,
         };
         if offset == 0 {
@@ -212,12 +215,18 @@ impl WebAudioClient {
                     .get("items")
                     .and_then(Value::as_array)
                     .ok_or(WebAudioError::Format)?;
-                home_tracks(rows)
+                let total = value
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .and_then(|count| usize::try_from(count).ok());
+                Ok((home_tracks(rows)?.0, total))
             }) {
-                Ok((mut tracks, _)) => {
+                Ok((mut tracks, total)) => {
                     for track in &mut tracks {
                         track.url = None;
                     }
+                    // Never fewer than the tracks already read.
+                    page.track_total = total.map(|total| total.max(tracks.len()));
                     page.tracks = tracks;
                 }
                 Err(
@@ -355,6 +364,7 @@ mod tests {
             assert_eq!(client.state.lock().unwrap().verified_owner, Some(42));
             assert_eq!(calls.len(), 3);
             assert_eq!(page.tracks.len(), 1);
+            assert_eq!(page.track_total, Some(1));
             assert!(page.tracks[0].url.is_none(), "stream links are not kept");
             assert_eq!(page.tracks[0].added, Some(1_660_000_000));
 

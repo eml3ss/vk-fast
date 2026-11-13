@@ -15,6 +15,7 @@ fn page(id: i64, offset: usize, items: &[i64]) -> OwnerPage {
         description: Some("Public music".into()),
         closed: None,
         tracks: Vec::new(),
+        track_total: None,
         tracks_error: None,
         playlists: items
             .iter()

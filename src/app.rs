@@ -17801,6 +17801,7 @@ mod tests {
                 playlists_error: None,
                 retry_offset: None,
                 tracks: Vec::new(),
+                track_total: None,
                 tracks_error: None,
             })),
         );

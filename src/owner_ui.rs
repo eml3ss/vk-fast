@@ -256,9 +256,7 @@ fn header(
     } else {
         &creator.name
     };
-    let total = page
-        .and_then(|page| page.total)
-        .map(|total| format!("{}: {total}", language.text("Плейлисты", "Playlists")));
+    let total = page.and_then(|page| counter(language, page));
     let small = egui::TextStyle::Small.resolve(ui.style());
     let title_font = FontId::new(if width >= 520.0 { 30.0 } else { 24.0 }, theme::semibold());
     // The title's letters sit midway between the kicker and the line below.
@@ -292,12 +290,13 @@ fn header(
     // egui also puts its item spacing between each pair of lines.
     let gap = ui.spacing().item_spacing.y;
     let title_top = kicker_galley.size().y + gap + above;
-    let last_baseline = match &total {
-        Some(total) => {
-            title_top + title_galley.size().y + gap + below + baseline(&lay(total, &small))
-        }
-        None => title_top + baseline(&title_galley),
-    };
+    // The counter's line is always reserved, so the name stays in the
+    // middle while the page loads and nothing jumps when the count arrives.
+    let last_baseline = title_top
+        + title_galley.size().y
+        + gap
+        + below
+        + baseline(&lay(total.as_deref().unwrap_or("0"), &small));
     let column = cap_top + last_baseline;
     let text_rect = egui::Rect::from_min_max(
         egui::pos2(art.right() + 20.0, art.center().y - column * 0.5),
@@ -341,6 +340,32 @@ fn header(
         text.add_space(below);
         text.label(RichText::new(total).small().color(theme::muted()));
     }
+}
+
+/// "88 треков · 30 плейлистов": what VK counts for the owner, leaving out
+/// what it did not report or has none of.
+fn counter(language: Language, page: &OwnerPage) -> Option<String> {
+    let count = |value: Option<usize>, russian, english| {
+        value
+            .filter(|value| *value > 0)
+            .map(|value| crate::release_info::counted(value as u64, language, russian, english))
+    };
+    let parts: Vec<String> = [
+        count(
+            page.track_total,
+            ["трек", "трека", "треков"],
+            ["track", "tracks"],
+        ),
+        count(
+            page.total,
+            ["плейлист", "плейлиста", "плейлистов"],
+            ["playlist", "playlists"],
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// The playlist grid, at most `max_rows` rows; also says whether rows were cut.
@@ -493,6 +518,7 @@ mod tests {
             description: None,
             closed: None,
             tracks: Vec::new(),
+            track_total: Some(88),
             tracks_error: None,
             playlists: (0..count)
                 .map(|index| UserPlaylist {
@@ -529,6 +555,47 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    #[test]
+    fn a_loading_owner_header_keeps_the_name_in_the_middle_of_the_avatar() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let creator = page(0).creator;
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| header(ui, &mut covers, Language::English, &creator, None),
+            );
+            output.textures_delta.clear();
+            let line = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            let row = &text.galley.rows[0];
+                            let glyph = &row.row.glyphs[0];
+                            let base = text.pos.y + row.pos.y + glyph.pos.y;
+                            Some((base + glyph.uv_rect.offset.y, base))
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            // The counter's line stays reserved: the name keeps the place it
+            // has once the page loads, its letters about the avatar's middle.
+            let (top, baseline) = line("Test community");
+            let middle = (top + baseline) * 0.5;
+            assert!((middle - 91.0).abs() < 2.0, "{top} {baseline} {middle}");
+        }
     }
 
     #[test]
@@ -576,7 +643,7 @@ mod tests {
             };
             assert!((ink("Test community") - ink("VK COMMUNITY")).abs() < 0.75);
             let (kicker, kicker_galley) = text("VK COMMUNITY");
-            let (total, total_galley) = text("Playlists: 3");
+            let (total, total_galley) = text("88 tracks · 3 playlists");
             assert_eq!(total.x, kicker.x);
             // From the top of the kicker's capitals to the last baseline, the
             // letters are centred on the 182-point header.
@@ -596,14 +663,14 @@ mod tests {
                     .row
                     .glyphs
                     .iter()
-                    .filter(|glyph| glyph.chr.is_uppercase())
+                    .filter(|glyph| glyph.chr.is_uppercase() || glyph.chr.is_ascii_digit())
                     .map(|glyph| pos.y + row.pos.y + glyph.pos.y + glyph.uv_rect.offset.y)
                     .fold(f32::INFINITY, f32::min);
                 (top, base)
             };
             let (_, kicker_base) = span("VK COMMUNITY");
             let (name_top, name_base) = span("Test community");
-            let (total_top, _) = span("Playlists: 3");
+            let (total_top, _) = span("88 tracks · 3 playlists");
             let (above, below) = (name_top - kicker_base, total_top - name_base);
             assert!((above - below).abs() < 1.0, "{above} {below}");
         }
