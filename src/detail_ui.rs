@@ -393,15 +393,33 @@ fn collection_header(
     // Wide, the title's letters sit midway between the kicker and the
     // artist line (29 px above and 23 below before).
     text.add_space(if wide { 9.0 } else { 2.0 });
-    text.add(
+    // A large letter starts its ink further from the edge than small ones:
+    // the title moves left by the difference, so its first letter lines up
+    // with the kicker's and the artist's.
+    let title_font = FontId::new(if wide { 30.0 } else { 24.0 }, theme::semibold());
+    let shift = (ink_left(&text, view.title, title_font.clone())
+        - ink_left(&text, kind, egui::TextStyle::Small.resolve(text.style())))
+    .clamp(0.0, 6.0);
+    // A child of its own, so the shift never widens the column for the
+    // artist and subtitle below; the column only reserves its height.
+    let mut title_rect = text.available_rect_before_wrap();
+    title_rect.min.x -= shift;
+    let mut title = text.new_child(
+        egui::UiBuilder::new()
+            .id_salt("album-title")
+            .max_rect(title_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    title.add(
         egui::Label::new(
             RichText::new(view.title)
-                .size(if wide { 30.0 } else { 24.0 })
-                .family(theme::semibold()),
+                .size(title_font.size)
+                .family(title_font.family),
         )
         .truncate()
         .selectable(false),
     );
+    text.allocate_exact_size(egui::vec2(0.0, title.min_rect().height()), Sense::hover());
     text.add_space(if wide { 6.0 } else { 3.0 });
     let mut action = if playlist {
         view.creator
@@ -974,7 +992,10 @@ fn cover_viewer(
     let open = ui.interact(art, id.with("open"), Sense::click());
     open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let frame = ui.ctx().cumulative_frame_nr();
-    if open.on_hover_cursor(egui::CursorIcon::ZoomIn).clicked() {
+    if open
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
         ui.data_mut(|data| data.insert_temp(id, frame));
     }
     // The viewer belongs to the page that opened it: leaving the page for a
@@ -987,8 +1008,14 @@ fn cover_viewer(
     ui.data_mut(|data| data.insert_temp(id, frame));
     let screen = ui.ctx().content_rect();
     let size = (screen.width().min(screen.height()) * 0.82).clamp(120.0, 512.0);
+    // A soft drop shadow lifts the cover off the darkened page.
     let modal = egui::Modal::new(id.with("modal"))
-        .frame(egui::Frame::NONE)
+        .frame(egui::Frame::NONE.corner_radius(10).shadow(egui::Shadow {
+            offset: [0, 12],
+            blur: 48,
+            spread: 2,
+            color: Color32::from_black_alpha(220),
+        }))
         .backdrop_color(Color32::from_black_alpha(205))
         .show(ui.ctx(), |ui| {
             let image = covers.show_high_resolution(ui, Some(url), Some(url), size, 10);
@@ -998,6 +1025,18 @@ fn cover_viewer(
     if modal.inner || modal.should_close() {
         ui.data_mut(|data| data.remove::<u64>(id));
     }
+}
+
+/// How far from the line's start the first letter's ink begins in `font`.
+fn ink_left(ui: &egui::Ui, text: &str, font: FontId) -> f32 {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.trim_start().to_owned(), font, Color32::WHITE);
+    galley
+        .rows
+        .first()
+        .and_then(|row| row.row.glyphs.first())
+        .map_or(0.0, |glyph| glyph.pos.x + glyph.uv_rect.offset.x)
 }
 
 fn kicker(ui: &mut egui::Ui, text: &str) {
@@ -1606,6 +1645,74 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }]);
             assert!(!dimmed(&frame(Vec::new())));
+        }
+    }
+
+    #[test]
+    fn album_title_letters_start_where_the_kicker_and_artist_do() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let artists = [ArtistRef {
+            id: "1".into(),
+            name: "Synthetic artist".into(),
+        }];
+        for _ in 0..2 {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 360.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    album_header(
+                        ui,
+                        &mut covers,
+                        AlbumView {
+                            language: Language::English,
+                            title: "Moon Mansion",
+                            artists: &artists,
+                            creator: None,
+                            image_url: None,
+                            subtitle: "2026",
+                            track_count: 3,
+                            loading: false,
+                            playing: false,
+                            can_edit_playlist: false,
+                            follow: None,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            let ink = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            let glyph = &text.galley.rows[0].row.glyphs[0];
+                            Some(text.pos.x + glyph.pos.x + glyph.uv_rect.offset.x)
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            assert!((ink("Moon Mansion") - ink("ALBUM")).abs() < 0.75);
+            let start = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos.x),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            // Only the title moves; the lines below keep the column's edge.
+            assert_eq!(start("2026"), start("ALBUM"));
         }
     }
 
