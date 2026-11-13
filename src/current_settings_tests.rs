@@ -961,3 +961,108 @@ fn interface_scale_applies_from_settings_and_follows_the_zoom_keys() {
     warm(&ctx, &mut app, size, &mut tick);
     assert_eq!(ctx.zoom_factor(), 2.5);
 }
+
+#[test]
+fn the_monitor_s_resolution_sets_the_scale_beyond_the_system_s_own() {
+    for (short_side, native, percent) in [
+        (1080.0, 1.0, 100),
+        (1440.0, 1.0, 135),
+        (2160.0, 1.0, 200),
+        (4320.0, 1.0, 250),
+        // The system already scales: only what is missing is added.
+        (2160.0, 2.0, 100),
+        (2160.0, 1.5, 135),
+        // Never below the system's own scale.
+        (1080.0, 1.25, 100),
+        (720.0, 1.0, 100),
+    ] {
+        assert_eq!(
+            monitor_scale(short_side, native),
+            percent,
+            "{short_side} {native}"
+        );
+    }
+}
+
+/// One frame on a monitor of `size` points at a system scale of 1.
+fn monitor_frame(ctx: &egui::Context, app: &mut MusicApp, size: egui::Vec2, tick: &mut u32) {
+    *tick += 1;
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            time: Some(f64::from(*tick) * 0.1),
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    native_pixels_per_point: Some(1.0),
+                    monitor_size: Some(size / ctx.zoom_factor()),
+                    ..Default::default()
+                },
+            ))
+            .collect(),
+            ..Default::default()
+        },
+        |_| {},
+    );
+    output.textures_delta.clear();
+    app.follow_keyboard_zoom(ctx);
+    app.follow_monitor_scale(ctx);
+}
+
+#[test]
+fn auto_scale_follows_the_monitor_until_a_zoom_key_and_is_hidden_on_wayland() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    let size = egui::vec2(1100.0, 800.0);
+    let mut tick = 0;
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Interface;
+    app.settings_query = "scale".into();
+    // Off by default: a 1440p monitor changes nothing.
+    for _ in 0..4 {
+        monitor_frame(&ctx, &mut app, egui::vec2(2560.0, 1440.0), &mut tick);
+    }
+    assert_eq!(ctx.zoom_factor(), 1.0);
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    let switch = content_text(&settings, "Scale to the monitor's resolution").center();
+    account_ui_click(&ctx, &mut app, size, &mut tick, switch);
+    assert!(app.auto_ui_scale);
+    for _ in 0..4 {
+        monitor_frame(&ctx, &mut app, egui::vec2(2560.0, 1440.0), &mut tick);
+    }
+    assert_eq!((app.ui_scale_applied, ctx.zoom_factor()), (135, 1.35));
+    // The user's own scale is kept apart, for when it is turned off.
+    assert_eq!(app.ui_scale, 100);
+    // Another monitor, another scale.
+    for _ in 0..4 {
+        monitor_frame(&ctx, &mut app, egui::vec2(3840.0, 2160.0), &mut tick);
+    }
+    assert_eq!(app.ui_scale_applied, 200);
+    // A zoom key hands the scale back to the user.
+    ctx.set_zoom_factor(2.2);
+    for _ in 0..4 {
+        monitor_frame(&ctx, &mut app, egui::vec2(3840.0, 2160.0), &mut tick);
+    }
+    assert!(!app.auto_ui_scale);
+    assert_eq!((app.ui_scale, app.ui_scale_applied), (220, 220));
+    assert_eq!(ctx.zoom_factor(), 2.2);
+
+    // Wayland: the compositor scales; no switch, and the scale is left alone.
+    crate::volume_keys::TEST_SUPPORT.with(|support| {
+        support.set(crate::volume_keys::Support::Wayland);
+    });
+    app.auto_ui_scale = true;
+    for _ in 0..4 {
+        monitor_frame(&ctx, &mut app, egui::vec2(2560.0, 1440.0), &mut tick);
+    }
+    assert_eq!(app.ui_scale_applied, 220);
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    assert!(
+        !account_ui_shapes(&settings)
+            .iter()
+            .any(|shape| matches!(shape,
+            egui::Shape::Text(text) if text.galley.text().starts_with("Scale to the monitor")))
+    );
+    crate::volume_keys::TEST_SUPPORT.with(|support| {
+        support.set(crate::volume_keys::Support::Available);
+    });
+}

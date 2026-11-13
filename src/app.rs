@@ -1415,6 +1415,10 @@ pub struct MusicApp {
     /// The frame in which the app last set the zoom: egui puts it into effect
     /// from the next frame, so until then the old zoom is not a key press.
     ui_scale_set_frame: Option<u64>,
+    /// The scale follows the monitor's resolution (X11 and Windows; on
+    /// Wayland the compositor scales). `ui_scale` stays the user's own.
+    auto_ui_scale: bool,
+    auto_ui_scale_save_failed: bool,
     animated_backdrop_save_failed: bool,
     /// Ctrl + the keyboard's volume keys change VK Fast's own volume.
     volume_keys_enabled: bool,
@@ -1853,6 +1857,8 @@ impl MusicApp {
             ui_scale_save_at: None,
             ui_scale_save_failed: false,
             ui_scale_set_frame: Some(ctx.cumulative_frame_nr()),
+            auto_ui_scale: !cfg!(test) && preferences::load_auto_ui_scale(),
+            auto_ui_scale_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: preferences::load_volume_keys(),
             volume_keys_save_failed: false,
@@ -10717,26 +10723,38 @@ impl MusicApp {
     fn ui_scale_settings(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
-        ui.label(format!(
-            "{}: {} %",
-            t("Масштаб интерфейса", "Interface scale"),
-            self.ui_scale
-        ));
+        let auto = self.auto_ui_scale && !wayland_session();
+        if auto {
+            ui.label(format!(
+                "{}: {} % ({})",
+                t("Масштаб интерфейса", "Interface scale"),
+                self.ui_scale_applied,
+                t("по монитору", "by monitor"),
+            ));
+        } else {
+            ui.label(format!(
+                "{}: {} %",
+                t("Масштаб интерфейса", "Interface scale"),
+                self.ui_scale
+            ));
+        }
         let mut scale = self.ui_scale;
         let mut apply = None;
-        ui.horizontal(|ui| {
-            let slider = theme::slider(ui, &mut scale, preferences::UI_SCALE_RANGE, 5.0);
-            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-                apply = Some(scale);
-            }
-            if scale != preferences::DEFAULT_UI_SCALE
-                && ui
-                    .button(t("Сбросить", "Reset"))
-                    .on_hover_text("100 %")
-                    .clicked()
-            {
-                apply = Some(preferences::DEFAULT_UI_SCALE);
-            }
+        ui.add_enabled_ui(!auto, |ui| {
+            ui.horizontal(|ui| {
+                let slider = theme::slider(ui, &mut scale, preferences::UI_SCALE_RANGE, 5.0);
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    apply = Some(scale);
+                }
+                if scale != preferences::DEFAULT_UI_SCALE
+                    && ui
+                        .button(t("Сбросить", "Reset"))
+                        .on_hover_text("100 %")
+                        .clicked()
+                {
+                    apply = Some(preferences::DEFAULT_UI_SCALE);
+                }
+            })
         });
         self.ui_scale = scale;
         if let Some(percent) = apply {
@@ -10750,7 +10768,33 @@ impl MusicApp {
             .small()
             .color(theme::muted()),
         );
-        if self.ui_scale_save_failed {
+        // On Wayland the compositor scales each monitor itself; scaling by
+        // its resolution on top would enlarge everything twice.
+        if !wayland_session() {
+            ui.add_space(10.0);
+            let mut enabled = self.auto_ui_scale;
+            if theme::switch(
+                ui,
+                &mut enabled,
+                t(
+                    "Автомасштаб под разрешение монитора",
+                    "Scale to the monitor's resolution",
+                ),
+            )
+            .changed()
+            {
+                self.set_auto_ui_scale(ui.ctx(), enabled);
+            }
+            ui.label(
+                RichText::new(t(
+                    "Масштаб по разрешению экрана: 1080p — 100 %, 1440p — 135 %, 4K — 200 %. Масштаб системы учитывается, меньше него не бывает. Ctrl + плюс или минус выключает автомасштаб.",
+                    "A scale for the screen's resolution: 1080p 100 %, 1440p 135 %, 4K 200 %. The system's own scale counts, and it never goes below it. Ctrl + plus or minus turns it off.",
+                ))
+                .small()
+                .color(theme::muted()),
+            );
+        }
+        if self.ui_scale_save_failed || self.auto_ui_scale_save_failed {
             ui.colored_label(
                 theme::error(),
                 t(
@@ -10832,8 +10876,58 @@ impl MusicApp {
     }
 
     fn save_ui_scale_now(&mut self) {
+        // The user's own scale, also while the monitor's is in effect.
         self.ui_scale_save_failed =
-            !cfg!(test) && preferences::save_ui_scale(self.ui_scale_applied).is_err();
+            !cfg!(test) && preferences::save_ui_scale(self.ui_scale).is_err();
+    }
+
+    fn set_auto_ui_scale(&mut self, ctx: &egui::Context, enabled: bool) {
+        self.save_auto_ui_scale(enabled);
+        if !enabled && self.ui_scale_applied != self.ui_scale {
+            // Back to the user's own scale.
+            self.ui_scale_applied = self.ui_scale;
+            self.set_zoom(ctx, self.ui_scale);
+        }
+    }
+
+    fn save_auto_ui_scale(&mut self, enabled: bool) {
+        self.auto_ui_scale = enabled;
+        self.auto_ui_scale_save_failed =
+            !cfg!(test) && preferences::save_auto_ui_scale(enabled).is_err();
+    }
+
+    /// While the scale follows the monitor, the one its resolution calls
+    /// for; looked at again when the window moves to another monitor.
+    fn follow_monitor_scale(&mut self, ctx: &egui::Context) {
+        if !self.auto_ui_scale || wayland_session() {
+            return;
+        }
+        // egui reports the monitor in points of the zoom in effect when it
+        // looked; a zoom just set is not in those points yet.
+        if self
+            .ui_scale_set_frame
+            .is_some_and(|frame| ctx.cumulative_frame_nr() <= frame + 2)
+        {
+            return;
+        }
+        let (monitor, native) = ctx.input(|input| {
+            (
+                input.viewport().monitor_size,
+                input.viewport().native_pixels_per_point,
+            )
+        });
+        let (Some(monitor), Some(native)) = (monitor, native) else {
+            return;
+        };
+        let short_side = monitor.x.min(monitor.y) * ctx.pixels_per_point();
+        if !short_side.is_finite() || short_side < 240.0 {
+            return;
+        }
+        let percent = monitor_scale(short_side, native);
+        if percent != self.ui_scale_applied {
+            self.ui_scale_applied = percent;
+            self.set_zoom(ctx, percent);
+        }
     }
 
     /// Put `percent` into effect and save it shortly (or at exit).
@@ -10870,6 +10964,11 @@ impl MusicApp {
             *preferences::UI_SCALE_RANGE.start(),
             *preferences::UI_SCALE_RANGE.end(),
         );
+        // A scale picked by hand takes over from the monitor's; it is in
+        // effect already, so the user's former one is not put back first.
+        if self.auto_ui_scale {
+            self.save_auto_ui_scale(false);
+        }
         // The applied value is the old one here, so the change is saved.
         self.apply_ui_scale(ctx, clamped);
         if clamped != percent {
@@ -12226,6 +12325,7 @@ impl MusicApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.follow_keyboard_zoom(ctx);
+        self.follow_monitor_scale(ctx);
         if let Some(deadline) = self.ui_scale_save_at {
             if Instant::now() >= deadline {
                 self.ui_scale_save_at = None;
@@ -12423,6 +12523,27 @@ impl Drop for MusicApp {
             let _ = write_playback_resume(owner, &snapshot);
         }
     }
+}
+
+/// A Wayland session: the compositor scales each monitor itself.
+fn wayland_session() -> bool {
+    matches!(
+        crate::volume_keys::support(),
+        crate::volume_keys::Support::Wayland
+    )
+}
+
+/// The scale a monitor calls for: its shorter side over 1080 pixels (1440p
+/// 135 %, 4K 200 %), in steps of 5 %, beyond the system's own scale
+/// (`native`, already applied) and never below it.
+fn monitor_scale(short_side: f32, native: f32) -> u16 {
+    let wanted = (short_side / 1080.0).clamp(1.0, 2.5);
+    let zoom = (wanted / native.max(0.5)).max(1.0);
+    let percent = ((zoom * 20.0).round() * 5.0) as u16;
+    percent.clamp(
+        *preferences::UI_SCALE_RANGE.start(),
+        *preferences::UI_SCALE_RANGE.end(),
+    )
 }
 
 #[cfg(test)]
@@ -12905,6 +13026,8 @@ mod tests {
             ui_scale_save_at: None,
             ui_scale_save_failed: false,
             ui_scale_set_frame: None,
+            auto_ui_scale: false,
+            auto_ui_scale_save_failed: false,
             animated_backdrop_save_failed: false,
             volume_keys_enabled: false,
             volume_keys_save_failed: false,

@@ -92,6 +92,9 @@ struct Preferences {
     explicit_badge: bool,
     #[serde(deserialize_with = "deserialize_ui_scale")]
     ui_scale: u16,
+    /// Off unless turned on: the scale follows the monitor's resolution.
+    #[serde(deserialize_with = "deserialize_crossfade")]
+    auto_ui_scale: bool,
     #[serde(deserialize_with = "deserialize_animated_backdrop")]
     animated_backdrop: bool,
     /// Off unless turned on: it takes Ctrl + volume keys from the system.
@@ -135,6 +138,7 @@ impl Default for Preferences {
             crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
             ui_scale: DEFAULT_UI_SCALE,
+            auto_ui_scale: false,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
             volume_keys: false,
             broadcast: false,
@@ -917,6 +921,20 @@ pub fn load_ui_scale() -> u16 {
         .map_or(DEFAULT_UI_SCALE, |preferences| preferences.ui_scale)
 }
 
+/// Whether the scale follows the monitor's resolution.
+pub fn load_auto_ui_scale() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.auto_ui_scale)
+}
+
+pub fn save_auto_ui_scale(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.auto_ui_scale = enabled;
+    })
+}
+
 pub fn save_ui_scale(scale: u16) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.ui_scale = scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
@@ -1288,6 +1306,13 @@ mod tests {
         update_at(&path, |preferences| preferences.ui_scale = 125).unwrap();
         let restored = load_preferences_at(&path).unwrap().unwrap();
         assert_eq!(restored.ui_scale, 125);
+        // Following the monitor is off unless turned on, and kept apart.
+        assert!(!restored.auto_ui_scale);
+        let odd: Preferences = serde_json::from_str(r#"{"auto_ui_scale":"yes"}"#).unwrap();
+        assert!(!odd.auto_ui_scale);
+        update_at(&path, |preferences| preferences.auto_ui_scale = true).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(restored.auto_ui_scale && restored.ui_scale == 125);
     }
 
     #[test]
