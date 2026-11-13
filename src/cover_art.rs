@@ -343,7 +343,8 @@ impl CoverCache {
         self.clock = self.clock.wrapping_add(1);
         let size = size.clamp(1.0, 512.0);
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
-        if !ui.is_rect_visible(rect) {
+        let visible = ui.is_rect_visible(rect);
+        if !visible && !near_view(ui, rect) {
             return response;
         }
         if let Some(url) = url.filter(|url| !url.is_empty()) {
@@ -352,6 +353,10 @@ impl CoverCache {
                 edge,
             };
             self.request(ui.ctx(), key.clone());
+            if !visible {
+                // Loading ahead of a scroll: nothing to paint yet.
+                return response;
+            }
             let key = if edge > TEXTURE_SIZE
                 && !self
                     .entries
@@ -395,7 +400,7 @@ impl CoverCache {
     /// around its center. A smaller resident copy is
     /// shown while the sharp one loads. Returns false until any copy is ready.
     pub fn paint_fill(&mut self, ui: &egui::Ui, url: &str, rect: egui::Rect, radius: u8) -> bool {
-        if url.is_empty() || !rect.is_positive() || !ui.is_rect_visible(rect) {
+        if url.is_empty() || !rect.is_positive() || !near_view(ui, rect) {
             return false;
         }
         self.receive(ui.ctx());
@@ -434,7 +439,7 @@ impl CoverCache {
             return false;
         };
         let image = texture.size_vec2();
-        if image.x <= 0.0 || image.y <= 0.0 {
+        if image.x <= 0.0 || image.y <= 0.0 || !ui.is_rect_visible(rect) {
             return false;
         }
         // The share of the image that keeps the rect's proportions.
@@ -547,6 +552,18 @@ impl CoverCache {
 
 /// Paints an account button without doing any file or network work. The caller
 /// supplies a cached square texture, translated tooltip and click action.
+/// Close enough to the view to load ahead of a scroll: within one and a half
+/// screens above or below. A section further down (friends' cards on Home)
+/// then shows its pictures as it comes into view, not a moment after, and
+/// they are read from disk at startup like the ones on screen.
+fn near_view(ui: &egui::Ui, rect: egui::Rect) -> bool {
+    let clip = ui.clip_rect();
+    ui.is_visible()
+        && clip
+            .expand2(egui::vec2(0.0, clip.height() * 1.5))
+            .intersects(rect)
+}
+
 pub(crate) fn avatar_button(
     ui: &mut egui::Ui,
     texture: Option<&TextureHandle>,
@@ -1593,6 +1610,45 @@ mod tests {
             url: small.into(),
             edge: 96
         }));
+    }
+
+    #[test]
+    fn covers_just_below_the_view_load_ahead_but_far_ones_wait() {
+        let ctx = egui::Context::default();
+        let mut cache = CoverCache::new();
+        let near = "https://images.example.test/near.jpg";
+        let far = "https://images.example.test/far.jpg";
+        let picture = "https://images.example.test/picture.jpg";
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                // One screen below the view, and four.
+                ui.allocate_exact_size(egui::vec2(10.0, 600.0), Sense::hover());
+                cache.show(ui, Some(near), 48.0);
+                let below =
+                    egui::Rect::from_min_size(egui::pos2(0.0, 500.0), egui::vec2(200.0, 80.0));
+                assert!(!cache.paint_fill(ui, picture, below, 12));
+                ui.allocate_exact_size(egui::vec2(10.0, 900.0), Sense::hover());
+                cache.show(ui, Some(far), 48.0);
+            },
+        );
+        output.textures_delta.clear();
+        let asked = |url: &str| cache.entries.keys().any(|key| key.url == url);
+        assert!(asked(near) && asked(picture));
+        assert!(!asked(far));
+        // Nothing off screen is painted.
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| shape.shape.visual_bounding_rect().top() > 300.0)
+        );
     }
 
     #[test]
