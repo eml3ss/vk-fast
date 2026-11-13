@@ -70,7 +70,16 @@ pub enum Action {
 /// gap between that heading and its content (plus egui's item spacing).
 const SECTION_GAP: f32 = 10.0;
 
-pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> Option<Action> {
+/// Track rows drawn this frame that take the app's track context menu: each
+/// row's response and its track.
+pub type TrackRows = Vec<(Response, Track)>;
+
+pub fn show(
+    ui: &mut egui::Ui,
+    covers: &mut CoverCache,
+    view: HomeView<'_>,
+    rows: &mut TrackRows,
+) -> Option<Action> {
     let mut action = None;
     let scroll = egui::ScrollArea::vertical()
         .id_salt("home-content")
@@ -194,7 +203,7 @@ pub fn show(ui: &mut egui::Ui, covers: &mut CoverCache, view: HomeView<'_>) -> O
                 },
             );
         }
-        action = catalog_sections(ui, covers, &view).or(action.take());
+        action = catalog_sections(ui, covers, &view, rows).or(action.take());
         ui.add_space(8.0);
     });
     action
@@ -239,6 +248,7 @@ fn catalog_sections(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     view: &HomeView<'_>,
+    rows: &mut TrackRows,
 ) -> Option<Action> {
     let mut action = None;
     let language = view.language;
@@ -305,7 +315,7 @@ fn catalog_sections(
                 let friend = &friends[index];
                 let key = (friend.playlist.owner_id, friend.playlist.id);
                 ui.push_id(("home-friend", key), |ui| {
-                    if let Some(intent) = friend_card(ui, covers, friend, width, view) {
+                    if let Some(intent) = friend_card(ui, covers, friend, width, view, rows) {
                         action = Some(intent);
                     }
                 });
@@ -448,6 +458,7 @@ fn friend_card(
     friend: &FriendPlaylist,
     width: f32,
     view: &HomeView<'_>,
+    track_rows: &mut TrackRows,
 ) -> Option<Action> {
     let language = view.language;
     let rows = friend.tracks.len().min(3);
@@ -601,6 +612,8 @@ fn friend_card(
             )
         });
         hit.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &track.title));
+        // A right click opens the same track menu as any track list.
+        track_rows.push((hit.clone(), track.clone()));
         if hit
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
@@ -1475,6 +1488,7 @@ mod tests {
                         pending_mix: None,
                         error: None,
                     },
+                    &mut Vec::new(),
                 );
             },
         );
@@ -1524,6 +1538,7 @@ mod tests {
                         pending_mix: None,
                         error: None,
                     },
+                    &mut Vec::new(),
                 );
             },
         );
@@ -1605,7 +1620,12 @@ mod tests {
                                 pending_mix: None,
                                 error: None,
                             };
-                            friend_card(ui, &mut covers, &friend, 300.0, &view);
+                            let mut rows = Vec::new();
+                            friend_card(ui, &mut covers, &friend, 300.0, &view, &mut rows);
+                            // Its track row goes to the app for the track menu.
+                            assert_eq!(rows.len(), 1);
+                            assert_eq!(rows[0].1.key(), track.key());
+                            assert!(rows[0].0.sense.senses_click());
                         } else {
                             recent_card(
                                 ui,
@@ -1848,6 +1868,7 @@ mod tests {
                         pending_mix: None,
                         error: None,
                     },
+                    &mut Vec::new(),
                 );
             },
         );
@@ -1941,6 +1962,7 @@ mod tests {
                             pending_mix: None,
                             error: None,
                         },
+                        &mut Vec::new(),
                     );
                 },
             );
@@ -2149,6 +2171,7 @@ mod tests {
                             pending_mix: None,
                             error: None,
                         },
+                        &mut Vec::new(),
                     );
                 },
             );
@@ -2245,6 +2268,7 @@ mod tests {
                             pending_mix: None,
                             error: None,
                         },
+                        &mut Vec::new(),
                     );
                 },
             );

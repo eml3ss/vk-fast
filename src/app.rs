@@ -8117,6 +8117,7 @@ impl MusicApp {
                     .map(|error| error.message(self.language))
             });
         let catalog_mix = self.catalog_mix.as_ref();
+        let mut track_rows = Vec::new();
         let action = home_ui::show(
             ui,
             &mut self.covers,
@@ -8168,7 +8169,18 @@ impl MusicApp {
                     .map(|(_, mix)| mix),
                 error: error.as_deref(),
             },
+            &mut track_rows,
         );
+        // Friends' playlist tracks take the same context menu as track lists.
+        let mut track_action = None;
+        for (response, track) in &track_rows {
+            if let Some(intent) = self.track_popup(ui, response, response.rect, track) {
+                track_action = Some(intent);
+            }
+        }
+        if let Some(intent) = track_action {
+            self.handle_track_action(&ui.ctx().clone(), intent);
+        }
         // Like My music: a small spinner in the corner while any Home block
         // (VK's picks, the catalog rows or the library tiles) is loading.
         if self.home_request.is_some() || self.catalog_request.is_some() || self.pending.is_some() {
