@@ -744,6 +744,7 @@ mod tests {
             key: (42, 1),
             title: "Synthetic".into(),
             artist: "Test".into(),
+            artists: "Test".into(),
             album: String::new(),
             duration: 180,
             speed_variant: false,

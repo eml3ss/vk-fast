@@ -119,11 +119,16 @@ fn song_matches(song: &Value, query: &Query) -> bool {
     let Some(title) = song.get("title").and_then(Value::as_str) else {
         return false;
     };
-    // Genius often appends an English gloss to the original title, not its lyrics.
+    // Genius often appends an English gloss to the original title, not its
+    // lyrics; for Asian songs that gloss can be the title everywhere else
+    // ("승인해주세요지니님! (Approve Please, Genie!)").
     let title_matches = same_title(title, &query.title)
-        || title
-            .split_once(" (")
-            .is_some_and(|(title, _)| same_title(title, &query.title));
+        || title.split_once(" (").is_some_and(|(original, gloss)| {
+            same_title(original, &query.title)
+                || gloss
+                    .strip_suffix(')')
+                    .is_some_and(|gloss| same_title(gloss, &query.title))
+        });
     title_matches
         && [
             song.get("artist_names"),
@@ -173,11 +178,36 @@ fn parse_song(song: &Value, query: &Query) -> Result<Lyrics, Error> {
 mod tests {
     use super::*;
     #[test]
+    fn an_original_title_with_the_english_one_in_brackets_matches_it() {
+        let query = Query {
+            key: (1, 2),
+            title: "Approve Please, Genie!".into(),
+            artist: "TRAP CHICK".into(),
+            artists: "TRAP CHICK, 重音テト, 音街ウナ".into(),
+            album: String::new(),
+            duration: 165,
+            speed_variant: false,
+        };
+        let song = json!({"id":7,"title":"승인해주세요지니님! (Approve Please, Genie!)",
+            "artist_names":"TRAP CHICK (Ft. 重音テト (Kasane Teto) & 音街ウナ (Otomachi Una))",
+            "primary_artist":{"name":"TRAP CHICK"}});
+        assert!(song_matches(&song, &query));
+        let translation = json!({"id":8,
+            "title":"TRAP CHICK - Approve please, Genie! ft. Kasane Teto & Otomachi Una (English Translation)",
+            "artist_names":"Genius English Translations"});
+        assert!(!song_matches(&translation, &query));
+        let other = json!({"id":9,"title":"Одобряй, Джинн-Сан!( Approve Please, Genie! )",
+            "artist_names":"GENRELESS"});
+        assert!(!song_matches(&other, &query));
+    }
+
+    #[test]
     fn search_skips_wrong_songs_and_translations_and_keeps_original_script() {
         let query = Query {
             key: (1, 2),
             title: "Тестовая песня".into(),
             artist: "Автор".into(),
+            artists: "Автор".into(),
             album: String::new(),
             duration: 180,
             speed_variant: false,

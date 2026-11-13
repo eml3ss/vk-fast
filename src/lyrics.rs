@@ -27,7 +27,12 @@ const MAX_LINES: usize = 4000;
 pub struct Query {
     pub key: (i64, i64),
     pub title: String,
+    /// The main artist: what a match must name.
     pub artist: String,
+    /// Every artist of the track, for the search itself: Musixmatch picks
+    /// a song's instrumental, credited to the main artist alone, over the
+    /// song credited with its featured singers when only the first is sent.
+    pub artists: String,
     pub album: String,
     pub duration: u32,
     speed_variant: bool,
@@ -36,14 +41,23 @@ impl Query {
     pub fn from_track(track: &Track) -> Self {
         let title = track.display_title().into_owned();
         let lower = title.to_lowercase();
+        let named: Vec<&str> = track
+            .artists
+            .iter()
+            .map(|artist| artist.name.trim())
+            .filter(|name| !name.is_empty())
+            .collect();
         Self {
             key: track.key(),
             title,
-            artist: track
-                .artists
-                .iter()
-                .find(|artist| !artist.name.trim().is_empty())
-                .map_or_else(|| track.artist.clone(), |artist| artist.name.clone()),
+            artist: named
+                .first()
+                .map_or_else(|| track.artist.clone(), |name| (*name).to_owned()),
+            artists: if named.is_empty() {
+                track.artist.clone()
+            } else {
+                named.join(", ")
+            },
             album: track
                 .album
                 .as_ref()
@@ -274,11 +288,37 @@ impl Provider {
         {
             return Err(Error::NotFound);
         }
+        // Every artist first; then the main one alone, as Musixmatch may
+        // credit only them.
+        let mut searches = vec![query.artists.as_str()];
+        if normalized_name(&query.artists) != normalized_name(&query.artist) {
+            searches.push(query.artist.as_str());
+        }
+        let mut result = Err(Error::NotFound);
+        for artist in searches {
+            if artist.trim().is_empty() || artist.len() > 4096 {
+                continue;
+            }
+            result = self.fetch_as(config, query, artist, canceled);
+            if !matches!(result, Err(Error::NotFound)) {
+                break;
+            }
+        }
+        result
+    }
+
+    fn fetch_as(
+        &self,
+        config: &store::Config,
+        query: &Query,
+        artist: &str,
+        canceled: &impl Fn() -> bool,
+    ) -> Result<Arc<Lyrics>, Error> {
         let duration = query.duration.to_string();
         let deviation = query.duration.div_ceil(20).max(8).to_string();
         let mut params = vec![
             ("q_track", query.title.as_str()),
-            ("q_artist", query.artist.as_str()),
+            ("q_artist", artist),
             ("format", "json"),
         ];
         if !query.album.is_empty() {
@@ -545,7 +585,6 @@ fn same_title(left: &str, right: &str) -> bool {
                             | "slowed"
                             | "sped"
                             | "nightcore"
-                            | "instrumental"
                             | "live"
                             | "radio"
                     )
@@ -780,6 +819,7 @@ mod tests {
             key: (42, 7),
             title: "Synthetic song".into(),
             artist: "Synthetic artist".into(),
+            artists: "Synthetic artist".into(),
             album: String::new(),
             duration: 180,
             speed_variant: false,
@@ -821,6 +861,7 @@ mod tests {
         let query = Query {
             title: "Godzilla".into(),
             artist: "Eminem".into(),
+            artists: "Eminem".into(),
             album: "Music To Be Murdered By - Side B (Deluxe Edition)".into(),
             duration: 211,
             ..query()
@@ -949,6 +990,41 @@ mod tests {
             "Тестовый исполнитель feat. Synthetic guest"
         ));
         assert!(!same_artist("Ann", "Anna"));
+        // An instrumental is not the song with its lyrics, either way round.
+        assert!(!same_title(
+            "Approve please, Genie! - Instrumental",
+            "Approve Please, Genie!"
+        ));
+        assert!(same_title("Song (Instrumental)", "Song - Instrumental"));
+    }
+
+    #[test]
+    fn every_artist_is_searched_and_the_main_one_must_match() {
+        let mut track = crate::model::demo_tracks().remove(0);
+        track.title = "Approve Please, Genie!".into();
+        track.artist = "TRAP CHICK, 重音テト, 音街ウナ".into();
+        track.artists = ["TRAP CHICK", " ", "重音テト", "音街ウナ"]
+            .into_iter()
+            .map(|name| crate::model::ArtistRef {
+                id: String::new(),
+                name: name.into(),
+            })
+            .collect();
+        let query = Query::from_track(&track);
+        assert_eq!(query.artist, "TRAP CHICK");
+        assert_eq!(query.artists, "TRAP CHICK, 重音テト, 音街ウナ");
+        // Musixmatch credits the song with its singers, its instrumental
+        // with the main artist alone: the song is the one that matches.
+        let song = json!({"track_name":"Approve Please, Genie!",
+            "artist_name":"TRAP CHICK feat. 重音テト & 音街ウナ"});
+        assert!(validate_match(&song, &query).is_ok());
+        let instrumental = json!({"track_name":"Approve please, Genie! - Instrumental",
+            "artist_name":"TRAP CHICK"});
+        assert_eq!(validate_match(&instrumental, &query), Err(Error::NotFound));
+        // Without a list of artists, the line VK shows stands for both.
+        track.artists.clear();
+        let query = Query::from_track(&track);
+        assert_eq!(query.artist, query.artists);
     }
 
     #[test]
