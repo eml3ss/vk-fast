@@ -990,7 +990,7 @@ fn artwork(
 
 /// A release or playlist cover, or an artist photo, opens full size over a
 /// dimmed window. Any click, or Escape, closes it.
-fn cover_viewer(
+pub(crate) fn cover_viewer(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     art: egui::Rect,
@@ -1039,7 +1039,7 @@ fn cover_viewer(
 }
 
 /// How far from the line's start the first letter's ink begins in `font`.
-fn ink_left(ui: &egui::Ui, text: &str, font: FontId) -> f32 {
+pub(crate) fn ink_left(ui: &egui::Ui, text: &str, font: FontId) -> f32 {
     let galley = ui
         .painter()
         .layout_no_wrap(text.trim_start().to_owned(), font, Color32::WHITE);

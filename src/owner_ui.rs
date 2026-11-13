@@ -217,6 +217,17 @@ fn header(
         egui::pos2(rect.left() + 20.0 + art_size * 0.5, rect.center().y),
         egui::Vec2::splat(art_size),
     );
+    // The avatar rests on the card with a soft shadow beneath it, like a
+    // release cover.
+    ui.painter().add(
+        egui::Shadow {
+            offset: [0, 7],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(130),
+        }
+        .as_shape(art, art_size * 0.5),
+    );
     let mut avatar = ui.new_child(egui::UiBuilder::new().id_salt("owner-avatar").max_rect(art));
     avatar.set_clip_rect(ui.clip_rect().intersect(art));
     if image.is_some() {
@@ -231,9 +242,42 @@ fn header(
             theme::muted(),
         );
     }
+    if let Some(url) = image.filter(|url| !url.is_empty()) {
+        detail_ui::cover_viewer(ui, covers, art, url, language);
+    }
+    let group = creator.owner_id < 0;
+    let kicker = if group {
+        language.text("СООБЩЕСТВО VK", "VK COMMUNITY")
+    } else {
+        language.text("ПОЛЬЗОВАТЕЛЬ VK", "VK USER")
+    };
+    let name = if creator.name.trim().is_empty() {
+        language.text("Владелец плейлиста", "Playlist owner")
+    } else {
+        &creator.name
+    };
+    let total = page.and_then(|page| page.total);
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let title_font = FontId::new(if width >= 520.0 { 30.0 } else { 24.0 }, theme::semibold());
+    // The title's letters sit midway between the kicker and the line below.
+    let (above, below) = (10.5, 7.5);
+    // The text column is centred on the avatar's height.
+    let (small_row, title_row) =
+        ui.fonts_mut(|fonts| (fonts.row_height(&small), fonts.row_height(&title_font)));
+    // egui also puts its item spacing between each pair of lines.
+    let gap = ui.spacing().item_spacing.y;
+    let column = small_row
+        + gap
+        + above
+        + title_row
+        + if total.is_some() {
+            gap + below + small_row
+        } else {
+            0.0
+        };
     let text_rect = egui::Rect::from_min_max(
-        egui::pos2(art.right() + 20.0, rect.top() + 28.0),
-        rect.max - egui::vec2(20.0, 20.0),
+        egui::pos2(art.right() + 20.0, art.center().y - column * 0.5),
+        egui::pos2(rect.right() - 20.0, rect.bottom() - 20.0),
     );
     let mut text = ui.new_child(
         egui::UiBuilder::new()
@@ -242,34 +286,35 @@ fn header(
             .layout(Layout::top_down(Align::Min)),
     );
     text.set_clip_rect(ui.clip_rect().intersect(text_rect));
-    let group = creator.owner_id < 0;
-    text.label(
-        RichText::new(if group {
-            language.text("СООБЩЕСТВО VK", "VK COMMUNITY")
-        } else {
-            language.text("ПОЛЬЗОВАТЕЛЬ VK", "VK USER")
-        })
-        .small()
-        .color(theme::muted()),
+    text.label(RichText::new(kicker).small().color(theme::muted()));
+    text.add_space(above);
+    // A large first letter starts its ink further in: the title moves left by
+    // the difference, in a child of its own, so it lines up with the kicker.
+    let shift = (detail_ui::ink_left(&text, name, title_font.clone())
+        - detail_ui::ink_left(&text, kicker, small))
+    .clamp(0.0, 6.0);
+    let mut title_rect = text.available_rect_before_wrap();
+    title_rect.min.x -= shift;
+    let mut title = text.new_child(
+        egui::UiBuilder::new()
+            .id_salt("owner-title")
+            .max_rect(title_rect)
+            .layout(Layout::top_down(Align::Min)),
     );
-    text.add_space(12.0);
-    let name = if creator.name.trim().is_empty() {
-        language.text("Владелец плейлиста", "Playlist owner")
-    } else {
-        &creator.name
-    };
-    text.add(
-        egui::Label::new(
-            RichText::new(name)
-                .size(if width >= 520.0 { 30.0 } else { 24.0 })
-                .family(theme::semibold()),
+    title
+        .add(
+            egui::Label::new(
+                RichText::new(name)
+                    .size(title_font.size)
+                    .family(title_font.family),
+            )
+            .truncate()
+            .selectable(false),
         )
-        .truncate()
-        .selectable(false),
-    )
-    .on_hover_text(name);
-    text.add_space(6.0);
-    if let Some(total) = page.and_then(|page| page.total) {
+        .on_hover_text(name);
+    text.allocate_exact_size(egui::vec2(0.0, title.min_rect().height()), Sense::hover());
+    if let Some(total) = total {
+        text.add_space(below);
         text.label(
             RichText::new(format!(
                 "{}: {total}",
@@ -467,6 +512,59 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    #[test]
+    fn owner_header_centres_its_text_on_the_avatar_and_lines_up_the_name() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let page = page(3);
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    header(
+                        ui,
+                        &mut covers,
+                        Language::English,
+                        &page.creator,
+                        Some(&page),
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            let text = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some((text.pos, text.galley.clone()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let ink = |label: &str| {
+                let (pos, galley) = text(label);
+                let glyph = &galley.rows[0].row.glyphs[0];
+                pos.x + glyph.pos.x + glyph.uv_rect.offset.x
+            };
+            assert!((ink("Test community") - ink("VK COMMUNITY")).abs() < 0.75);
+            let (kicker, _) = text("VK COMMUNITY");
+            let (total, total_galley) = text("Playlists: 3");
+            assert_eq!(total.x, kicker.x);
+            // The header is 182 points tall from the top of the window.
+            let middle = (kicker.y + total.y + total_galley.size().y) * 0.5;
+            assert!((middle - 91.0).abs() < 1.0, "{middle}");
+        }
     }
 
     #[test]
