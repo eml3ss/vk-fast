@@ -180,14 +180,25 @@ pub fn append(definitions: &mut FontDefinitions) {
         append_set(definitions, fonts);
     }
 }
+/// egui's icon font, which also carries full-width forms (？！（）＆＃＠,
+/// digits and letters) drawn as bold icons in its own style.
+const ICON_FONT: &str = "emoji-icon-font";
+
 fn append_set(definitions: &mut FontDefinitions, fonts: &[Fallback]) {
     for font in fonts {
         definitions
             .font_data
             .insert(font.name.clone(), font.data.clone());
         for family in definitions.families.values_mut() {
-            if !family.contains(&font.name) {
-                family.push(font.name.clone());
+            if family.contains(&font.name) {
+                continue;
+            }
+            // Before the icon font: a script's own punctuation (the full-width
+            // question mark after Japanese) comes from that script's font.
+            // egui's emoji font stays ahead, so emoji keep their look.
+            match family.iter().position(|name| name == ICON_FONT) {
+                Some(icons) => family.insert(icons, font.name.clone()),
+                None => family.push(font.name.clone()),
             }
         }
     }
@@ -476,7 +487,7 @@ pub fn diagnostic() {
 mod tests {
     use super::*;
     #[test]
-    fn cached_fallbacks_append_to_every_family_without_replacing_primary_fonts() {
+    fn cached_fallbacks_join_every_family_before_the_icon_font_only() {
         let font = Fallback {
             name: "Synthetic fallback".into(),
             data: Arc::new(FontData::from_static(include_bytes!(
@@ -489,8 +500,14 @@ mod tests {
         append_set(&mut definitions, std::slice::from_ref(&font));
         for (family, baseline) in original {
             let actual = &definitions.families[&family];
-            assert_eq!(&actual[..baseline.len()], baseline);
-            assert_eq!(&actual[baseline.len()..], std::slice::from_ref(&font.name));
+            // Every original font keeps its place, in order; the fallback
+            // comes once, just before egui's icon font.
+            let without: Vec<_> = actual.iter().filter(|name| **name != font.name).collect();
+            assert_eq!(without, baseline.iter().collect::<Vec<_>>());
+            assert_eq!(actual.iter().filter(|name| **name == font.name).count(), 1);
+            let at = |name: &str| actual.iter().position(|n| n == name);
+            assert_eq!(at(&font.name).unwrap() + 1, at(ICON_FONT).unwrap());
+            assert!(at("NotoEmoji-Regular").unwrap() < at(&font.name).unwrap());
         }
         assert!(Arc::ptr_eq(&definitions.font_data[&font.name], &font.data));
     }
