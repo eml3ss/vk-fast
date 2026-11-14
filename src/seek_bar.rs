@@ -23,11 +23,50 @@ pub fn show(ui: &mut egui::Ui, position: &mut f64, progress: Progress<'_>) -> Re
     control(ui, position, duration, 5.0, progress.width, progress.label)
 }
 
+/// Scrolled points per 5 % of volume: about one wheel notch.
+const WHEEL_POINTS_PER_STEP: f32 = 40.0;
+
 pub fn volume(ui: &mut egui::Ui, value: &mut f32, width: f32, label: &str) -> Response {
     let mut precise = f64::from(*value);
-    let response = control(ui, &mut precise, 1.0, 0.05, width, label);
+    let mut response = control(ui, &mut precise, 1.0, 0.05, width, label);
     if response.changed() {
         *value = precise as f32;
+    }
+    // The wheel over the slider turns the volume: up louder, down quieter,
+    // a notch per 5 %, and a touchpad in proportion. Ctrl + wheel stays zoom.
+    if ui.is_enabled() && response.hovered() && !response.dragged() {
+        let delta: f32 = ui.input(|input| {
+            input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel {
+                        unit,
+                        delta,
+                        modifiers,
+                        ..
+                    } if !modifiers.command && !modifiers.ctrl => {
+                        let points = match unit {
+                            egui::MouseWheelUnit::Point => 1.0,
+                            egui::MouseWheelUnit::Line => WHEEL_POINTS_PER_STEP,
+                            egui::MouseWheelUnit::Page => WHEEL_POINTS_PER_STEP * 4.0,
+                        };
+                        Some((delta.y + delta.x) * points)
+                    }
+                    _ => None,
+                })
+                .sum()
+        });
+        if delta != 0.0 {
+            // Taken here: the page under the player does not scroll too.
+            ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
+            let next = (*value + delta / WHEEL_POINTS_PER_STEP * 0.05).clamp(0.0, 1.0);
+            if next != *value {
+                *value = next;
+                response.mark_changed();
+            }
+        }
     }
     response
 }
@@ -581,6 +620,92 @@ mod tests {
             assert!((value - maximum * 0.5).abs() < 1e-5);
             assert!(!response.changed());
         }
+    }
+
+    #[test]
+    fn the_wheel_over_the_volume_slider_turns_it_by_notches() {
+        let wheel = |at: egui::Pos2, lines: f32, modifiers: egui::Modifiers| {
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, lines * WHEEL_POINTS_PER_STEP),
+                    modifiers,
+                    phase: egui::TouchPhase::Move,
+                },
+            ]
+        };
+        let context = egui::Context::default();
+        let mut value = 0.5;
+        let (_, response) = frame(&context, Kind::Volume, &mut value, true, 1, Vec::new());
+        let over = response.rect.center();
+        let outside = egui::pos2(over.x, response.rect.bottom() + 30.0);
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            2,
+            vec![egui::Event::PointerMoved(over)],
+        );
+        let none = egui::Modifiers::NONE;
+        let (_, response) = frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            3,
+            wheel(over, 1.0, none),
+        );
+        assert!(
+            (value - 0.55).abs() < 1e-5,
+            "up is louder by a notch: {value}"
+        );
+        assert!(response.changed());
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            4,
+            wheel(over, -2.0, none),
+        );
+        assert!((value - 0.45).abs() < 1e-5);
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            5,
+            wheel(over, 40.0, none),
+        );
+        assert_eq!(value, 1.0, "bounded");
+        // Elsewhere, with Ctrl (zoom) or disabled, the wheel leaves it alone.
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            6,
+            wheel(outside, -1.0, none),
+        );
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            true,
+            7,
+            wheel(over, -1.0, egui::Modifiers::CTRL),
+        );
+        frame(
+            &context,
+            Kind::Volume,
+            &mut value,
+            false,
+            8,
+            wheel(over, -1.0, none),
+        );
+        assert_eq!(value, 1.0);
     }
 
     #[test]
