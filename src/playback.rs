@@ -411,6 +411,12 @@ impl Drop for Player {
         }
     }
 }
+/// The gain a volume setting plays at. Hearing follows decibels, so a linear
+/// slider crowded the audible range into its first fifth; the cube (as in
+/// PipeWire's own volume) spreads it out: half the slider is −18 dB.
+fn volume_gain(volume: f32) -> f32 {
+    volume * volume * volume
+}
 fn normal_volume(v: f32) -> f32 {
     if v.is_finite() {
         v.clamp(0.0, 1.0)
@@ -741,7 +747,7 @@ fn render_equalized(output: &mut [f32], pcm: &Pcm, equalizer: &mut crate::equali
     }
     let requested = output.len() / pcm.channels;
     let frames = requested.min(available);
-    let volume = f32::from_bits(pcm.volume.load(Ordering::Relaxed));
+    let volume = volume_gain(f32::from_bits(pcm.volume.load(Ordering::Relaxed)));
     let fade_in_len = pcm.fade_in_len.load(Ordering::Acquire);
     let fade_out_from = pcm.fade_out_from.load(Ordering::Acquire);
     let fade_out_len = pcm.fade_out_len.load(Ordering::Relaxed).max(1);
@@ -2249,7 +2255,8 @@ mod tests {
         p.eof.store(true, Ordering::Release);
         let mut output = [0.0; 4];
         render(&mut output, &p);
-        assert_eq!(output, [0.25, -0.25, 0.125, -0.125]);
+        // Volume 0.5 is a gain of 0.125 on the cubic curve.
+        assert_eq!(output, [0.0625, -0.0625, 0.03125, -0.03125]);
     }
 
     #[test]
@@ -2315,6 +2322,7 @@ mod tests {
     fn read_frame(pcm: &Pcm) -> u64 {
         pcm.cursor.load(Ordering::Acquire) & PCM_FRAME_MASK
     }
+    /// Plays at volume 0.5: a gain of 0.125.
     fn pcm(channels: u16) -> Pcm {
         Pcm::new(
             channels,
@@ -2391,7 +2399,7 @@ mod tests {
         seed_pcm(&p, 0, [0.8, -0.4, 0.2]);
         let mut output = [9.0; 6];
         render(&mut output, &p);
-        assert_eq!(output, [0.4, -0.2, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(output, [0.1, -0.05, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(read_frame(&p), 1);
         p.paused.store(true, Ordering::Relaxed);
         render(&mut output, &p);
@@ -2406,7 +2414,7 @@ mod tests {
         let _guard = p.window.lock().unwrap();
         let mut output = [1.0; 4];
         render(&mut output, &p);
-        assert_eq!(output, [0.4, -0.2, 0.1, -0.1]);
+        assert_eq!(output, [0.1, -0.05, 0.025, -0.025]);
         assert_eq!(read_frame(&p), 2);
         assert_eq!(p.underruns.load(Ordering::Relaxed), 0);
     }
@@ -2758,6 +2766,17 @@ mod tests {
         (player, receiver)
     }
     #[test]
+    fn the_volume_slider_follows_loudness_not_amplitude() {
+        let db = |volume: f32| 20.0 * volume_gain(volume).log10();
+        assert_eq!(volume_gain(1.0), 1.0);
+        assert_eq!(volume_gain(0.0), 0.0);
+        assert!((db(0.5) + 18.06).abs() < 0.01);
+        // Equal steps of the slider are comparable steps of loudness.
+        assert!(db(0.75) - db(0.5) > 10.0);
+        assert!(db(1.0) - db(0.75) > 7.0);
+    }
+
+    #[test]
     fn mute_restores_the_last_nonzero_volume_without_changing_transport() {
         let (player, commands) = queued_player(
             Snapshot {
@@ -3010,7 +3029,7 @@ mod tests {
         assert_eq!(pcm.buffered_range(0.0, 1), (0.0, 1.0, true));
         let mut output = [0.0; 4];
         render(&mut output, &pcm);
-        assert_eq!(output, [0.125; 4]);
+        assert_eq!(output, [0.03125; 4]);
     }
 
     #[test]
@@ -3067,7 +3086,7 @@ mod tests {
         pcm.eof.store(true, Ordering::Release); // one-frame finite fixture
         let mut output = [0.0; 2];
         render(&mut output, &pcm);
-        assert_eq!(output, [0.1, -0.1]);
+        assert_eq!(output, [0.025, -0.025]);
     }
 
     struct SyntheticReader {

@@ -47,6 +47,11 @@ struct Preferences {
     repeat: RepeatMode,
     #[serde(deserialize_with = "deserialize_volume")]
     volume: f32,
+    /// `volume` is the slider's position on the cubic loudness curve.
+    /// Files from before it hold a linear gain and lack the key (false);
+    /// `load_at` converts that gain to the position that plays as loud.
+    #[serde(default, deserialize_with = "deserialize_cubic_volume")]
+    cubic_volume: bool,
     #[serde(deserialize_with = "deserialize_cache_limit")]
     cache_limit_mb: u32,
     #[serde(deserialize_with = "deserialize_language")]
@@ -120,6 +125,7 @@ impl Default for Preferences {
             shuffle: false,
             repeat: RepeatMode::Off,
             volume: DEFAULT_VOLUME,
+            cubic_volume: true,
             cache_limit_mb: DEFAULT_CACHE_MB,
             language: String::new(),
             theme: String::new(),
@@ -200,6 +206,13 @@ fn deserialize_volume<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
         .map(|volume| volume as f32)
         .filter(|volume| valid_volume(*volume))
         .unwrap_or(DEFAULT_VOLUME))
+}
+
+fn deserialize_cubic_volume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
 }
 
 fn deserialize_cache_limit<'de, D: serde::Deserializer<'de>>(
@@ -560,12 +573,14 @@ fn load_at(path: &Path) -> io::Result<Option<f32>> {
     let Some(json) = load_json_at(path)? else {
         return Ok(None);
     };
+    let cubic = json.get("cubic_volume").and_then(|value| value.as_bool()) == Some(true);
     match json.get("volume") {
         Some(value) => value
             .as_f64()
             .map(|volume| volume as f32)
             .filter(|volume| valid_volume(*volume))
-            .map(Some)
+            // A linear gain saved before the cubic curve: the same loudness.
+            .map(|volume| Some(if cubic { volume } else { volume.cbrt() }))
             .ok_or_else(invalid),
         None if json.get("cache_limit_mb").is_some()
             || json.get("language").is_some()
@@ -594,14 +609,30 @@ fn save_at(path: &Path, volume: f32) -> io::Result<()> {
             "Volume must be finite and between zero and one",
         ));
     }
-    update_at(path, |preferences| preferences.volume = volume)
+    update_at(path, |preferences| {
+        preferences.volume = volume;
+        preferences.cubic_volume = true;
+    })
 }
 
 fn update_at(path: &Path, update: impl FnOnce(&mut Preferences)) -> io::Result<()> {
     let _guard = WRITES
         .lock()
         .map_err(|_| io::Error::other("Preferences writer unavailable"))?;
-    let mut preferences = load_preferences_at(path)?.unwrap_or_default();
+    let json = load_json_at(path)?;
+    // Without a valid saved volume the default position is written, not an
+    // old linear gain to convert later.
+    let saved_volume = json
+        .as_ref()
+        .and_then(|json| json.get("volume")?.as_f64())
+        .is_some_and(|volume| valid_volume(volume as f32));
+    let mut preferences = json
+        .map(|json| serde_json::from_value::<Preferences>(json).map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or_default();
+    if !saved_volume {
+        preferences.cubic_volume = true;
+    }
     update(&mut preferences);
     write_at(path, &preferences)
 }
@@ -1123,6 +1154,28 @@ mod tests {
         assert!(!restored.auto_updates);
         assert_eq!(restored.volume, 0.375);
         assert!(restored.shuffle);
+    }
+
+    #[test]
+    fn a_linear_volume_from_before_the_cubic_curve_keeps_its_loudness() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        save_at(&path, 0.25).unwrap();
+        fs::write(&path, r#"{"volume":0.125,"shuffle":true}"#).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.5));
+        // Other settings keep the old gain unconverted until volume is saved.
+        save_playback_modes_at(&path, false, RepeatMode::Off).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.5));
+        save_at(&path, 0.5).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(0.5));
+
+        // A file that never held a volume starts from the default position.
+        fs::write(&path, r#"{"shuffle":true}"#).unwrap();
+        save_playback_modes_at(&path, false, RepeatMode::Off).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
+        fs::remove_file(&path).unwrap();
+        save_playback_modes_at(&path, false, RepeatMode::Off).unwrap();
+        assert_eq!(load_at(&path).unwrap(), Some(DEFAULT_VOLUME));
     }
 
     #[test]
@@ -1671,7 +1724,7 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("preferences.json");
         save_at(&path, 0.25).unwrap();
-        fs::write(&path, r#"{"volume":0.375}"#).unwrap();
+        fs::write(&path, r#"{"volume":0.375,"cubic_volume":true}"#).unwrap();
         let preferences = load_preferences_at(&path).unwrap().unwrap();
         assert_eq!(preferences.volume, 0.375);
         assert_eq!(preferences.cache_limit_mb, DEFAULT_CACHE_MB);
@@ -1710,7 +1763,8 @@ mod tests {
             serde_json::json!(true),
             serde_json::json!({}),
         ] {
-            let value = serde_json::json!({"volume":0.375,"cache_limit_mb":limit});
+            let value =
+                serde_json::json!({"volume":0.375,"cubic_volume":true,"cache_limit_mb":limit});
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
             let preferences = load_preferences_at(&path).unwrap().unwrap();
             assert_eq!(preferences.volume, 0.375);
