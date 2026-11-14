@@ -8,6 +8,13 @@ use sha2::{Digest, Sha256};
 #[path = "system_media_app_tests.rs"]
 mod tests;
 
+#[derive(PartialEq, Eq)]
+enum Navigation {
+    Next,
+    Previous,
+    SeekPastEnd,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     service: Option<SystemMedia>,
@@ -202,10 +209,10 @@ impl MusicApp {
                 }
             }
             Command::Stop => self.system_media_stop(),
-            Command::Next => self.system_media_adjacent(ctx, true),
+            Command::Next => self.system_media_adjacent(ctx, Navigation::Next),
             Command::Previous => {
                 crate::diagnostics::event("system_media", "previous_requested");
-                self.system_media_adjacent(ctx, false);
+                self.system_media_adjacent(ctx, Navigation::Previous);
             }
             Command::SeekBy(seconds) => {
                 if seconds.is_finite() {
@@ -216,7 +223,7 @@ impl MusicApp {
                             && track.duration > 0
                             && target > f64::from(track.duration)
                         {
-                            self.system_media_adjacent(ctx, true);
+                            self.system_media_adjacent(ctx, Navigation::SeekPastEnd);
                         } else {
                             self.system_media_seek(target.max(0.0));
                         }
@@ -288,9 +295,14 @@ impl MusicApp {
         self.commit_playback_seek(position);
     }
 
-    fn system_media_adjacent(&mut self, ctx: &egui::Context, next: bool) {
+    fn system_media_adjacent(&mut self, ctx: &egui::Context, navigation: Navigation) {
         let state = self.playback_snapshot().state;
-        if matches!(state, PlaybackState::Playing | PlaybackState::Loading) {
+        let next = navigation != Navigation::Previous;
+        // Like the player buttons, a deliberate skip from pause starts the
+        // new track. Keep the existing behaviour for seeks past the end.
+        if matches!(state, PlaybackState::Playing | PlaybackState::Loading)
+            || (state == PlaybackState::Paused && navigation != Navigation::SeekPastEnd)
+        {
             if next {
                 self.next_track(ctx);
             } else {

@@ -44,12 +44,11 @@ fn queue_actions_and_media_navigation_work_without_ui_frames_or_changing_the_sou
         app.handle_system_media_command(&ctx, Command::Next);
         assert_eq!(app.playing.as_ref().unwrap().key(), expected);
         assert_eq!(app.resume_position, Some(0.0));
+        assert_eq!(app.playback_snapshot().state, PlaybackState::Loading);
         assert_eq!(app.queue_origin.as_deref(), Some("playlist:42_9"));
-        assert_eq!(app.player.decoder_starts(), 0);
     }
     app.handle_system_media_command(&ctx, Command::Previous);
     assert_eq!(app.playing.as_ref().unwrap().key(), key);
-    assert!(app.workers.is_empty());
     app.handle_system_media_command(&ctx, Command::Next);
     assert_eq!(app.playing.as_ref().unwrap().key(), next_source);
     app.stop_playback();
@@ -564,6 +563,8 @@ fn a_track_coming_back_after_being_hidden_appears_in_place_instead_of_flying() {
 fn no_two_rows_share_a_place_after_stepping_back_over_a_queued_playlist_track() {
     let ctx = egui::Context::default();
     let mut app = prepared(&ctx);
+    // Step through the queue while stopped: this test only renders the rows.
+    app.resume_position = None;
     app.library.tracks = page(6, &[1, 2, 3, 4, 5, 6]).items;
     for (index, track) in app.library.tracks.iter_mut().enumerate() {
         track.title = format!("Song {index}");

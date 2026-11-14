@@ -268,7 +268,7 @@ fn system_and_tray_previous_restart_playing_and_restored_tracks_without_needing_
 }
 
 #[test]
-fn system_and_tray_previous_before_threshold_move_back_and_preserve_pause() {
+fn system_and_tray_previous_before_threshold_start_the_previous_track_from_pause() {
     for via_tray in [false, true] {
         for position in [0.0, 2.999, 3.0] {
             let ctx = egui::Context::default();
@@ -285,17 +285,34 @@ fn system_and_tray_previous_before_threshold_move_back_and_preserve_pause() {
             assert_eq!(app.playing.as_ref().unwrap().key(), previous);
             assert_eq!(app.selected, Some(previous));
             assert_eq!(app.resume_position, Some(0.0));
-            assert_eq!(app.playback_snapshot().state, PlaybackState::Paused);
+            assert_eq!(app.playback_snapshot().state, PlaybackState::Loading);
             assert_eq!(app.queue_origin.as_deref(), Some("playlist:42_9"));
-            assert!(app.workers.is_empty() && app.playback_pending.is_none());
-            assert_eq!(app.player.decoder_starts(), 0);
         }
     }
 }
 
 #[test]
-fn paused_and_stopped_navigation_skip_restricted_rows_without_starting_audio_or_replacing_the_source()
- {
+fn media_next_from_a_paused_player_starts_the_next_available_track() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_track(&ctx);
+    app.play_queue.as_mut().unwrap()[1].unavailable = Some(true);
+    let next = app.play_queue.as_ref().unwrap()[2].key();
+    let (player, _commands) = Player::test_paused(200, 42.75);
+    app.player = player;
+    app.resume_position = None;
+
+    app.handle_system_media_command(&ctx, Command::Next);
+
+    assert_eq!(app.selected, Some(next));
+    assert_eq!(app.playing.as_ref().unwrap().key(), next);
+    let snapshot = app.system_media_snapshot();
+    assert_eq!(snapshot.status, Status::Playing);
+    assert_eq!(snapshot.position, Duration::ZERO);
+    assert_eq!(app.queue_origin.as_deref(), Some("playlist:42_9"));
+}
+
+#[test]
+fn seeking_past_end_and_advancing_after_stop_keep_their_playback_state() {
     let ctx = egui::Context::default();
     let mut app = app_with_track(&ctx);
     app.play_queue.as_mut().unwrap()[1].unavailable = Some(true);
@@ -306,16 +323,13 @@ fn paused_and_stopped_navigation_skip_restricted_rows_without_starting_audio_or_
         .iter()
         .map(Track::key)
         .collect();
-    app.handle_system_media_command(&ctx, Command::Next);
+    app.handle_system_media_command(&ctx, Command::SeekBy(200.0));
     assert_eq!(app.playing.as_ref().unwrap().key(), keys[2]);
     assert_eq!(app.system_media_snapshot().status, Status::Paused);
     assert_eq!(app.resume_position, Some(0.0));
+    app.handle_system_media_command(&ctx, Command::Stop);
     app.handle_system_media_command(&ctx, Command::Previous);
     assert_eq!(app.playing.as_ref().unwrap().key(), keys[0]);
-    assert_eq!(app.system_media_snapshot().status, Status::Paused);
-    app.handle_system_media_command(&ctx, Command::Stop);
-    app.handle_system_media_command(&ctx, Command::Next);
-    assert_eq!(app.playing.as_ref().unwrap().key(), keys[2]);
     assert_eq!(app.system_media_snapshot().status, Status::Stopped);
     assert_eq!(app.system_media_snapshot().position, Duration::ZERO);
     assert_eq!(app.queue_origin.as_deref(), Some("playlist:42_9"));
