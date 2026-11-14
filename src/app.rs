@@ -7717,6 +7717,7 @@ impl MusicApp {
         let mut action = None;
         let mut track_action = None;
         let mut open_library = false;
+        let connected = !self.demo && self.search_ready();
         theme::scroll_area(
             ui,
             egui::ScrollArea::vertical()
@@ -7735,6 +7736,7 @@ impl MusicApp {
                             loading,
                             playing,
                             follow: artist_follow,
+                            mix: connected && crate::model::valid_artist_id(&artist.id),
                         },
                     );
                 } else if let Some(album) = &album {
@@ -7956,6 +7958,18 @@ impl MusicApp {
                 if let Some(link) = link {
                     ctx.copy_text(link);
                     self.playlist_notice(self.language.text("Ссылка скопирована", "Link copied"));
+                }
+            }
+            Some(detail_ui::Action::ArtistMix) => {
+                if let Some(artist) = &artist
+                    && crate::model::valid_artist_id(&artist.id)
+                {
+                    self.play_catalog_mix(
+                        &ctx,
+                        crate::web_audio::CatalogMix::Artist {
+                            entity_id: artist.id.clone(),
+                        },
+                    );
                 }
             }
             Some(detail_ui::Action::EditPlaylist) => {

@@ -20,6 +20,8 @@ pub struct ArtistView<'a> {
     pub loading: bool,
     pub playing: bool,
     pub follow: Option<FollowView>,
+    /// The artist's mix can start: a VK artist ID and a connected account.
+    pub mix: bool,
 }
 
 pub struct AlbumView<'a> {
@@ -54,6 +56,8 @@ pub enum Action {
     EditPlaylist,
     ToggleLibraryLike,
     CopyLink,
+    /// The open artist's mix.
+    ArtistMix,
     ReloadReleases,
 }
 
@@ -247,6 +251,7 @@ pub fn artist_header(
         view.loading,
         view.playing,
         view.follow,
+        Some(view.mix),
     )
 }
 
@@ -478,6 +483,7 @@ fn collection_header(
         } else {
             None
         },
+        None,
     )
     .or(action);
     if playlist && view.can_edit_playlist {
@@ -1119,6 +1125,8 @@ pub(crate) fn fade_color(color: Option<Color32>) -> Color32 {
     Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 245)
 }
 
+/// Play, shuffle, the heart, Copy link and, on an artist's page (`mix` is
+/// whether it can start), the artist's mix.
 fn controls(
     ui: &mut egui::Ui,
     language: Language,
@@ -1126,6 +1134,7 @@ fn controls(
     loading: bool,
     playing: bool,
     follow: Option<FollowView>,
+    mix: Option<bool>,
 ) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -1256,9 +1265,26 @@ fn controls(
                 action = Some(Action::ToggleLibraryLike);
             }
         }
+        // Between the heart and Copy link.
+        if let Some(enabled) = mix {
+            let label = language.text("Микс по исполнителю", "Go to artist mix");
+            if square_button(ui, Icon::Radio, label, enabled).clicked() {
+                action = Some(Action::ArtistMix);
+            }
+        }
         let label = language.text("Копировать ссылку", "Copy link");
-        let (rect, copy) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), Sense::click());
-        let visual = ui.style().interact(&copy);
+        if square_button(ui, Icon::CopyLink, label, true).clicked() {
+            action = Some(Action::CopyLink);
+        }
+    });
+    action
+}
+
+/// A 36-point square button with only an icon; `label` is its tooltip.
+fn square_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), Sense::click());
+        let visual = ui.style().interact(&response);
         ui.painter().rect(
             rect,
             8.0,
@@ -1266,18 +1292,14 @@ fn controls(
             visual.bg_stroke,
             egui::StrokeKind::Inside,
         );
-        icons::paint(
-            ui.painter(),
-            rect.shrink(8.0),
-            Icon::CopyLink,
-            visual.fg_stroke.color,
-        );
-        copy.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-        if copy.on_hover_text(label).clicked() {
-            action = Some(Action::CopyLink);
-        }
-    });
-    action
+        icons::paint(ui.painter(), rect.shrink(8.0), icon, visual.fg_stroke.color);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        response
+    })
+    .inner
+    .on_hover_text(label)
 }
 
 fn shuffle_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
@@ -1287,6 +1309,73 @@ fn shuffle_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_artists_page_has_a_mix_button_between_the_heart_and_copy_link() {
+        let squares = |mix: Option<bool>, click: Option<egui::Pos2>| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut action = None;
+            let mut rects = Vec::new();
+            for tick in 0..4 {
+                let events = match (click, tick) {
+                    (Some(pos), 2 | 3) => vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: tick == 2,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    _ => Vec::new(),
+                };
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(700.0, 100.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let follow = Some(FollowView {
+                            saved: false,
+                            busy: false,
+                        });
+                        let chosen = controls(ui, Language::English, 3, false, false, follow, mix);
+                        action = action.take().or(chosen);
+                    },
+                );
+                rects = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(36.0, 36.0) => {
+                            Some(rect.rect)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                rects.sort_by(|a, b| a.left().total_cmp(&b.left()));
+                output.textures_delta.clear();
+            }
+            (rects, action)
+        };
+        let (without, _) = squares(None, None);
+        let (with, _) = squares(Some(true), None);
+        // The heart and Copy link, and the mix between them.
+        assert_eq!((without.len(), with.len()), (2, 3));
+        let (heart, mix, copy) = (with[0], with[1], with[2]);
+        assert!(heart.right() < mix.left() && mix.right() < copy.left());
+        assert_eq!(heart, without[0]);
+        let (_, action) = squares(Some(true), Some(mix.center()));
+        assert_eq!(action, Some(Action::ArtistMix));
+        let (_, action) = squares(Some(false), Some(mix.center()));
+        assert_eq!(action, None, "no VK artist ID: nothing to start");
+    }
 
     #[test]
     fn playlist_heart_is_right_of_shuffle_and_aligned_with_play_even_in_a_narrow_row() {
@@ -1319,6 +1408,7 @@ mod tests {
                                     saved: false,
                                     busy: false,
                                 }),
+                                None,
                             );
                         },
                     );
@@ -1679,6 +1769,7 @@ mod tests {
                                         loading: false,
                                         playing: false,
                                         follow: None,
+                                        mix: false,
                                     },
                                 );
                             }
@@ -1934,6 +2025,7 @@ mod tests {
                                 &mut covers,
                                 ArtistView {
                                     follow: None,
+                                    mix: false,
                                     language: Language::English,
                                     name: "Artist",
                                     image_url: Some(url),
@@ -2248,6 +2340,7 @@ mod tests {
                             &mut covers,
                             ArtistView {
                                 follow: None,
+                                mix: false,
                                 language,
                                 name: "An artist with a very long displayed name "
                                     .repeat(4)
