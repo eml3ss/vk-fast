@@ -41,6 +41,8 @@ mod notice_fade;
 #[cfg(test)]
 #[path = "owner_page_tests.rs"]
 mod owner_page_tests;
+#[path = "playback_retry.rs"]
+mod playback_retry;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
 #[path = "playlist_removal.rs"]
@@ -1345,6 +1347,7 @@ pub struct MusicApp {
     language: Language,
     player: Player,
     unavailable_playback: unavailable_playback::State,
+    playback_retry: playback_retry::State,
     system_media: system_media_app::State,
     tray: tray_app::State,
     minimize_to_tray: bool,
@@ -1793,6 +1796,7 @@ impl MusicApp {
             language,
             player,
             unavailable_playback: unavailable_playback::State::default(),
+            playback_retry: playback_retry::State::default(),
             system_media: system_media_app::State::default(),
             tray: tray_app::State::default(),
             minimize_to_tray: preferences::load_minimize_to_tray(),
@@ -2521,6 +2525,7 @@ impl MusicApp {
     }
 
     fn play_track_at(&mut self, ctx: &egui::Context, key: (i64, i64), position: f64) {
+        self.playback_retry.starting();
         self.playlist_controls.cancel_play();
         self.home_autoplay = None;
         self.mix_advance = false;
@@ -2615,6 +2620,10 @@ impl MusicApp {
             .session
             .as_ref()
             .and_then(|session| session.music.clone());
+        let owner = self
+            .session
+            .as_ref()
+            .map_or(0, |session| session.profile.id);
         let cache = self.audio_cache.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let ctx = self.repaint_target.with_context(ctx);
@@ -2651,7 +2660,25 @@ impl MusicApp {
                         None
                     } else if let Some(music) = music {
                         crate::diagnostics::event("playback", "resolve: vk_session");
-                        Some(music.resolve_cached(key, &cancel).map_err(UiError::Music)?)
+                        let url = match music.resolve_cached(key, &cancel) {
+                            // VK may want the sign-in renewed first: the
+                            // viewer page renews it as a browser would, and
+                            // a session confirmed alive gets one more try.
+                            Err(WebAudioError::Expired) => {
+                                match music.confirm_expired(owner, WebAudioError::Expired) {
+                                    WebAudioError::Temporary => {
+                                        crate::diagnostics::event(
+                                            "playback",
+                                            "resolve: session_confirmed; retry",
+                                        );
+                                        music.resolve_cached(key, &cancel)
+                                    }
+                                    error => Err(error),
+                                }
+                            }
+                            result => result,
+                        };
+                        Some(url.map_err(UiError::Music)?)
                     } else {
                         if !track.has_stream() {
                             return Err(UiError::NoStream);
@@ -3292,8 +3319,11 @@ impl MusicApp {
         {
             self.finished_handled = true;
             crate::diagnostics::event("playback", "track ended; advancing");
+            self.playback_retry.advancing(true);
             self.advance_track(ctx, true);
+            self.playback_retry.advancing(false);
         }
+        self.recover_failed_playback(ctx);
     }
 
     /// Drops the next track found or opened ahead of a crossfade.
@@ -3478,7 +3508,9 @@ impl MusicApp {
                 snapshot.position
             ),
         );
+        self.playback_retry.advancing(true);
         self.advance_track(ctx, true);
+        self.playback_retry.advancing(false);
         if self.playback_pending.is_none() {
             // Nothing to fade into (a mix or page still loading, or the end).
             self.crossfade_until = None;
@@ -12965,6 +12997,7 @@ mod tests {
             language,
             player: Player::new(),
             unavailable_playback: unavailable_playback::State::default(),
+            playback_retry: playback_retry::State::default(),
             system_media: system_media_app::State::default(),
             tray: tray_app::State::default(),
             minimize_to_tray: false,

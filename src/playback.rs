@@ -171,6 +171,14 @@ impl Player {
         (player, control)
     }
 
+    /// A player whose track failed to load: the decoder gave up.
+    #[cfg(test)]
+    pub(crate) fn test_failed(duration: u32, position: f64) -> (Self, impl Send) {
+        let (player, control) = Self::test_paused(duration, position);
+        player.update_failure(PlaybackError::Decoder);
+        (player, control)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_paused(duration: u32, position: f64) -> (Self, impl Send) {
         let (commands, receiver) = mpsc::channel();
