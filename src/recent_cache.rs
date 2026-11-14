@@ -12,42 +12,33 @@ pub const MAX_RECENT: usize = 32;
 const MAX_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn state_path(account_id: i64) -> io::Result<PathBuf> {
+    account_state_path("recent", account_id)
+}
+
+/// `folder/<account>.json` in the app's state directory: per-account data
+/// the user built up (recent tracks, searches), not a cache.
+pub(crate) fn account_state_path(folder: &str, account_id: i64) -> io::Result<PathBuf> {
+    if account_id <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid state account",
+        ));
+    }
     #[cfg(windows)]
-    {
-        if account_id <= 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid recent account",
-            ));
-        }
-        Ok(crate::app_paths::state_dir()?
-            .join("recent")
-            .join(format!("{account_id}.json")))
-    }
+    let base = crate::app_paths::state_dir()?;
     #[cfg(not(windows))]
-    {
-        if account_id <= 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid recent account",
-            ));
-        }
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|path| path.join(".local/state"))
-            })
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "User state directory unavailable")
-            })?;
-        Ok(base
-            .join("vk-fast/recent")
-            .join(format!("{account_id}.json")))
-    }
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/state"))
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "User state directory unavailable"))?
+        .join("vk-fast");
+    Ok(base.join(folder).join(format!("{account_id}.json")))
 }
 
 fn load_at(path: &Path, account_id: i64) -> io::Result<Vec<Track>> {

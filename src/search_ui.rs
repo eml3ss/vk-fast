@@ -39,6 +39,9 @@ pub enum Action {
     OpenArtist(ArtistRef),
     OpenAlbum(AlbumRef),
     OpenPlaylist(AlbumRef),
+    /// Remove one search from the history.
+    Forget(String),
+    ClearHistory,
 }
 
 #[derive(Clone, Copy)]
@@ -193,6 +196,7 @@ pub fn queries(
                     query,
                     ui.available_width(),
                     !popular && selected == Some(index),
+                    Icon::Search,
                 )
                 .clicked()
                 {
@@ -204,7 +208,83 @@ pub fn queries(
     action
 }
 
-fn query_item(ui: &mut egui::Ui, query: &str, width: f32, selected: bool) -> Response {
+/// The account's recent searches, newest first, each with a button that
+/// removes it, and one that clears them all. Shown only when there are some.
+pub fn history(ui: &mut egui::Ui, language: Language, queries: &[String]) -> Option<Action> {
+    let mut action = None;
+    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(language.text("Недавние запросы", "Recent searches"))
+                    .size(18.0)
+                    .family(theme::semibold()),
+            )
+            .selectable(false),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(4.0);
+            let clear = ui.add(
+                egui::Label::new(
+                    RichText::new(language.text("Очистить", "Clear")).color(theme::muted()),
+                )
+                .selectable(false)
+                .sense(Sense::click()),
+            );
+            clear.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    language.text("Очистить", "Clear"),
+                )
+            });
+            if clear
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(language.text("Очистить историю поиска", "Clear search history"))
+                .clicked()
+            {
+                action = Some(Action::ClearHistory);
+            }
+        });
+    });
+    ui.add_space(2.0);
+    let forget_label = language.text("Удалить из истории", "Remove from history");
+    for (index, query) in queries.iter().enumerate() {
+        ui.push_id(("search-history", index), |ui| {
+            let row = query_item(ui, query, ui.available_width(), false, Icon::Clock);
+            // Over the row, so it takes the click; shown while the row is.
+            let rect = egui::Rect::from_center_size(
+                row.rect.right_center() - egui::vec2(20.0, 0.0),
+                egui::vec2(26.0, 26.0),
+            );
+            let forget = ui.interact(rect, ui.id().with("forget"), Sense::click());
+            if row.hovered() || forget.hovered() || forget.has_focus() {
+                let color = if forget.hovered() {
+                    ui.visuals().text_color()
+                } else {
+                    theme::muted()
+                };
+                icons::paint(ui.painter(), rect.shrink(6.0), Icon::Close, color);
+            }
+            forget.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), forget_label)
+            });
+            if forget
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(forget_label)
+                .clicked()
+            {
+                action = Some(Action::Forget(query.clone()));
+            } else if row.clicked() {
+                action = Some(Action::Search(query.clone()));
+            }
+        });
+    }
+    action
+}
+
+fn query_item(ui: &mut egui::Ui, query: &str, width: f32, selected: bool, icon: Icon) -> Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width.max(1.0), 38.0), Sense::click());
     if response.clicked() {
         response.request_focus();
@@ -221,12 +301,20 @@ fn query_item(ui: &mut egui::Ui, query: &str, width: f32, selected: bool) -> Res
             rect.left_center() + egui::vec2(18.0, 0.0),
             egui::vec2(15.0, 15.0),
         ),
-        Icon::Search,
+        icon,
         theme::muted(),
     );
     let text = egui::Rect::from_min_max(
         rect.min + egui::vec2(34.0, 0.0),
-        rect.max - egui::vec2(12.0, 0.0),
+        rect.max
+            - egui::vec2(
+                if matches!(icon, Icon::Clock) {
+                    40.0
+                } else {
+                    12.0
+                },
+                0.0,
+            ),
     );
     paint_text(
         ui,

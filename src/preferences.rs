@@ -95,6 +95,12 @@ struct Preferences {
     crossfade_seconds: u8,
     #[serde(deserialize_with = "deserialize_explicit_badge")]
     explicit_badge: bool,
+    /// On unless turned off: recent searches above the popular ones.
+    #[serde(deserialize_with = "deserialize_on")]
+    search_history: bool,
+    /// On unless turned off: VK's popular searches on the empty search page.
+    #[serde(deserialize_with = "deserialize_on")]
+    popular_searches: bool,
     #[serde(deserialize_with = "deserialize_ui_scale")]
     ui_scale: u16,
     /// Off unless turned on: the scale follows the monitor's resolution.
@@ -143,6 +149,8 @@ impl Default for Preferences {
             crossfade: false,
             crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
+            search_history: true,
+            popular_searches: true,
             ui_scale: DEFAULT_UI_SCALE,
             auto_ui_scale: false,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
@@ -340,6 +348,13 @@ fn deserialize_ui_scale<'de, D: serde::Deserializer<'de>>(
         .and_then(|scale| u16::try_from(scale).ok())
         .filter(|scale| UI_SCALE_RANGE.contains(scale))
         .unwrap_or(DEFAULT_UI_SCALE))
+}
+
+/// A switch that is on unless explicitly turned off.
+fn deserialize_on<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(true))
 }
 
 fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
@@ -979,6 +994,24 @@ pub fn save_mix_after_queue(enabled: bool) -> io::Result<()> {
 }
 
 /// The "E" badge by explicit tracks; on unless turned off in Settings.
+/// Whether recent searches are kept and shown, and whether VK's popular
+/// searches are shown: both on unless turned off.
+pub fn load_search_lists() -> (bool, bool) {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or((true, true), |preferences| {
+            (preferences.search_history, preferences.popular_searches)
+        })
+}
+
+pub fn save_search_lists(history: bool, popular: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.search_history = history;
+        preferences.popular_searches = popular;
+    })
+}
+
 pub fn load_explicit_badge() -> bool {
     preferences_path()
         .ok()
@@ -1366,6 +1399,24 @@ mod tests {
         update_at(&path, |preferences| preferences.auto_ui_scale = true).unwrap();
         let restored = load_preferences_at(&path).unwrap().unwrap();
         assert!(restored.auto_ui_scale && restored.ui_scale == 125);
+    }
+
+    #[test]
+    fn search_lists_default_on_and_turning_one_off_survives_other_settings() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [
+            r#"{}"#,
+            r#"{"search_history":"invalid","popular_searches":null}"#,
+        ] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(preferences.search_history && preferences.popular_searches);
+        }
+        update_at(&path, |preferences| preferences.search_history = false).unwrap();
+        save_at(&path, 0.5).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(!restored.search_history);
+        assert!(restored.popular_searches);
     }
 
     #[test]

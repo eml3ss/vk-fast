@@ -58,6 +58,7 @@ mod release_info;
 mod repaint_target;
 mod screen_cache;
 mod scrolling;
+mod search_history;
 mod search_swipe;
 mod search_ui;
 mod seek_bar;

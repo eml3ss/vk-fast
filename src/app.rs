@@ -500,6 +500,10 @@ struct SearchState {
     popular_requested: bool,
     popular_error: Option<WebAudioError>,
     popular_request: Option<SearchRequest<Vec<String>>>,
+    /// The account's recent searches, newest first, and whose they are.
+    history: Vec<String>,
+    history_owner: Option<i64>,
+    history_load: Option<(i64, mpsc::Receiver<Vec<String>>)>,
     hints: Vec<String>,
     hints_for: String,
     hints_error: Option<WebAudioError>,
@@ -1398,6 +1402,12 @@ pub struct MusicApp {
     click_behavior_save_failed: bool,
     search_on_enter: bool,
     search_on_enter_save_failed: bool,
+    /// Recent searches are kept and shown above the popular ones.
+    search_history: bool,
+    /// VK's popular searches are shown on the empty search page.
+    popular_searches: bool,
+    search_lists_save_failed: bool,
+    search_history_writer: crate::search_history::Writer,
     middle_autoscroll: bool,
     middle_autoscroll_save_failed: bool,
     /// The "E" badge by explicit tracks' titles.
@@ -1673,6 +1683,11 @@ impl MusicApp {
         };
         ctx.set_zoom_factor(f32::from(ui_scale) / 100.0);
         let cache_limit_mb = preferences::load_cache_limit_mb();
+        let search_lists = if cfg!(test) {
+            (true, true)
+        } else {
+            preferences::load_search_lists()
+        };
         #[cfg(not(test))]
         let audio_cache = AudioCache::new(u64::from(cache_limit_mb) * 1024 * 1024).ok();
         // UI tests inject a temporary cache and must never prune the user's cache.
@@ -1846,6 +1861,10 @@ impl MusicApp {
             double_click_to_play: preferences::load_double_click_to_play(),
             click_behavior_save_failed: false,
             search_on_enter: preferences::load_search_on_enter(),
+            search_history: search_lists.0,
+            popular_searches: search_lists.1,
+            search_lists_save_failed: false,
+            search_history_writer: Default::default(),
             search_on_enter_save_failed: false,
             middle_autoscroll: preferences::load_middle_autoscroll(),
             middle_autoscroll_save_failed: false,
@@ -4853,8 +4872,93 @@ impl MusicApp {
         }
     }
 
+    /// Remembers a search the user made, while history is on.
+    fn remember_search(&mut self, query: &str) {
+        let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
+            return;
+        };
+        if !self.search_history || self.demo || self.search.history_owner != Some(owner) {
+            return;
+        }
+        crate::search_history::remember(&mut self.search.history, query);
+        self.search_history_writer.save(owner, &self.search.history);
+    }
+
+    fn forget_search(&mut self, query: Option<&str>) {
+        let Some(owner) = self.search.history_owner else {
+            return;
+        };
+        match query {
+            Some(query) => crate::search_history::forget(&mut self.search.history, query),
+            None => self.search.history.clear(),
+        }
+        self.search_history_writer.save(owner, &self.search.history);
+    }
+
+    /// Reads the account's history in the background the first time search
+    /// is used; searches made meanwhile stay the newest.
+    fn load_search_history(&mut self, ctx: &egui::Context) {
+        if let Some((owner, receiver)) = &self.search.history_load {
+            match receiver.try_recv() {
+                Ok(mut loaded) => {
+                    if self.search.history_owner == Some(*owner) && self.search_history {
+                        for query in self.search.history.iter().rev() {
+                            crate::search_history::remember(&mut loaded, query);
+                        }
+                        self.search.history = loaded;
+                    }
+                    self.search.history_load = None;
+                }
+                Err(TryRecvError::Disconnected) => self.search.history_load = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let Some(owner) = self.session.as_ref().map(|session| session.profile.id) else {
+            return;
+        };
+        if !self.search_history || self.demo || self.search.history_owner == Some(owner) {
+            return;
+        }
+        self.search.history_owner = Some(owner);
+        self.search.history.clear();
+        if cfg!(test) {
+            return;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = self.repaint_target.with_context(ctx);
+        if let Ok(worker) = thread::Builder::new()
+            .name("vk-search-history-load".into())
+            .spawn(move || {
+                let _ = sender.send(crate::search_history::load(owner).unwrap_or_default());
+                ctx.request_repaint();
+            })
+        {
+            self.workers.push(worker);
+            self.search.history_load = Some((owner, receiver));
+        }
+    }
+
+    fn set_search_lists(&mut self, history: bool, popular: bool) {
+        if !history && self.search_history {
+            // Off means not kept: what was saved goes too.
+            self.forget_search(None);
+        }
+        if history && !self.search_history {
+            self.search.history_owner = None;
+        }
+        if popular && !self.popular_searches {
+            self.search.popular_error = None;
+            self.search.popular_requested = false;
+        }
+        self.search_history = history;
+        self.popular_searches = popular;
+        self.search_lists_save_failed =
+            !cfg!(test) && preferences::save_search_lists(history, popular).is_err();
+    }
+
     fn submit_search(&mut self, ctx: &egui::Context, query: String) {
         let query = query.trim().chars().take(512).collect::<String>();
+        self.remember_search(&query);
         self.search.input = query.clone();
         self.search.edit();
         self.page = MusicPage::Search(query.clone());
@@ -4898,7 +5002,7 @@ impl MusicApp {
         }
         let query = self.search.input.trim().to_owned();
         if query.is_empty() {
-            if !self.search.popular_requested {
+            if self.popular_searches && !self.search.popular_requested {
                 self.search.popular_requested = true;
                 match self.spawn_search(ctx, String::new(), 0, |client, owner, cancel| {
                     client.search_popular(owner, cancel)
@@ -4956,7 +5060,8 @@ impl MusicApp {
         }
     }
 
-    fn poll_search(&mut self, _ctx: &egui::Context) {
+    fn poll_search(&mut self, ctx: &egui::Context) {
+        self.load_search_history(ctx);
         if let Some((request, result)) = search_reply(&mut self.search.popular_request)
             && self
                 .session
@@ -5238,20 +5343,42 @@ impl MusicApp {
                 .auto_shrink([false, false]),
             |ui| {
                 if query.is_empty() {
-                    let error = self
-                        .search
-                        .popular_error
-                        .as_ref()
-                        .map(|error| error.localized(language));
-                    action = search_ui::queries(
-                        ui,
-                        language,
-                        search_ui::QueryKind::Popular,
-                        &self.search.popular,
-                        self.search.popular_request.is_some() || !self.search.popular_requested,
-                        error.as_deref(),
-                        None,
-                    );
+                    let history = self.search_history && !self.search.history.is_empty();
+                    if history {
+                        action = search_ui::history(ui, language, &self.search.history);
+                    }
+                    if self.popular_searches {
+                        if history {
+                            ui.add_space(14.0);
+                        }
+                        let error = self
+                            .search
+                            .popular_error
+                            .as_ref()
+                            .map(|error| error.localized(language));
+                        let popular = search_ui::queries(
+                            ui,
+                            language,
+                            search_ui::QueryKind::Popular,
+                            &self.search.popular,
+                            self.search.popular_request.is_some() || !self.search.popular_requested,
+                            error.as_deref(),
+                            None,
+                        );
+                        if action.is_none() {
+                            action = popular;
+                        }
+                    } else if !history {
+                        theme::inset_heading(ui, |ui| {
+                            ui.label(
+                                RichText::new(language.text(
+                                    "Введите запрос, чтобы найти музыку.",
+                                    "Type a search to find music.",
+                                ))
+                                .color(theme::muted()),
+                            )
+                        });
+                    }
                 } else if !submitted {
                     let error = self
                         .search
@@ -5319,7 +5446,7 @@ impl MusicApp {
                     }
                 }
                 let error = if query.is_empty() {
-                    self.search.popular_error.is_some()
+                    self.popular_searches && self.search.popular_error.is_some()
                 } else if submitted {
                     self.search.results_error.is_some()
                 } else {
@@ -5341,8 +5468,14 @@ impl MusicApp {
                 }
             },
         );
+        if submitted && (track_action.is_some() || action.is_some()) {
+            // Opening or playing a result keeps the search, Enter or not.
+            self.remember_search(&query);
+        }
         match action {
             Some(search_ui::Action::Search(query)) => self.submit_search(&ctx, query),
+            Some(search_ui::Action::Forget(query)) => self.forget_search(Some(&query)),
+            Some(search_ui::Action::ClearHistory) => self.forget_search(None),
             Some(search_ui::Action::OpenArtist(artist)) => {
                 self.navigate_music(&ctx, MusicPage::Artist(artist))
             }
@@ -11055,6 +11188,7 @@ impl MusicApp {
                 Setting::CompactSeek,
                 Setting::DoubleClickPlay,
                 Setting::SearchOnEnter,
+                Setting::SearchLists,
                 Setting::MiddleAutoscroll,
                 Setting::ExplicitBadge,
                 Setting::AnimatedBackdrop,
@@ -11324,6 +11458,7 @@ impl MusicApp {
                         || query.matches(Setting::CompactSeek)
                         || query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
@@ -11358,6 +11493,7 @@ impl MusicApp {
                     if query.matches(Setting::CompactSeek)
                         || query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
@@ -11389,6 +11525,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::DoubleClickPlay)
                         || query.matches(Setting::SearchOnEnter)
+                        || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
@@ -11418,7 +11555,8 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::SearchOnEnter) {
+                    if query.matches(Setting::SearchOnEnter) || query.matches(Setting::SearchLists)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -11437,6 +11575,46 @@ impl MusicApp {
                         .color(theme::muted()),
                     );
                     if self.search_on_enter_save_failed {
+                        ui.colored_label(
+                            theme::error(),
+                            t(
+                                "Не удалось сохранить настройку поиска.",
+                                "Could not save the search preference.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::SearchLists)
+                        || query.matches(Setting::MiddleAutoscroll)
+                        || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::AnimatedBackdrop)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::SearchLists) {
+                    let (mut history, mut popular) = (self.search_history, self.popular_searches);
+                    let history_changed =
+                        theme::switch(ui, &mut history, t("История поиска", "Search history"))
+                            .changed();
+                    ui.label(
+                        RichText::new(t(
+                            "Недавние запросы над популярными. Выключение удаляет сохранённую историю.",
+                            "Recent searches above the popular ones. Turning it off deletes the saved history.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
+                    ui.add_space(8.0);
+                    let popular_changed = theme::switch(
+                        ui,
+                        &mut popular,
+                        t("Популярные запросы", "Popular searches"),
+                    )
+                    .changed();
+                    if history_changed || popular_changed {
+                        self.set_search_lists(history, popular);
+                    }
+                    if self.search_lists_save_failed {
                         ui.colored_label(
                             theme::error(),
                             t(
@@ -13044,6 +13222,10 @@ mod tests {
             double_click_to_play: false,
             click_behavior_save_failed: false,
             search_on_enter: true,
+            search_history: true,
+            popular_searches: true,
+            search_lists_save_failed: false,
+            search_history_writer: Default::default(),
             search_on_enter_save_failed: false,
             middle_autoscroll: false,
             middle_autoscroll_save_failed: false,
@@ -17787,6 +17969,60 @@ mod tests {
         assert_eq!(app.search.input, "Second popular query");
         assert!(matches!(&app.page, MusicPage::Search(query) if query == "Second popular query"));
         assert!(app.playing.is_none());
+    }
+
+    #[test]
+    fn recent_searches_sit_above_popular_ones_and_either_list_can_be_turned_off() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        app.open_search(&ctx, None);
+        app.search.popular = vec!["Popular query".into()];
+        app.search.popular_requested = true;
+        let size = egui::vec2(1040.0, 720.0);
+        let mut frame = 0;
+        app.poll_search(&ctx);
+        assert_eq!(
+            app.search.history_owner,
+            Some(42),
+            "the account's history is read"
+        );
+        app.search.history = vec!["Older search".into(), "Oldest search".into()];
+        app.submit_search(&ctx, "  New search ".into());
+        assert_eq!(
+            app.search.history,
+            ["New search", "Older search", "Oldest search"]
+        );
+        app.submit_search(&ctx, String::new());
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        let recent = account_ui_text_rect(&output, "Recent searches").unwrap();
+        let newest = account_ui_text_rect(&output, "New search").unwrap();
+        let popular = account_ui_text_rect(&output, "Popular searches").unwrap();
+        let older = account_ui_text_rect(&output, "Oldest search").unwrap();
+        assert!(recent.bottom() < newest.top() && older.bottom() < popular.top());
+
+        // A search picked from the history moves to its front.
+        account_ui_click(&ctx, &mut app, size, &mut frame, older.center());
+        assert!(matches!(&app.page, MusicPage::Search(query) if query == "Oldest search"));
+        assert_eq!(app.search.history[0], "Oldest search");
+        app.forget_search(Some("older SEARCH"));
+        assert_eq!(app.search.history, ["Oldest search", "New search"]);
+
+        // History off: nothing kept or shown, and searches are not recorded.
+        app.set_search_lists(false, true);
+        assert!(app.search.history.is_empty());
+        app.submit_search(&ctx, "Private search".into());
+        assert!(app.search.history.is_empty());
+
+        // Both off: the empty page asks VK for nothing and says what to do.
+        app.set_search_lists(false, false);
+        app.search.popular_requested = false;
+        app.submit_search(&ctx, String::new());
+        let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert!(!app.search.popular_requested);
+        assert!(account_ui_text_rect(&output, "Popular searches").is_none());
+        assert!(account_ui_text_rect(&output, "Type a search to find music.").is_some());
     }
 
     #[test]

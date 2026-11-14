@@ -17,6 +17,7 @@ pub enum Setting {
     CompactSeek,
     DoubleClickPlay,
     SearchOnEnter,
+    SearchLists,
     MiddleAutoscroll,
     ExplicitBadge,
     AnimatedBackdrop,
@@ -83,6 +84,9 @@ impl Query {
             }
             Setting::SearchOnEnter => {
                 "интерфейс поиск искать энтер enter ввод нажатие клавиша сразу при вводе текста interface search enter key press instant typing as you type"
+            }
+            Setting::SearchLists => {
+                "интерфейс поиск история поиска недавние запросы популярные запросы подсказки список показывать скрыть очистить interface search history recent searches popular searches suggestions list show hide clear"
             }
             Setting::MiddleAutoscroll => {
                 "интерфейс автопрокрутка прокрутка колёсико колесико средняя кнопка мыши щелчок interface autoscroll auto scroll middle click mouse wheel button"
