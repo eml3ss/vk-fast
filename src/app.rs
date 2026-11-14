@@ -9108,6 +9108,7 @@ impl MusicApp {
             popup
         };
         let language = self.language;
+        let connected = !self.demo && self.search_ready();
         popup
             .show(|menu| {
                 let target = menu
@@ -9117,10 +9118,20 @@ impl MusicApp {
                 let action = match &target {
                     track_menu::Target::Track => return self.track_context_menu(menu, track),
                     track_menu::Target::Artist(artist) => {
-                        track_menu::show_artist(menu, language, artist)
+                        let follow = self.artist_follow_view(artist);
+                        track_menu::show_artist(
+                            menu,
+                            track_menu::ArtistView {
+                                language,
+                                artist,
+                                connected,
+                                followed: follow.as_ref().map(|follow| follow.saved),
+                                follow_busy: follow.is_some_and(|follow| follow.busy),
+                            },
+                        )
                     }
                     track_menu::Target::Album(album) => {
-                        track_menu::show_album(menu, language, album)
+                        track_menu::show_album(menu, language, album, connected)
                     }
                 };
                 action.map(|action| TrackAction::Menu(track.clone(), action))
@@ -9219,6 +9230,28 @@ impl MusicApp {
                     self.link_copied_notice();
                 }
             }
+            track_menu::Action::ArtistMix(artist) => {
+                if crate::model::valid_artist_id(&artist.id) {
+                    // VK's artist mix takes the artist's own ID as its entity.
+                    self.play_catalog_mix(
+                        ctx,
+                        crate::web_audio::CatalogMix::Artist {
+                            entity_id: artist.id,
+                        },
+                    );
+                }
+            }
+            track_menu::Action::AlbumMix(album) => {
+                if self.search_ready() && !self.demo && album.owner_id != 0 && album.id > 0 {
+                    self.mix_request = None;
+                    self.load_mix_from(
+                        ctx,
+                        true,
+                        Some(MixSeed::Playlist((album.owner_id, album.id))),
+                    );
+                }
+            }
+            track_menu::Action::ToggleFollow(artist) => self.toggle_artist_follow(ctx, artist),
             track_menu::Action::RefreshPlaylists => self.load_playlists(ctx, true),
             track_menu::Action::CopyDetails(detail) => {
                 let text = detail.text(track);
@@ -16548,7 +16581,7 @@ mod tests {
                 // On an artist's name the menu is the artist's own.
                 let artist = target == 1;
                 let labels: &[&str] = if artist {
-                    &["Go to artist", "Copy link"]
+                    &["Go to artist", "Go to artist mix", "Follow", "Copy link"]
                 } else {
                     &["Add to queue", "Go to artist", "Go to album", "Copy link"]
                 };
@@ -16630,6 +16663,7 @@ mod tests {
         }
         output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         assert!(account_ui_text_rect(&output, "Go to album").is_some());
+        assert!(account_ui_text_rect(&output, "Go to album mix").is_some());
         assert!(account_ui_text_rect(&output, "Add to queue").is_none());
         let copy = account_ui_text_rect(&output, "Copy link").unwrap().center();
         let copied = account_ui_click(&ctx, &mut app, size, &mut frame, copy);

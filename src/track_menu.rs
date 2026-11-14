@@ -46,6 +46,10 @@ pub enum Action {
     OpenAlbum(AlbumRef),
     CopyArtistLink(ArtistRef),
     CopyAlbumLink(AlbumRef),
+    ArtistMix(ArtistRef),
+    AlbumMix(AlbumRef),
+    /// Follows the artist, or unfollows one already followed.
+    ToggleFollow(ArtistRef),
     RefreshPlaylists,
     ToggleDislike,
     CopyDetails(Detail),
@@ -62,7 +66,19 @@ pub enum Target {
 }
 
 /// The menu of an artist right-clicked in a track row.
-pub fn show_artist(ui: &mut egui::Ui, language: Language, artist: &ArtistRef) -> Option<Action> {
+pub struct ArtistView<'a> {
+    pub language: Language,
+    pub artist: &'a ArtistRef,
+    pub connected: bool,
+    /// Whether the account follows the artist, when known.
+    pub followed: Option<bool>,
+    pub follow_busy: bool,
+}
+
+pub fn show_artist(ui: &mut egui::Ui, view: ArtistView<'_>) -> Option<Action> {
+    let ArtistView {
+        language, artist, ..
+    } = view;
     let mut action = None;
     ui.set_width(WIDTH);
     ui.spacing_mut().item_spacing.y = 2.0;
@@ -80,8 +96,34 @@ pub fn show_artist(ui: &mut egui::Ui, language: Language, artist: &ArtistRef) ->
     {
         action = Some(Action::Artist(artist.clone()));
     }
-    let copy = language.text("Копировать ссылку", "Copy link");
     let linked = crate::model::valid_artist_id(&artist.id);
+    let mix = language.text("Микс по исполнителю", "Go to artist mix");
+    if row(ui, Icon::Radio, mix, view.connected && linked, false, false).clicked() {
+        action = Some(Action::ArtistMix(artist.clone()));
+    }
+    let followed = view.followed == Some(true);
+    if row(
+        ui,
+        if followed {
+            Icon::HeartFilled
+        } else {
+            Icon::Heart
+        },
+        if followed {
+            language.text("Отписаться", "Unfollow")
+        } else {
+            language.text("Подписаться", "Follow")
+        },
+        view.connected && view.followed.is_some() && !view.follow_busy,
+        false,
+        view.follow_busy,
+    )
+    .clicked()
+    {
+        action = Some(Action::ToggleFollow(artist.clone()));
+    }
+    separator(ui);
+    let copy = language.text("Копировать ссылку", "Copy link");
     if row(ui, Icon::CopyLink, copy, linked, false, false).clicked() {
         action = Some(Action::CopyArtistLink(artist.clone()));
     }
@@ -92,17 +134,27 @@ pub fn show_artist(ui: &mut egui::Ui, language: Language, artist: &ArtistRef) ->
 }
 
 /// The menu of an album right-clicked in a track row.
-pub fn show_album(ui: &mut egui::Ui, language: Language, album: &AlbumRef) -> Option<Action> {
+pub fn show_album(
+    ui: &mut egui::Ui,
+    language: Language,
+    album: &AlbumRef,
+    connected: bool,
+) -> Option<Action> {
     let mut action = None;
     ui.set_width(WIDTH);
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.style_mut().interaction.selectable_labels = false;
+    let linked = album.owner_id != 0 && album.id > 0;
     let open = language.text("Перейти к альбому", "Go to album");
     if row(ui, Icon::Album, open, true, false, false).clicked() {
         action = Some(Action::OpenAlbum(album.clone()));
     }
+    let mix = language.text("Микс по альбому", "Go to album mix");
+    if row(ui, Icon::Radio, mix, connected && linked, false, false).clicked() {
+        action = Some(Action::AlbumMix(album.clone()));
+    }
+    separator(ui);
     let copy = language.text("Копировать ссылку", "Copy link");
-    let linked = album.owner_id != 0 && album.id > 0;
     if row(ui, Icon::CopyLink, copy, linked, false, false).clicked() {
         action = Some(Action::CopyAlbumLink(album.clone()));
     }
@@ -692,6 +744,107 @@ mod tests {
             }
             _ => None,
         })
+    }
+
+    /// Shows an artist's menu for a few frames, the last with `events`, and
+    /// returns its picture and the chosen action.
+    fn artist_menu(
+        followed: Option<bool>,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<Action>) {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let artist = ArtistRef {
+            id: "1234567890123456789".into(),
+            name: "Synthetic Artist".into(),
+        };
+        let mut action = None;
+        let mut output = None;
+        let frames = if events.is_empty() { 3 } else { 5 };
+        let press = events;
+        for tick in 0..frames {
+            let events = match tick {
+                3 => press.clone(),
+                4 => press
+                    .iter()
+                    .map(|event| match event {
+                        egui::Event::PointerButton {
+                            pos,
+                            button,
+                            modifiers,
+                            ..
+                        } => egui::Event::PointerButton {
+                            pos: *pos,
+                            button: *button,
+                            pressed: false,
+                            modifiers: *modifiers,
+                        },
+                        other => other.clone(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let mut frame = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::Popup::new(
+                        egui::Id::new("artist-menu-test"),
+                        ui.ctx().clone(),
+                        egui::pos2(12.0, 12.0),
+                        ui.layer_id(),
+                    )
+                    .kind(egui::PopupKind::Menu)
+                    .show(|ui| {
+                        let chosen = show_artist(
+                            ui,
+                            ArtistView {
+                                language: Language::English,
+                                artist: &artist,
+                                connected: true,
+                                followed,
+                                follow_busy: false,
+                            },
+                        );
+                        action = action.take().or(chosen);
+                    });
+                },
+            );
+            frame.textures_delta.clear();
+            output = Some(frame);
+        }
+        (output.unwrap(), action)
+    }
+
+    #[test]
+    fn an_artists_menu_follows_or_unfollows_and_starts_the_artists_mix() {
+        let (output, _) = artist_menu(Some(false), Vec::new());
+        for caption in ["Go to artist", "Go to artist mix", "Follow", "Copy link"] {
+            assert!(text_rect(&output, caption).is_some(), "Missing {caption}");
+        }
+        let follow = text_rect(&output, "Follow").unwrap().center();
+        let mix = text_rect(&output, "Go to artist mix").unwrap().center();
+        let (_, action) = artist_menu(Some(false), pointer(follow, true));
+        assert!(
+            matches!(action, Some(Action::ToggleFollow(artist)) if artist.name == "Synthetic Artist")
+        );
+        let (_, action) = artist_menu(Some(false), pointer(mix, true));
+        assert!(matches!(action, Some(Action::ArtistMix(_))));
+
+        let (output, _) = artist_menu(Some(true), Vec::new());
+        assert!(text_rect(&output, "Unfollow").is_some());
+        assert!(text_rect(&output, "Follow").is_none());
+        // While VK has not said whether it is followed, the item waits.
+        let (_, action) = artist_menu(None, pointer(follow, true));
+        assert_eq!(action, None);
     }
 
     #[test]
