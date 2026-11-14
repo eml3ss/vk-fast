@@ -1,7 +1,13 @@
 //! The context menu of a picture opened in the viewer (an album cover, a
-//! user's or community's avatar): Copy image and Save as. The file comes
-//! from VK on a worker thread (or, without the network, the largest copy on
-//! disk); the save dialog is the system's and also runs on the worker.
+//! user's or community's avatar): Copy image and Save as, both on a worker
+//! thread. Copying takes the picture the viewer already stored on disk
+//! (from VK only when it is not there); saving writes VK's own file, not
+//! that re-encoded copy, falling back to it without the network. The save
+//! dialog is the system's.
+//!
+//! In a Wayland session the picture goes to the Wayland clipboard through
+//! `wl-copy`: egui hands images to arboard, which owns only the X11
+//! clipboard, and through XWayland the copy did not reach Wayland apps.
 use std::{
     sync::{Arc, Mutex},
     thread,
@@ -20,6 +26,7 @@ enum Outcome {
     Copied,
     Saved,
     LoadFailed,
+    CopyFailed,
     SaveFailed,
 }
 
@@ -90,12 +97,11 @@ fn spawn(
     let started = thread::Builder::new()
         .name("vk-image-menu".into())
         .spawn(move || {
-            let reply = match crate::cover_art::original(&disk, &url) {
-                Err(()) => Reply::Done(Outcome::LoadFailed),
-                Ok(bytes) => match save {
-                    None => crate::cover_art::decode_full(&bytes)
-                        .map_or(Reply::Done(Outcome::LoadFailed), Reply::Image),
-                    Some((title, language)) => save_as(&bytes, &title, language),
+            let reply = match save {
+                None => copy(&disk, &url),
+                Some((title, language)) => match crate::cover_art::original(&disk, &url) {
+                    Err(()) => Reply::Done(Outcome::LoadFailed),
+                    Ok(bytes) => save_as(&bytes, &title, language),
                 },
             };
             if let Ok(mut task) = worker.lock() {
@@ -110,6 +116,68 @@ fn spawn(
         task.busy = false;
         task.shown = Some((Outcome::LoadFailed, Instant::now()));
     }
+}
+
+fn copy(disk: &DiskCache, url: &str) -> Reply {
+    let Some(picture) = crate::cover_art::stored(disk, url)
+        .or_else(|| crate::cover_art::original(disk, url).ok())
+        .and_then(|bytes| crate::cover_art::decode_full(&bytes).ok())
+    else {
+        return Reply::Done(Outcome::LoadFailed);
+    };
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        match wayland_copy(&picture) {
+            Ok(()) => return Reply::Done(Outcome::Copied),
+            // Without wl-copy, egui's clipboard is still worth a try.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Reply::Done(Outcome::CopyFailed),
+        }
+    }
+    Reply::Image(picture)
+}
+
+/// The picture as PNG on the Wayland clipboard: `wl-copy` reads it, then
+/// keeps offering it after this process lets go.
+fn wayland_copy(picture: &ColorImage) -> std::io::Result<()> {
+    use std::io::Write;
+    let png = png(picture).ok_or_else(|| std::io::Error::other("encode"))?;
+    let mut child = std::process::Command::new("wl-copy")
+        .args(["--type", "image/png"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("stdin"))
+        .and_then(|mut stdin| stdin.write_all(&png));
+    let status = child.wait()?;
+    written?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("wl-copy failed"))
+    }
+}
+
+fn png(picture: &ColorImage) -> Option<Vec<u8>> {
+    let [width, height] = picture.size;
+    let rgba: Vec<u8> = picture
+        .pixels
+        .iter()
+        .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+        .collect();
+    let mut bytes = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut bytes),
+        &rgba,
+        u32::try_from(width).ok()?,
+        u32::try_from(height).ok()?,
+        image::ExtendedColorType::Rgba8,
+    )
+    .ok()?;
+    Some(bytes)
 }
 
 fn save_as(bytes: &[u8], title: &str, language: Language) -> Reply {
@@ -204,6 +272,13 @@ pub fn show(
                         ),
                         true,
                     ),
+                    Outcome::CopyFailed => (
+                        language.text(
+                            "Не удалось скопировать изображение",
+                            "Could not copy the image",
+                        ),
+                        true,
+                    ),
                     Outcome::SaveFailed => (
                         language.text("Не удалось сохранить файл", "Could not save the file"),
                         true,
@@ -231,6 +306,15 @@ pub fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copied_picture_becomes_a_png_of_the_same_size() {
+        let picture = ColorImage::new([3, 2], vec![egui::Color32::from_rgb(10, 20, 30); 6]);
+        let png = png(&picture).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+        assert_eq!(decoded.to_rgba8().get_pixel(1, 1).0, [10, 20, 30, 255]);
+    }
 
     #[test]
     fn a_saved_picture_is_named_after_the_page_without_unsafe_characters() {

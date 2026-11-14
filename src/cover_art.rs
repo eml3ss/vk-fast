@@ -907,6 +907,12 @@ pub(crate) fn original(disk: &DiskCache, value: &str) -> Result<Vec<u8>, ()> {
     {
         return Ok(bytes);
     }
+    stored(disk, value).ok_or(())
+}
+
+/// The largest copy of the picture at `value` kept on disk: the viewer
+/// stores what it shows. Call on a worker thread.
+pub(crate) fn stored(disk: &DiskCache, value: &str) -> Option<Vec<u8>> {
     [HIGH_RES_TEXTURE_SIZE | KEEP_ASPECT, KEEP_ASPECT | 1024]
         .into_iter()
         .chain(CACHE_SIZES.into_iter().rev())
@@ -915,7 +921,6 @@ pub(crate) fn original(disk: &DiskCache, value: &str) -> Result<Vec<u8>, ()> {
                 .ok()
                 .filter(|bytes| image_extension(bytes).is_some())
         })
-        .ok_or(())
 }
 
 /// A whole image at its own size (bounded like any cover), for the clipboard.
