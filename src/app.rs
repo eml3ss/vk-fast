@@ -8374,7 +8374,7 @@ impl MusicApp {
         // Friends' playlist tracks take the same context menu as track lists.
         let mut track_action = None;
         for (response, track) in &track_rows {
-            if let Some(intent) = self.track_popup(ui, response, response.rect, track) {
+            if let Some(intent) = self.track_popup(ui, response, response.rect, track, None) {
                 track_action = Some(intent);
             }
         }
@@ -9061,16 +9061,21 @@ impl MusicApp {
         response: &egui::Response,
         rect: egui::Rect,
         track: &Track,
+        target: Option<track_menu::Target>,
     ) -> Option<TrackAction> {
-        self.track_popup_in(ui, response, &[rect], track)
+        self.track_popup_in(ui, response, &[rect], track, target)
     }
 
+    /// The row's menu. `target` is what this frame's right click hit when it
+    /// was an artist or album link: that menu opens instead of the track's
+    /// and stays until the next right click.
     fn track_popup_in(
         &mut self,
         ui: &mut egui::Ui,
         response: &egui::Response,
         areas: &[egui::Rect],
         track: &Track,
+        target: Option<track_menu::Target>,
     ) -> Option<TrackAction> {
         // Child artist/heart controls own their primary clicks. A secondary
         // click anywhere in the visible track region opens the same menu.
@@ -9089,15 +9094,37 @@ impl MusicApp {
                         .any(|rect| rect.intersect(ui.clip_rect()).contains(point))
                     && ui.ctx().layer_id_at(point) == Some(ui.layer_id())
             });
-        let popup = egui::Popup::context_menu(response)
-            .id(response.id.with(("track-context-menu", track.key())));
+        let id = response.id.with(("track-context-menu", track.key()));
+        let target_id = id.with("target");
+        if requested || response.secondary_clicked() {
+            let target = target.unwrap_or_default();
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(target_id, target));
+        }
+        let popup = egui::Popup::context_menu(response).id(id);
         let popup = if requested {
             popup.open_memory(egui::SetOpenCommand::Bool(true))
         } else {
             popup
         };
+        let language = self.language;
         popup
-            .show(|menu| self.track_context_menu(menu, track))
+            .show(|menu| {
+                let target = menu
+                    .ctx()
+                    .data(|data| data.get_temp::<track_menu::Target>(target_id))
+                    .unwrap_or_default();
+                let action = match &target {
+                    track_menu::Target::Track => return self.track_context_menu(menu, track),
+                    track_menu::Target::Artist(artist) => {
+                        track_menu::show_artist(menu, language, artist)
+                    }
+                    track_menu::Target::Album(album) => {
+                        track_menu::show_album(menu, language, album)
+                    }
+                };
+                action.map(|action| TrackAction::Menu(track.clone(), action))
+            })
             .and_then(|inner| inner.inner)
     }
 
@@ -9173,12 +9200,23 @@ impl MusicApp {
                     .unwrap_or(track.key());
                 if key.0 != 0 && key.1 > 0 {
                     ctx.copy_text(format!("https://vk.ru/audio{}_{}", key.0, key.1));
-                    self.track_menu_notice = Some((
-                        self.language
-                            .text("Ссылка скопирована", "Link copied")
-                            .into(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
+                    self.link_copied_notice();
+                }
+            }
+            track_menu::Action::OpenAlbum(album) => {
+                self.set_lyrics_fullscreen(ctx, false);
+                self.handle_track_action(ctx, TrackAction::Album(album));
+            }
+            track_menu::Action::CopyArtistLink(artist) => {
+                if crate::model::valid_artist_id(&artist.id) {
+                    ctx.copy_text(format!("https://vk.ru/artist/{}", artist.id));
+                    self.link_copied_notice();
+                }
+            }
+            track_menu::Action::CopyAlbumLink(album) => {
+                if let Some(link) = playlist_actions::collection_link(&album, true) {
+                    ctx.copy_text(link);
+                    self.link_copied_notice();
                 }
             }
             track_menu::Action::RefreshPlaylists => self.load_playlists(ctx, true),
@@ -9193,6 +9231,15 @@ impl MusicApp {
                 }
             }
         }
+    }
+
+    fn link_copied_notice(&mut self) {
+        self.track_menu_notice = Some((
+            self.language
+                .text("Ссылка скопирована", "Link copied")
+                .into(),
+            Instant::now() + Duration::from_secs(3),
+        ));
     }
 
     fn add_track_to_playlist(&mut self, ctx: &egui::Context, source: Track, target: AlbumRef) {
@@ -9371,6 +9418,7 @@ impl MusicApp {
         let unavailable = track.unavailable == Some(true);
         let mut action = None;
         let mut controls_contain_pointer = false;
+        let mut menu_target = None;
         let mut index_contains_pointer = false;
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -9465,10 +9513,19 @@ impl MusicApp {
                             Some(track),
                             egui::TextStyle::Small.resolve(ui.style()).size,
                         );
-                        if let Some(artist) = theme::badged_line(ui, badge, |ui| {
-                            detail_ui::artist_links(ui, &track.artists, &track.artist)
-                        }) {
+                        let (clicked, secondary) = theme::badged_line(ui, badge, |ui| {
+                            detail_ui::artist_links_clicks(
+                                ui,
+                                &track.artists,
+                                &track.artist,
+                                egui::TextStyle::Small.resolve(ui.style()),
+                            )
+                        });
+                        if let Some(artist) = clicked {
                             action = Some(TrackAction::Artist(artist));
+                        }
+                        if let Some(artist) = secondary {
+                            menu_target = Some(track_menu::Target::Artist(artist));
                         }
                     },
                 );
@@ -9499,6 +9556,9 @@ impl MusicApp {
                                     );
                                 }
                                 controls_contain_pointer |= link.contains_pointer();
+                                if link.secondary_clicked() {
+                                    menu_target = Some(track_menu::Target::Album(album.clone()));
+                                }
                                 if link.clicked() {
                                     action = Some(TrackAction::Album(album));
                                 }
@@ -9551,7 +9611,7 @@ impl MusicApp {
                 );
             },
         );
-        if let Some(intent) = self.track_popup(ui, &response, rect, track) {
+        if let Some(intent) = self.track_popup(ui, &response, rect, track, menu_target) {
             action = Some(intent);
         }
         release_pointer_focus(&response);
@@ -9705,6 +9765,7 @@ impl MusicApp {
             egui::pos2(metadata_right.max(side_row.left()), side_row.bottom()),
         );
         let mut menu_areas = Vec::with_capacity(2);
+        let mut menu_target = None;
         let mut artwork_rect = None;
         let metadata_response = ui.scope_builder(
             egui::UiBuilder::new()
@@ -9821,15 +9882,19 @@ impl MusicApp {
                             ),
                         ));
                         if has_track {
-                            if let Some(artist) = theme::badged_line(ui, artist_badge, |ui| {
-                                detail_ui::artist_links_with_font(
+                            let (clicked, secondary) = theme::badged_line(ui, artist_badge, |ui| {
+                                detail_ui::artist_links_clicks(
                                     ui,
                                     &artists,
                                     &artist,
                                     artist_font.clone(),
                                 )
-                            }) {
+                            });
+                            if let Some(artist) = clicked {
                                 metadata_action = Some(TrackAction::Artist(artist));
+                            }
+                            if let Some(artist) = secondary {
+                                menu_target = Some(track_menu::Target::Artist(artist));
                             }
                         } else {
                             ui.add(
@@ -9886,8 +9951,13 @@ impl MusicApp {
             },
         );
         if let Some(track) = &title_track
-            && let Some(action) =
-                self.track_popup_in(ui, &metadata_response.response, &menu_areas, track)
+            && let Some(action) = self.track_popup_in(
+                ui,
+                &metadata_response.response,
+                &menu_areas,
+                track,
+                menu_target,
+            )
         {
             metadata_action = Some(action);
         }
@@ -16403,7 +16473,7 @@ mod tests {
     }
 
     #[test]
-    fn track_menus_open_on_child_controls_in_rows_and_player_and_copy_the_original_link() {
+    fn track_menus_open_on_child_controls_in_rows_and_player_and_copy_the_clicked_link() {
         for footer in [false, true] {
             for target in 0..4 {
                 let ctx = egui::Context::default();
@@ -16475,17 +16545,39 @@ mod tests {
                     assert!(account_ui_text_rect(&output, "Copy link").is_none());
                     continue;
                 }
-                for label in ["Add to queue", "Go to artist", "Go to album", "Copy link"] {
+                // On an artist's name the menu is the artist's own.
+                let artist = target == 1;
+                let labels: &[&str] = if artist {
+                    &["Go to artist", "Copy link"]
+                } else {
+                    &["Add to queue", "Go to artist", "Go to album", "Copy link"]
+                };
+                for label in labels {
                     assert!(
                         account_ui_text_rect(&output, label).is_some(),
                         "Missing {label}, footer={footer}, target={target}"
                     );
                 }
+                assert_eq!(
+                    account_ui_text_rect(&output, "Add to queue").is_none(),
+                    artist
+                );
+                let link = if artist {
+                    "https://vk.ru/artist/context-artist"
+                } else {
+                    "https://vk.ru/audio-7_99"
+                };
                 let copy = account_ui_text_rect(&output, "Copy link").unwrap().center();
                 let copied = account_ui_click(&ctx, &mut app, size, &mut frame, copy);
-                assert!(copied.platform_output.commands.iter().any(|command| matches!(command,
-                    egui::OutputCommand::CopyText(text) if text == "https://vk.ru/audio-7_99"
-                )));
+                assert!(
+                    copied
+                        .platform_output
+                        .commands
+                        .iter()
+                        .any(|command| matches!(command,
+                            egui::OutputCommand::CopyText(text) if text == link
+                        ))
+                );
                 assert!(app.page == MusicPage::Library);
                 assert!(app.selected.is_none());
                 assert_eq!(app.playing.as_ref().unwrap().key(), track.key());
@@ -16493,6 +16585,81 @@ mod tests {
                 assert!(app.like_request.is_none() && app.playlist_add_request.is_none());
             }
         }
+    }
+
+    #[test]
+    fn a_right_click_on_a_rows_album_opens_the_albums_menu_and_copies_its_link() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let mut track = page(1, &[71]).items.remove(0);
+        track.title = "Context song".into();
+        track.album = Some(AlbumRef {
+            id: 5,
+            owner_id: -7,
+            title: "Context album".into(),
+            access_key: Some("key".into()),
+            cover_url: None,
+        });
+        app.library.tracks.push(track.clone());
+        app.library.exhausted = true;
+        let size = egui::vec2(1400.0, 720.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let album = account_ui_text_rect(&output, "Context album")
+            .unwrap()
+            .center();
+        for pressed in [true, false] {
+            account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![
+                    egui::Event::PointerMoved(album),
+                    egui::Event::PointerButton {
+                        pos: album,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert!(account_ui_text_rect(&output, "Go to album").is_some());
+        assert!(account_ui_text_rect(&output, "Add to queue").is_none());
+        let copy = account_ui_text_rect(&output, "Copy link").unwrap().center();
+        let copied = account_ui_click(&ctx, &mut app, size, &mut frame, copy);
+        assert!(copied.platform_output.commands.iter().any(|command| matches!(command,
+            egui::OutputCommand::CopyText(text) if text == "https://vk.ru/music/album/-7_5_key"
+        )));
+
+        // A right click on the row itself is the track's menu again.
+        let title = account_ui_text_rect(&copied, "Context song")
+            .unwrap()
+            .center();
+        for pressed in [true, false] {
+            account_ui_frame(
+                &ctx,
+                &mut app,
+                size,
+                &mut frame,
+                vec![
+                    egui::Event::PointerMoved(title),
+                    egui::Event::PointerButton {
+                        pos: title,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert!(account_ui_text_rect(&output, "Add to queue").is_some());
     }
 
     #[test]

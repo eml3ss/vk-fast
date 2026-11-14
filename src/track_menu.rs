@@ -42,9 +42,74 @@ pub enum Action {
     Artist(ArtistRef),
     Album,
     CopyLink,
+    /// From the menu of an album right-clicked in a row.
+    OpenAlbum(AlbumRef),
+    CopyArtistLink(ArtistRef),
+    CopyAlbumLink(AlbumRef),
     RefreshPlaylists,
     ToggleDislike,
     CopyDetails(Detail),
+}
+
+/// What a right click in a track row was on: the row itself (the track's
+/// menu), one of its artists or its album (their own short menus).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Target {
+    #[default]
+    Track,
+    Artist(ArtistRef),
+    Album(AlbumRef),
+}
+
+/// The menu of an artist right-clicked in a track row.
+pub fn show_artist(ui: &mut egui::Ui, language: Language, artist: &ArtistRef) -> Option<Action> {
+    let mut action = None;
+    ui.set_width(WIDTH);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.style_mut().interaction.selectable_labels = false;
+    let open = language.text("Перейти к исполнителю", "Go to artist");
+    if row(
+        ui,
+        Icon::Account,
+        open,
+        !artist.name.trim().is_empty(),
+        false,
+        false,
+    )
+    .clicked()
+    {
+        action = Some(Action::Artist(artist.clone()));
+    }
+    let copy = language.text("Копировать ссылку", "Copy link");
+    let linked = crate::model::valid_artist_id(&artist.id);
+    if row(ui, Icon::CopyLink, copy, linked, false, false).clicked() {
+        action = Some(Action::CopyArtistLink(artist.clone()));
+    }
+    if action.is_some() {
+        ui.close();
+    }
+    action
+}
+
+/// The menu of an album right-clicked in a track row.
+pub fn show_album(ui: &mut egui::Ui, language: Language, album: &AlbumRef) -> Option<Action> {
+    let mut action = None;
+    ui.set_width(WIDTH);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.style_mut().interaction.selectable_labels = false;
+    let open = language.text("Перейти к альбому", "Go to album");
+    if row(ui, Icon::Album, open, true, false, false).clicked() {
+        action = Some(Action::OpenAlbum(album.clone()));
+    }
+    let copy = language.text("Копировать ссылку", "Copy link");
+    let linked = album.owner_id != 0 && album.id > 0;
+    if row(ui, Icon::CopyLink, copy, linked, false, false).clicked() {
+        action = Some(Action::CopyAlbumLink(album.clone()));
+    }
+    if action.is_some() {
+        ui.close();
+    }
+    action
 }
 
 /// Which track text "Копировать данные" puts on the clipboard.

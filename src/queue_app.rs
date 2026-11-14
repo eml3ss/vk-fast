@@ -682,6 +682,7 @@ impl MusicApp {
             );
         }
         let mut action = None;
+        let mut menu_target = None;
         let remove = egui::Rect::from_center_size(
             rect.right_center() - egui::vec2(15.0, 0.0),
             egui::vec2(26.0, 28.0),
@@ -754,19 +755,23 @@ impl MusicApp {
                     .selectable(false),
                 );
                 let badge = theme::explicit_badge(ui.ctx(), Some(track), 12.0);
-                if let Some(artist) = theme::badged_line(ui, badge, |ui| {
-                    detail_ui::artist_links_with_font(
+                let (clicked, secondary) = theme::badged_line(ui, badge, |ui| {
+                    detail_ui::artist_links_clicks(
                         ui,
                         &track.artists,
                         &track.artist,
                         egui::FontId::proportional(12.0),
                     )
-                }) {
+                });
+                if let Some(artist) = clicked {
                     action = Some(Action::Track(Box::new(TrackAction::Artist(artist))));
+                }
+                if let Some(artist) = secondary {
+                    menu_target = Some(track_menu::Target::Artist(artist));
                 }
             },
         );
-        if let Some(menu) = self.track_popup(ui, &response, rect, track) {
+        if let Some(menu) = self.track_popup(ui, &response, rect, track, menu_target) {
             action = Some(Action::Track(Box::new(menu)));
         }
         if action.is_none()

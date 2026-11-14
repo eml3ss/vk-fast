@@ -76,6 +76,17 @@ pub fn artist_links_with_font(
     fallback: &str,
     font: FontId,
 ) -> Option<ArtistRef> {
+    artist_links_clicks(ui, artists, fallback, font).0
+}
+
+/// The same links, telling apart the artist clicked and the one right-clicked
+/// (whose own menu a track row opens instead of the track's).
+pub fn artist_links_clicks(
+    ui: &mut egui::Ui,
+    artists: &[ArtistRef],
+    fallback: &str,
+    font: FontId,
+) -> (Option<ArtistRef>, Option<ArtistRef>) {
     let fallback_artist;
     let artists = if artists.is_empty() && !fallback.trim().is_empty() {
         fallback_artist = [ArtistRef {
@@ -93,6 +104,7 @@ pub fn artist_links_with_font(
     );
     let mut left = line.left();
     let mut action = None;
+    let mut secondary = None;
     for (index, artist) in artists.iter().enumerate() {
         if left >= line.right() - 1.0 {
             break;
@@ -132,6 +144,9 @@ pub fn artist_links_with_font(
             response.request_focus();
             action = Some(artist.clone());
         }
+        if response.secondary_clicked() {
+            secondary = Some(artist.clone());
+        }
         let color = if response.hovered() || response.has_focus() {
             ui.visuals().text_color()
         } else {
@@ -162,7 +177,7 @@ pub fn artist_links_with_font(
             break;
         }
     }
-    action
+    (action, secondary)
 }
 
 pub fn artist_header(
