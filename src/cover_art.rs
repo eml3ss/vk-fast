@@ -854,6 +854,11 @@ fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()
     } else {
         MAX_BODY
     };
+    decode_sized(&download(client, value, limit)?, edge)
+}
+
+/// An image's bytes from a vetted HTTPS image host, at most `limit` long.
+fn download(client: &Client, value: &str, limit: u64) -> Result<Vec<u8>, ()> {
     if value.len() > 16_384 {
         return Err(());
     }
@@ -877,7 +882,45 @@ fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()
     if bytes.len() as u64 > limit {
         return Err(());
     }
-    decode_sized(&bytes, edge)
+    Ok(bytes)
+}
+
+/// The kind of a whole image file: its extension, or none if not an image
+/// the app reads.
+pub(crate) fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    match image::guess_format(bytes).ok()? {
+        ImageFormat::Png => Some("png"),
+        ImageFormat::Jpeg => Some("jpg"),
+        ImageFormat::WebP => Some("webp"),
+        _ => None,
+    }
+}
+
+/// The picture at `value` as VK serves it, for copying or saving: the
+/// original file, or without the network the largest copy kept on disk.
+/// Call on a worker thread.
+pub(crate) fn original(disk: &DiskCache, value: &str) -> Result<Vec<u8>, ()> {
+    if let Ok(bytes) = http_client()
+        .map_err(|_| ())
+        .and_then(|client| download(&client, value, MAX_HIGH_RES_BODY))
+        && image_extension(&bytes).is_some()
+    {
+        return Ok(bytes);
+    }
+    [HIGH_RES_TEXTURE_SIZE | KEEP_ASPECT, KEEP_ASPECT | 1024]
+        .into_iter()
+        .chain(CACHE_SIZES.into_iter().rev())
+        .find_map(|edge| {
+            disk.load(value, edge)
+                .ok()
+                .filter(|bytes| image_extension(bytes).is_some())
+        })
+        .ok_or(())
+}
+
+/// A whole image at its own size (bounded like any cover), for the clipboard.
+pub(crate) fn decode_full(bytes: &[u8]) -> Result<ColorImage, ()> {
+    decode_sized(bytes, HIGH_RES_TEXTURE_SIZE | KEEP_ASPECT)
 }
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<ColorImage, ()> {

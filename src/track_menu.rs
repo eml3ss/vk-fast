@@ -518,7 +518,8 @@ fn plain_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
     .inner
 }
 
-fn row(
+/// One item of a context menu; other menus use it to look the same.
+pub(crate) fn row(
     ui: &mut egui::Ui,
     icon: Icon,
     label: &str,

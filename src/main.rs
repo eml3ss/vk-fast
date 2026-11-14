@@ -29,6 +29,7 @@ mod equalizer_ui;
 mod home_ui;
 mod i18n;
 mod icons;
+mod image_menu;
 mod keybinds;
 mod library_cache;
 mod link_router;

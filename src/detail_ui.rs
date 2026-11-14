@@ -391,7 +391,7 @@ fn collection_header(
     );
     artwork(ui, covers, art, view.image_url, "album-cover");
     if let Some(url) = view.image_url.filter(|url| !url.is_empty()) {
-        cover_viewer(ui, covers, art, url, view.language);
+        cover_viewer(ui, covers, art, url, view.title, view.language);
     }
     let text_origin = if wide {
         egui::pos2(art.right() + 24.0, art.top() + 2.0)
@@ -1005,11 +1005,14 @@ fn artwork(
 
 /// A release or playlist cover, or an artist photo, opens full size over a
 /// dimmed window. Any click, or Escape, closes it.
+/// Opens the cover at `url` large when `art` is clicked; its context menu
+/// copies or saves it, named after `title`.
 pub(crate) fn cover_viewer(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     art: egui::Rect,
     url: &str,
+    title: &str,
     language: Language,
 ) {
     let label = language.text("Открыть изображение", "Open image");
@@ -1045,8 +1048,9 @@ pub(crate) fn cover_viewer(
         .backdrop_color(Color32::from_black_alpha(165))
         .show(ui.ctx(), |ui| {
             let image = covers.show_high_resolution(ui, Some(url), Some(url), size, 10);
-            ui.interact(image.rect, id.with("image"), Sense::click())
-                .clicked()
+            let image = ui.interact(image.rect, id.with("image"), Sense::click());
+            crate::image_menu::show(ui, &image, covers.disk(), url, title, language);
+            image.clicked()
         });
     if modal.inner || modal.should_close() {
         ui.data_mut(|data| data.remove::<u64>(id));
@@ -1524,6 +1528,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_opened_cover_has_a_menu_to_copy_or_save_it() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut covers = CoverCache::new();
+        let url = "https://sun9-1.userapi.com/synthetic-cover.jpg";
+        let art = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(120.0, 120.0));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut tick = 0;
+        let mut frame = |events: Vec<egui::Event>| {
+            tick += 1;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| cover_viewer(ui, &mut covers, art, url, "Synthetic", Language::English),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos, button, pressed| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        frame(Vec::new());
+        for pressed in [true, false] {
+            frame(click(art.center(), egui::PointerButton::Primary, pressed));
+        }
+        frame(Vec::new());
+        for pressed in [true, false] {
+            frame(click(
+                screen.center(),
+                egui::PointerButton::Secondary,
+                pressed,
+            ));
+        }
+        let output = frame(Vec::new());
+        let text = |label: &str| {
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
+            })
+        };
+        assert!(
+            text("Copy image") && text("Save as…"),
+            "the cover's menu is open"
+        );
     }
 
     #[test]

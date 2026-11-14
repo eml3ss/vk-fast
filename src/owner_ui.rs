@@ -242,10 +242,15 @@ fn header(
             theme::muted(),
         );
     }
-    if let Some(url) = image.filter(|url| !url.is_empty()) {
-        detail_ui::cover_viewer(ui, covers, art, url, language);
-    }
     let group = creator.owner_id < 0;
+    if let Some(url) = image.filter(|url| !url.is_empty()) {
+        let title = if creator.name.trim().is_empty() {
+            "avatar"
+        } else {
+            &creator.name
+        };
+        detail_ui::cover_viewer(ui, covers, art, url, title, language);
+    }
     let kicker = if group {
         language.text("СООБЩЕСТВО VK", "VK COMMUNITY")
     } else {
