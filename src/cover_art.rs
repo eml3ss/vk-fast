@@ -59,6 +59,9 @@ struct Reply {
     key: Key,
     image: Option<ColorImage>,
     color: Option<Color32>,
+    /// A smaller kept copy standing in for a picture the network did not
+    /// give: shown, and asked for again after `FAILED_RETRY`.
+    stand_in: bool,
 }
 
 enum State {
@@ -90,6 +93,11 @@ pub struct CoverCache {
     repaint_target: RepaintTarget,
     /// The one cover whose pixels are kept in memory for `ready_image`.
     kept: Option<Key>,
+    /// Covers showing a smaller stand-in, since when; `None` while the
+    /// network is being asked again (the stand-in stays on screen).
+    stand_ins: HashMap<Key, Option<std::time::Instant>>,
+    /// What the fullscreen cover last showed, logged when it changes.
+    fullscreen_status: Option<(u64, String)>,
 }
 
 impl CoverCache {
@@ -162,18 +170,35 @@ impl CoverCache {
             clock: 0,
             repaint_target: RepaintTarget::default(),
             kept: None,
+            stand_ins: HashMap::new(),
+            fullscreen_status: None,
         }
     }
 
     fn receive(&mut self, context: &egui::Context) {
         while let Ok(reply) = self.replies.try_recv() {
             self.pending = self.pending.saturating_sub(1);
-            if !self
-                .entries
-                .get(&reply.key)
-                .is_some_and(|entry| matches!(entry.state, State::Pending))
+            let retried = self.stand_ins.get(&reply.key) == Some(&None);
+            if !retried
+                && !self
+                    .entries
+                    .get(&reply.key)
+                    .is_some_and(|entry| matches!(entry.state, State::Pending))
             {
                 continue;
+            }
+            // Asked again and still only a stand-in (or nothing): keep the
+            // one on screen and try later.
+            if retried && (reply.stand_in || reply.image.is_none()) {
+                self.stand_ins
+                    .insert(reply.key, Some(std::time::Instant::now()));
+                continue;
+            }
+            if reply.stand_in {
+                self.stand_ins
+                    .insert(reply.key.clone(), Some(std::time::Instant::now()));
+            } else {
+                self.stand_ins.remove(&reply.key);
             }
             let state = if let Some(image) = reply.image {
                 // `KEEP_ASPECT` is a flag bit, not part of the size: counted
@@ -249,6 +274,7 @@ impl CoverCache {
             .map(|(key, _)| key.clone());
         if let Some(key) = oldest {
             self.entries.remove(&key);
+            self.stand_ins.remove(&key);
             true
         } else {
             false
@@ -260,6 +286,25 @@ impl CoverCache {
             |entry| matches!(entry.state, State::Failed(at) if at.elapsed() >= FAILED_RETRY),
         ) {
             self.entries.remove(&key);
+        }
+        // A smaller copy stood in for this picture: ask the network again
+        // after a while. It stays on screen until the answer comes.
+        if self.pending < MAX_PENDING
+            && self
+                .stand_ins
+                .get(&key)
+                .is_some_and(|since| since.is_some_and(|at| at.elapsed() >= FAILED_RETRY))
+            && let Some(jobs) = &self.jobs
+            && jobs
+                .try_send(Job {
+                    key: key.clone(),
+                    context: self.repaint_target.with_context(context),
+                })
+                .is_ok()
+        {
+            self.pending += 1;
+            self.stand_ins.insert(key, None);
+            return;
         }
         if self.entries.contains_key(&key) || self.pending >= MAX_PENDING {
             return;
@@ -327,7 +372,59 @@ impl CoverCache {
         } else {
             1024
         };
-        self.show_with_resolution(ui, url, size, radius, edge, fallback)
+        let response = self.show_with_resolution(ui, url, size, radius, edge, fallback);
+        self.log_high_resolution(url, edge, size * ui.ctx().pixels_per_point());
+        response
+    }
+
+    /// Writes to the log what the large cover shows whenever that changes:
+    /// loading, ready (and at how many pixels), a smaller stand-in, failed.
+    /// The address never goes to the log; a hash tells covers apart.
+    fn log_high_resolution(&mut self, url: Option<&str>, edge: u32, wanted: f32) {
+        use std::hash::{Hash, Hasher};
+        let Some(url) = url.filter(|url| !url.is_empty()) else {
+            return;
+        };
+        let key = Key {
+            url: url.to_owned(),
+            edge,
+        };
+        let status = match self.entries.get(&key).map(|entry| &entry.state) {
+            Some(State::Ready(texture, ..)) => {
+                let [width, height] = texture.size();
+                match self.stand_ins.get(&key) {
+                    Some(Some(_)) => format!("smaller stand-in px={width}x{height}, retrying soon"),
+                    Some(None) => format!("smaller stand-in px={width}x{height}, asking again"),
+                    None => format!("ready px={width}x{height}"),
+                }
+            }
+            Some(State::Pending) => "loading".to_owned(),
+            Some(State::Failed(_)) => "failed, retrying later".to_owned(),
+            None => "waiting for a free loader".to_owned(),
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut hasher);
+        let cover = hasher.finish();
+        if self
+            .fullscreen_status
+            .as_ref()
+            .is_some_and(|(last, text)| *last == cover && *text == status)
+        {
+            return;
+        }
+        let new_cover = self
+            .fullscreen_status
+            .as_ref()
+            .is_none_or(|(last, _)| *last != cover);
+        crate::diagnostics::event(
+            "cover",
+            &format!(
+                "large view{} {status} (wanted {:.0} px)",
+                if new_cover { " (another cover):" } else { ":" },
+                wanted
+            ),
+        );
+        self.fullscreen_status = Some((cover, status));
     }
 
     fn show_with_resolution(
@@ -668,12 +765,24 @@ fn disk_worker(
             continue;
         };
         let color = representative_color(&image);
+        if job.key.edge & KEEP_ASPECT == 0 && job.key.edge >= 1024 {
+            crate::diagnostics::event(
+                "cover",
+                &format!(
+                    "{} from disk px={}x{}",
+                    kind(job.key.edge),
+                    image.size[0],
+                    image.size[1]
+                ),
+            );
+        }
         if canceled.load(Ordering::Acquire)
             || replies
                 .send(Reply {
                     key: job.key,
                     image: Some(image),
                     color,
+                    stand_in: false,
                 })
                 .is_err()
         {
@@ -704,10 +813,40 @@ fn worker(
         if canceled.load(Ordering::Acquire) {
             break;
         }
-        let image = load_cover(&disk, &job.key.url, job.key.edge, || {
-            fetch_sized(client.as_ref().ok_or(())?, &job.key.url, job.key.edge)
-        })
-        .ok();
+        let started = std::time::Instant::now();
+        let loaded = load_cover_traced(&disk, &job.key.url, job.key.edge, || {
+            fetch_traced(
+                client.as_ref().ok_or("no HTTP client")?,
+                &job.key.url,
+                job.key.edge,
+            )
+        });
+        let ms = started.elapsed().as_millis();
+        let what = kind(job.key.edge);
+        let (image, stand_in) = match loaded {
+            Ok((image, how)) => {
+                let [width, height] = image.size;
+                let line = match &how {
+                    Loaded::Disk => format!("{what} from disk px={width}x{height}"),
+                    Loaded::Network { status, bytes } => format!(
+                        "{what} network status={status} kib={:.1} px={width}x{height} ms={ms}",
+                        *bytes as f64 / 1024.0
+                    ),
+                    Loaded::StandIn(why) => format!(
+                        "{what} network failed ({why}) ms={ms}; showing a smaller kept copy px={width}x{height}"
+                    ),
+                };
+                // Small thumbnails from disk are many and say little.
+                if !matches!(how, Loaded::Disk) || job.key.edge >= 1024 {
+                    crate::diagnostics::event("cover", &line);
+                }
+                (Some(image), matches!(how, Loaded::StandIn(_)))
+            }
+            Err(why) => {
+                crate::diagnostics::event("cover", &format!("{what} failed ({why}) ms={ms}"));
+                (None, false)
+            }
+        };
         let color = image.as_ref().and_then(representative_color);
         if canceled.load(Ordering::Acquire) {
             break;
@@ -717,6 +856,7 @@ fn worker(
                 key: job.key,
                 image,
                 color,
+                stand_in,
             })
             .is_err()
         {
@@ -849,40 +989,100 @@ pub(crate) fn fetch(client: &Client, value: &str) -> Result<ColorImage, ()> {
 }
 
 fn fetch_sized(client: &Client, value: &str, edge: u32) -> Result<ColorImage, ()> {
+    fetch_traced(client, value, edge)
+        .map(|(image, _)| image)
+        .map_err(|_| ())
+}
+
+/// A cover from the network at `edge`, with how it came: the HTTP status
+/// and size, or why it did not.
+fn fetch_traced(client: &Client, value: &str, edge: u32) -> Result<(ColorImage, Loaded), String> {
     let limit = if edge > TEXTURE_SIZE {
         MAX_HIGH_RES_BODY
     } else {
         MAX_BODY
     };
-    decode_sized(&download(client, value, limit)?, edge)
+    let (bytes, status) = download_traced(client, value, limit)?;
+    let image = decode_sized(&bytes, edge).map_err(|()| "not a picture it can read".to_owned())?;
+    Ok((
+        image,
+        Loaded::Network {
+            status,
+            bytes: bytes.len(),
+        },
+    ))
 }
 
 /// An image's bytes from a vetted HTTPS image host, at most `limit` long.
 fn download(client: &Client, value: &str, limit: u64) -> Result<Vec<u8>, ()> {
+    download_traced(client, value, limit)
+        .map(|(bytes, _)| bytes)
+        .map_err(|_| ())
+}
+
+/// The bytes and HTTP status, or why there are none (for the log: never
+/// the address).
+fn download_traced(client: &Client, value: &str, limit: u64) -> Result<(Vec<u8>, u16), String> {
     if value.len() > 16_384 {
-        return Err(());
+        return Err("address too long".into());
     }
-    let url = Url::parse(value).map_err(|_| ())?;
+    let url = Url::parse(value).map_err(|_| "bad address".to_owned())?;
     if !valid_url(&url) {
-        return Err(());
+        return Err("address not allowed".into());
     }
-    let response = client.get(url).send().map_err(|_| ())?;
-    if !response.status().is_success()
-        || response
-            .content_length()
-            .is_some_and(|length| length > limit)
+    let response = client.get(url).send().map_err(|error| {
+        if error.is_timeout() {
+            "timed out".to_owned()
+        } else if error.is_connect() {
+            "could not connect".to_owned()
+        } else {
+            "network error".to_owned()
+        }
+    })?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(format!("status={status}"));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
     {
-        return Err(());
+        return Err("too large".into());
     }
     let mut bytes = Vec::new();
     response
         .take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
+        .map_err(|_| "connection dropped".to_owned())?;
     if bytes.len() as u64 > limit {
-        return Err(());
+        return Err("too large".into());
     }
-    Ok(bytes)
+    Ok((bytes, status))
+}
+
+/// How a cover came, for the log.
+enum Loaded {
+    Disk,
+    Network {
+        status: u16,
+        bytes: usize,
+    },
+    /// The network did not give it (why), so a smaller kept copy shows.
+    StandIn(String),
+}
+
+/// What a cover request is for, by its size: list thumbnails, larger
+/// covers, the fullscreen cover, or a picture painted to fill a card.
+fn kind(edge: u32) -> &'static str {
+    if edge & KEEP_ASPECT != 0 {
+        "fill"
+    } else if edge <= TEXTURE_SIZE {
+        "thumbnail"
+    } else if edge < HIGH_RES_TEXTURE_SIZE {
+        "large"
+    } else {
+        "fullscreen"
+    }
 }
 
 /// The kind of a whole image file: its extension, or none if not an image
@@ -1027,24 +1227,48 @@ fn load_cached(disk: &DiskCache, url: &str, edge: u32) -> Option<ColorImage> {
     None
 }
 
+#[cfg(test)]
 fn load_cover(
     disk: &DiskCache,
     url: &str,
     edge: u32,
     fetcher: impl FnOnce() -> Result<ColorImage, ()>,
 ) -> Result<ColorImage, ()> {
+    load_cover_traced(disk, url, edge, || {
+        fetcher()
+            .map(|image| {
+                (
+                    image,
+                    Loaded::Network {
+                        status: 200,
+                        bytes: 0,
+                    },
+                )
+            })
+            .map_err(|()| "failed".to_owned())
+    })
+    .map(|(image, _)| image)
+    .map_err(|_| ())
+}
+
+fn load_cover_traced(
+    disk: &DiskCache,
+    url: &str,
+    edge: u32,
+    fetcher: impl FnOnce() -> Result<(ColorImage, Loaded), String>,
+) -> Result<(ColorImage, Loaded), String> {
     if let Some(image) = load_cached(disk, url, edge) {
-        return Ok(image);
+        return Ok((image, Loaded::Disk));
     }
     let keep_aspect = edge & KEEP_ASPECT != 0;
     match fetcher() {
-        Ok(image) => {
+        Ok((image, how)) => {
             if let Ok(bytes) = jpeg(&image) {
                 let _ = disk.save(url, edge, &bytes);
             }
-            Ok(image)
+            Ok((image, how))
         }
-        Err(()) => {
+        Err(why) => {
             // A cached small cover remains useful when a bigger view is opened
             // offline or a CDN temporarily rejects its signed URL.
             for candidate in CACHE_SIZES
@@ -1055,10 +1279,10 @@ fn load_cover(
                 if let Ok(bytes) = disk.load(url, candidate)
                     && let Ok(image) = decode_sized(&bytes, edge)
                 {
-                    return Ok(image);
+                    return Ok((image, Loaded::StandIn(why)));
                 }
             }
-            Err(())
+            Err(why)
         }
     }
 }
@@ -1171,6 +1395,63 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_stand_in_stays_on_screen_and_the_large_cover_is_asked_for_again() {
+        let context = egui::Context::default();
+        let mut cache = CoverCache::new();
+        // This test's own queues in place of the loaders.
+        let (jobs, asked) = mpsc::sync_channel(4);
+        let (answer, replies) = mpsc::sync_channel(4);
+        cache.jobs = Some(jobs);
+        cache.replies = replies;
+        let key = Key {
+            url: "https://images.example.test/large.jpg".into(),
+            edge: HIGH_RES_TEXTURE_SIZE,
+        };
+        let texture_edge = |cache: &CoverCache| match &cache.entries[&key].state {
+            State::Ready(texture, ..) => texture.size()[0],
+            _ => panic!("shown"),
+        };
+        let reply = |size: usize, stand_in: bool| Reply {
+            key: key.clone(),
+            image: Some(ColorImage::filled([size, size], Color32::RED)),
+            color: None,
+            stand_in,
+        };
+        cache.request(&context, key.clone());
+        assert!(asked.try_recv().is_ok());
+        // The network failed: a kept 512-pixel copy stands in.
+        answer.send(reply(512, true)).unwrap();
+        cache.receive(&context);
+        assert_eq!(texture_edge(&cache), 512);
+        cache.request(&context, key.clone());
+        assert!(asked.try_recv().is_err(), "not again at once");
+        // A while later it is asked for again, the stand-in still shown.
+        let long_ago = std::time::Instant::now() - FAILED_RETRY - Duration::from_secs(1);
+        cache.stand_ins.insert(key.clone(), Some(long_ago));
+        cache.request(&context, key.clone());
+        assert!(asked.try_recv().is_ok(), "asked again");
+        assert_eq!(texture_edge(&cache), 512);
+        // Still failing: the stand-in stays, for another while.
+        answer.send(reply(512, true)).unwrap();
+        cache.receive(&context);
+        assert_eq!(texture_edge(&cache), 512);
+        assert!(matches!(cache.stand_ins.get(&key), Some(Some(at)) if *at > long_ago));
+        // Then the large cover comes and replaces it for good.
+        cache.stand_ins.insert(key.clone(), Some(long_ago));
+        cache.request(&context, key.clone());
+        assert!(asked.try_recv().is_ok());
+        answer.send(reply(2048, false)).unwrap();
+        cache.receive(&context);
+        assert_eq!(texture_edge(&cache), 2048);
+        assert!(!cache.stand_ins.contains_key(&key));
+        cache.request(&context, key.clone());
+        assert!(
+            asked.try_recv().is_err(),
+            "a real cover is not asked for again"
+        );
+    }
+
+    #[test]
     fn header_color_reuses_the_same_ready_thumbnail_without_new_jobs() {
         let context = egui::Context::default();
         let mut cache = CoverCache::new();
@@ -1239,6 +1520,7 @@ mod tests {
                 key: pending.clone(),
                 image: Some(ColorImage::filled([96, 96], Color32::BLUE)),
                 color: Some(Color32::BLUE),
+                stand_in: false,
             })
             .unwrap();
         cache.rebind_context(&new_context);
@@ -1301,6 +1583,7 @@ mod tests {
                     key: key.clone(),
                     image: Some(ColorImage::filled([8, 8], Color32::RED)),
                     color: Some(Color32::RED),
+                    stand_in: false,
                 })
                 .unwrap();
             cache.receive(&context);
@@ -1638,6 +1921,7 @@ mod tests {
                     key: key.clone(),
                     image: Some(ColorImage::filled([2, 2], Color32::RED)),
                     color: None,
+                    stand_in: false,
                 })
                 .unwrap();
             cache.receive(&ctx);
@@ -1742,6 +2026,7 @@ mod tests {
                     key: key.clone(),
                     image: Some(ColorImage::filled([4, 2], Color32::RED)),
                     color: None,
+                    stand_in: false,
                 })
                 .unwrap();
             cache.receive(&ctx);

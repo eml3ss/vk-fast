@@ -64,6 +64,8 @@ pub struct State {
     /// fullscreen, the whole gap to the cover, so a press just left of the
     /// words is not lost on the empty space.
     select_reach: f32,
+    /// Where the fullscreen cover last came from, logged when it changes.
+    cover_source: Option<&'static str>,
 }
 
 /// Text selected by dragging over the lines: copied when the button is
@@ -154,6 +156,7 @@ impl Default for State {
             press_on_lines: false,
             selection: Selection::default(),
             select_reach: 0.0,
+            cover_source: None,
         }
     }
 }
@@ -233,13 +236,29 @@ pub fn show(
         ),
     );
     let regular_cover = view.track.and_then(|track| track.cover_url.as_deref());
+    let album_cover = view
+        .track
+        .and_then(|track| track.album.as_ref()?.cover_url.as_deref());
     let cover_url = if view.fullscreen {
-        view.track
-            .and_then(|track| track.album.as_ref()?.cover_url.as_deref())
-            .or(regular_cover)
+        album_cover.or(regular_cover)
     } else {
         regular_cover
     };
+    if view.fullscreen {
+        // The album's cover comes large with the track's metadata; a list
+        // row's copy is small.
+        let source = match (album_cover, regular_cover) {
+            (Some(_), _) => "album (large)",
+            (None, Some(_)) => "track row (small; album cover not known yet)",
+            (None, None) => "none",
+        };
+        if state.cover_source != Some(source) {
+            crate::diagnostics::event("cover", &format!("fullscreen cover from {source}"));
+            state.cover_source = Some(source);
+        }
+    } else {
+        state.cover_source = None;
+    }
     if view.fullscreen {
         let color = covers.header_color(ui.ctx(), cover_url, 512.0);
         background(ui.painter(), rect, color);

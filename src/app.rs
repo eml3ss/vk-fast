@@ -7303,6 +7303,20 @@ impl MusicApp {
             .into_iter()
             .map(|track| (track.key(), track))
             .collect();
+        // What the playing track's metadata says of its album cover: the
+        // fullscreen cover is that one, large.
+        if let Some(metadata) = self
+            .playing
+            .as_ref()
+            .and_then(|track| fresh.get(&track.key()))
+        {
+            let album = match &metadata.album {
+                Some(album) if album.cover_url.is_some() => "album with a cover",
+                Some(_) => "album without a cover",
+                None => "no album",
+            };
+            crate::diagnostics::event("metadata", &format!("playing track: {album}"));
+        }
         self.track_view_cache.invalidate();
         let removed = &self.removed_from_library;
         let added = &self.like_aliases;
