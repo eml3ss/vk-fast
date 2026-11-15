@@ -1,5 +1,6 @@
 //! Matching rounded seek and volume controls without a separate buffer layer.
 use eframe::egui::{self, Color32, Response, Sense};
+use std::f32::consts::FRAC_PI_2;
 
 use crate::theme;
 
@@ -253,7 +254,7 @@ fn control(
         if fraction > 0.0 {
             let end = track.left() + track.width() * fraction;
             let played = theme::accent().gamma_multiply(opacity);
-            painter.add(played_part(track, end, played));
+            painter.add(played_part(track, end, feather, played));
         }
         if loading > 0.0 {
             painter.add(loading_glow(track, feather, elapsed, loading));
@@ -315,7 +316,7 @@ fn loading_glow(track: egui::Rect, feather: f32, time: f64, strength: f32) -> eg
 /// length by `color`, with `columns` even steps for a gradient. egui keeps
 /// corner radii as whole points and draws small ones with a few segments,
 /// so a 7-point bar's ends came out cut; this one follows the circle
-/// closely and blurs its edge over one pixel (`feather`), as egui does.
+/// closely.
 fn capsule(
     rect: egui::Rect,
     feather: f32,
@@ -324,49 +325,72 @@ fn capsule(
 ) -> egui::Shape {
     const CAP_STEPS: usize = 16;
     let radius = (rect.height() * 0.5).min(rect.width() * 0.5);
-    let middle = rect.center().y;
-    // Each column: its x on the outline, the outline's half height there,
-    // and the outward normal of its top edge.
-    let mut outline: Vec<(f32, f32, egui::Vec2)> = Vec::new();
+    let circle = |offset: f32| (radius * radius - offset * offset).max(0.0).sqrt();
+    let mut outline: Vec<f32> = Vec::new();
     for step in 0..=CAP_STEPS {
-        // Left end, from its tip up to its top.
-        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / CAP_STEPS as f32;
-        let normal = egui::vec2(-angle.cos(), -angle.sin());
-        outline.push((
-            rect.left() + radius * (1.0 - angle.cos()),
-            radius * angle.sin(),
-            normal,
-        ));
+        let inset = radius * (1.0 - (FRAC_PI_2 * step as f32 / CAP_STEPS as f32).cos());
+        outline.push(rect.left() + inset);
+        outline.push(rect.right() - inset);
     }
     for column in 1..columns {
-        let x = rect.left() + rect.width() * column as f32 / columns as f32;
-        if x > rect.left() + radius && x < rect.right() - radius {
-            outline.push((x, radius, egui::vec2(0.0, -1.0)));
+        outline.push(rect.left() + rect.width() * column as f32 / columns as f32);
+    }
+    let half = |x: f32| {
+        if x < rect.left() + radius {
+            circle(rect.left() + radius - x)
+        } else if x > rect.right() - radius {
+            circle(x - (rect.right() - radius))
+        } else {
+            radius
         }
+    };
+    strip(outline, half, rect.center().y, feather, color)
+}
+
+/// A shape symmetric about the line `middle`: `half` its half height at
+/// each x of `columns` (zero at both tips), coloured by `color` along its
+/// length, its edge blurred over one pixel (`feather`) as egui does. egui's
+/// own smoothing pushes a polygon's corners out along the bisector, which
+/// on a sliver of a few hundredths of a point shot spikes far past the bar;
+/// here every edge point moves by `feather / 2` along its own normal.
+fn strip(
+    mut columns: Vec<f32>,
+    half: impl Fn(f32) -> f32,
+    middle: f32,
+    feather: f32,
+    color: impl Fn(f32) -> Color32,
+) -> egui::Shape {
+    columns.sort_by(f32::total_cmp);
+    columns.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+    if columns.len() < 2 {
+        return egui::Shape::Noop;
     }
-    for step in (0..=CAP_STEPS).rev() {
-        // Right end, from its top down to its tip.
-        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / CAP_STEPS as f32;
-        let normal = egui::vec2(angle.cos(), -angle.sin());
-        outline.push((
-            rect.right() - radius * (1.0 - angle.cos()),
-            radius * angle.sin(),
-            normal,
-        ));
-    }
-    outline.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let top: Vec<egui::Pos2> = columns
+        .iter()
+        .map(|&x| egui::pos2(x, middle - half(x)))
+        .collect();
+    let last = top.len() - 1;
     let mut mesh = egui::Mesh::default();
     let half_feather = feather * 0.5;
-    for (index, &(x, half, normal)) in outline.iter().enumerate() {
-        let fill = color(x);
-        let clear = Color32::TRANSPARENT;
-        let top = egui::pos2(x, middle - half);
-        let bottom = egui::pos2(x, middle + half);
+    for (index, &point) in top.iter().enumerate() {
+        // The top edge's outward normal: across its neighbours, or straight
+        // out at a tip.
+        let normal = if index == 0 && middle - point.y < 0.001 {
+            egui::vec2(-1.0, 0.0)
+        } else if index == last && middle - point.y < 0.001 {
+            egui::vec2(1.0, 0.0)
+        } else {
+            let tangent = top[(index + 1).min(last)] - top[index.saturating_sub(1)];
+            egui::vec2(tangent.y, -tangent.x).normalized()
+        };
         let flip = egui::vec2(normal.x, -normal.y);
+        let bottom = egui::pos2(point.x, 2.0 * middle - point.y);
+        let fill = color(point.x);
+        let clear = Color32::TRANSPARENT;
         let base = mesh.vertices.len() as u32;
         // Outer top, inner top, inner bottom, outer bottom.
-        mesh.colored_vertex(top + normal * half_feather, clear);
-        mesh.colored_vertex(top - normal * half_feather, fill);
+        mesh.colored_vertex(point + normal * half_feather, clear);
+        mesh.colored_vertex(point - normal * half_feather, fill);
         mesh.colored_vertex(bottom - flip * half_feather, fill);
         mesh.colored_vertex(bottom + flip * half_feather, clear);
         if index > 0 {
@@ -385,12 +409,15 @@ fn capsule(
 /// The played part up to `end`: round at both ends however short it is.
 /// It is the bar's capsule cut by a half circle ending at `end`, so a
 /// part shorter than the bar is thick starts as a small rounded lens in the
-/// bar's round end instead of a sliver with a square edge. Convex, so
-/// egui's own fill smooths its edge.
-fn played_part(track: egui::Rect, end: f32, color: Color32) -> egui::Shape {
+/// bar's round end instead of a sliver with a square edge; thinner than a
+/// pixel, it fades in rather than flicker.
+fn played_part(track: egui::Rect, end: f32, feather: f32, color: Color32) -> egui::Shape {
     let radius = (track.height() * 0.5).min(track.width() * 0.5);
     let end = end.clamp(track.left(), track.right());
-    let middle = track.center().y;
+    let length = end - track.left();
+    if length <= 0.0 {
+        return egui::Shape::Noop;
+    }
     let circle = |offset: f32| (radius * radius - offset * offset).max(0.0).sqrt();
     let half = |x: f32| {
         let bar = if x < track.left() + radius {
@@ -412,31 +439,15 @@ fn played_part(track: egui::Rect, end: f32, color: Color32) -> egui::Shape {
     const STEPS: usize = 24;
     let mut columns = vec![track.left(), end];
     for step in 0..=STEPS {
-        let inset =
-            radius * (1.0 - (std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32).cos());
+        let inset = radius * (1.0 - (FRAC_PI_2 * step as f32 / STEPS as f32).cos());
         for x in [track.left() + inset, end - inset] {
             if x > track.left() && x < end {
                 columns.push(x);
             }
         }
     }
-    columns.sort_by(f32::total_cmp);
-    columns.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    let mut points: Vec<egui::Pos2> = columns
-        .iter()
-        .map(|&x| egui::pos2(x, middle - half(x)))
-        .collect();
-    points.extend(
-        columns
-            .iter()
-            .rev()
-            .map(|&x| egui::pos2(x, middle + half(x))),
-    );
-    points.dedup_by(|a, b| (*a - *b).length() < 0.001);
-    if points.len() < 3 {
-        return egui::Shape::Noop;
-    }
-    egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
+    let color = color.gamma_multiply((length / feather).clamp(0.0, 1.0));
+    strip(columns, half, track.center().y, feather, |_| color)
 }
 
 /// For tests: the rectangle and fill of a bar part `capsule` drew, from
@@ -797,7 +808,7 @@ mod tests {
         let (output, response) = frame(&context, Kind::Seek, &mut position, true, 1, Vec::new());
         let track = track_rect(response.rect);
         let empty = context.tessellate(output.shapes, output.pixels_per_point);
-        for (index, width) in [0.0001, 0.25, 0.75, 1.0, 2.5, 6.9, 7.0, 8.0]
+        for (index, width) in [0.0001, 0.01, 0.05, 0.25, 0.75, 1.0, 2.5, 6.9, 7.0, 8.0]
             .into_iter()
             .enumerate()
         {
@@ -818,6 +829,19 @@ mod tests {
                     color_at(&empty, corner),
                     "Square left corner at prefix width {width}"
                 );
+            }
+            // Nothing pokes out above or below the bar: egui's smoothing of
+            // a sliver this thin shot spikes far past it.
+            for step in 0..=20 {
+                let x = track.left() - 1.0 + (width + 2.0) * step as f32 / 20.0;
+                for y in [track.top() - 1.0, track.bottom() + 1.0, track.top() - 4.0] {
+                    let point = egui::pos2(x, y);
+                    assert_eq!(
+                        color_at(&painted, point),
+                        color_at(&empty, point),
+                        "Spike at {point:?}, prefix width {width}"
+                    );
+                }
             }
             // Past the half-pixel smoothing of its edge, nothing is filled.
             let after = egui::pos2(track.left() + width + 0.6, track.center().y);
