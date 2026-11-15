@@ -19,6 +19,7 @@ pub enum ConfigAction {
     Fallback(bool),
     /// Fall back between VK and Musixmatch.
     FallbackOther(bool),
+    FallbackLrclib(bool),
     Generate,
 }
 pub enum Event {
@@ -169,8 +170,11 @@ impl Service {
                             (Ok(provider), Ok(config)) => {
                                 let result = resolve_sources(
                                     config.source,
-                                    config.fallback_to_other,
-                                    config.fallback_to_genius,
+                                    Fallbacks {
+                                        other: config.fallback_to_other,
+                                        lrclib: config.fallback_to_lrclib,
+                                        genius: config.fallback_to_genius,
+                                    },
                                     &stop,
                                     |source| {
                                         fetch_source(
@@ -288,54 +292,70 @@ impl Service {
     }
 }
 
-/// The chosen source as it comes; then the other synced source (VK or
-/// Musixmatch) only with timings; then Genius; and last the other source's
-/// plain lyrics. E.g. Musixmatch -> VK with timings -> Genius -> plain VK.
-/// Each fallback runs only when enabled; the chosen source's error is kept.
+/// Which fallbacks are on.
+#[derive(Clone, Copy)]
+struct Fallbacks {
+    /// VK for Musixmatch and LRCLIB, Musixmatch for VK.
+    other: bool,
+    lrclib: bool,
+    genius: bool,
+}
+
+/// Timed lyrics first, plain ones only when no source has timing: the
+/// chosen source, then the other one (VK or Musixmatch) and LRCLIB, each
+/// asked once and kept if its lyrics are timed (or an instrumental). With
+/// none timed, the first plain lyrics in that order, and only then Genius,
+/// which never has timing. Each fallback runs only when enabled; with
+/// nothing found, the chosen source's error is kept.
 fn resolve_sources(
     source: Source,
-    other: bool,
-    genius: bool,
+    fallbacks: Fallbacks,
     canceled: &impl Fn() -> bool,
     mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
 ) -> Result<Arc<Lyrics>, Error> {
+    let mut order = vec![source];
+    if fallbacks.other
+        && let Some(other) = source.other()
+    {
+        order.push(other);
+    }
+    if fallbacks.lrclib && !order.contains(&Source::Lrclib) {
+        order.push(Source::Lrclib);
+    }
+    let genius = fallbacks.genius && source != Source::Genius;
     let mut first = None;
-    let mut fail = |error| {
-        first.get_or_insert(error);
-    };
-    if canceled() {
-        return Err(Error::Canceled);
-    }
-    match fetch(source) {
-        Err(Error::Canceled) => return Err(Error::Canceled),
-        Err(error) => fail(error),
-        found => return found,
-    }
     let mut plain = None;
-    if let Some(other) = source.other().filter(|_| other) {
+    for source in order {
         if canceled() {
             return Err(Error::Canceled);
         }
-        match fetch(other) {
+        match fetch(source) {
             Err(Error::Canceled) => return Err(Error::Canceled),
-            Err(error) => fail(error),
+            Err(error) => {
+                first.get_or_insert(error);
+            }
             Ok(lyrics) if lyrics.synced || lyrics.instrumental => return Ok(lyrics),
-            Ok(lyrics) => plain = Some(lyrics),
+            Ok(lyrics) => {
+                plain.get_or_insert(lyrics);
+            }
         }
     }
-    if genius && source != Source::Genius {
+    if let Some(lyrics) = plain {
+        return Ok(lyrics);
+    }
+    if genius {
         if canceled() {
             return Err(Error::Canceled);
         }
         match fetch(Source::Genius) {
             Err(Error::Canceled) => return Err(Error::Canceled),
-            Err(error) => fail(error),
+            Err(error) => {
+                first.get_or_insert(error);
+            }
             found => return found,
         }
     }
-    plain
-        .map(Ok)
-        .unwrap_or_else(|| Err(first.unwrap_or(Error::NotFound)))
+    Err(first.unwrap_or(Error::NotFound))
 }
 
 fn fetch_source(
@@ -380,6 +400,7 @@ fn fetch_source_now(
     let now = store::now();
     let retry = match source {
         Source::Genius => config.genius_retry_after,
+        Source::Lrclib => config.lrclib_retry_after,
         Source::Vk => config.vk_retry_after,
         Source::Musixmatch => config.anonymous_retry_after,
     };
@@ -398,6 +419,7 @@ fn fetch_source_now(
             })
         }),
         Source::Genius => provider.genius(&request.query, canceled),
+        Source::Lrclib => provider.lrclib(&request.query, canceled),
         Source::Vk => request.vk.as_ref().ok_or(Error::NoSession).and_then(|vk| {
             if cfg!(test) {
                 return Err(Error::NotFound);
@@ -421,6 +443,7 @@ fn fetch_source_now(
         if wait > 0 {
             let slot = match source {
                 Source::Genius => &mut config.genius_retry_after,
+                Source::Lrclib => &mut config.lrclib_retry_after,
                 Source::Vk => &mut config.vk_retry_after,
                 Source::Musixmatch => &mut config.anonymous_retry_after,
             };
@@ -542,6 +565,12 @@ fn configure(
             store::save(&candidate)?;
             *config = candidate;
         }
+        ConfigAction::FallbackLrclib(enabled) => {
+            let mut candidate = config.clone();
+            candidate.fallback_to_lrclib = enabled;
+            store::save(&candidate)?;
+            *config = candidate;
+        }
         ConfigAction::Generate => {
             generate(provider, config, canceled)?;
         }
@@ -611,10 +640,23 @@ mod tests {
         assert_eq!((calls, result.unwrap_err()), (1, Error::Canceled));
     }
 
+    fn only(genius: bool) -> Fallbacks {
+        Fallbacks {
+            other: false,
+            lrclib: false,
+            genius,
+        }
+    }
+    const ALL: Fallbacks = Fallbacks {
+        other: true,
+        lrclib: true,
+        genius: true,
+    };
+
     #[test]
     fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
         let mut calls = Vec::new();
-        let result = resolve_sources(Source::Vk, false, true, &|| false, |source| {
+        let result = resolve_sources(Source::Vk, only(true), &|| false, |source| {
             calls.push(source);
             match source {
                 Source::Vk => Err(Error::NotFound),
@@ -631,7 +673,7 @@ mod tests {
         ] {
             calls.clear();
             assert_eq!(
-                resolve_sources(source, false, fallback, &|| false, |source| {
+                resolve_sources(source, only(fallback), &|| false, |source| {
                     calls.push(source);
                     Err(error)
                 })
@@ -641,7 +683,7 @@ mod tests {
             assert_eq!(calls, expected);
         }
         assert_eq!(
-            resolve_sources(Source::Vk, true, true, &|| true, |_| panic!(
+            resolve_sources(Source::Vk, ALL, &|| true, |_| panic!(
                 "canceled work must not fetch"
             ))
             .unwrap_err(),
@@ -650,55 +692,83 @@ mod tests {
     }
 
     #[test]
-    fn vk_and_musixmatch_fall_back_to_each_other_before_genius() {
+    fn timed_lyrics_from_any_source_come_before_plain_ones() {
         for (source, other) in [
             (Source::Vk, Source::Musixmatch),
             (Source::Musixmatch, Source::Vk),
+            (Source::Lrclib, Source::Vk),
         ] {
+            let lrclib = (source != Source::Lrclib).then_some(Source::Lrclib);
+            let synced_order: Vec<Source> = [source, other].into_iter().chain(lrclib).collect();
+            // Each timed source in turn: the ones before it are asked, the
+            // ones after it are not.
+            for (index, timed) in synced_order.iter().enumerate() {
+                let mut calls = Vec::new();
+                let found = resolve_sources(source, ALL, &|| false, |asked| {
+                    calls.push(asked);
+                    if asked == *timed {
+                        Ok(Arc::new(super::super::test_data(2, true)))
+                    } else {
+                        Ok(Arc::new(super::super::test_data(5, false)))
+                    }
+                })
+                .unwrap();
+                assert!(found.synced, "{source:?} via {timed:?}");
+                assert_eq!(calls, synced_order[..=index]);
+            }
+            // None timed: the first plain lyrics in that order, Genius unasked.
             let mut calls = Vec::new();
-            let found = resolve_sources(source, true, true, &|| false, |source| {
-                calls.push(source);
-                if source == other {
-                    Ok(Arc::new(super::super::test_data(2, true)))
+            let found = resolve_sources(source, ALL, &|| false, |asked| {
+                calls.push(asked);
+                if asked == other {
+                    Ok(Arc::new(super::super::test_data(3, false)))
+                } else if Some(asked) == lrclib {
+                    Ok(Arc::new(super::super::test_data(4, false)))
                 } else {
                     Err(Error::NotFound)
                 }
             })
             .unwrap();
-            assert!(found.synced);
-            assert_eq!(calls, [source, other]);
+            assert_eq!(found.lines.len(), 3, "{source:?}");
+            assert_eq!(calls, synced_order);
+            // Nothing anywhere but Genius: Genius last; the chosen error kept.
             calls.clear();
-            let error = resolve_sources(source, true, true, &|| false, |source| {
-                calls.push(source);
-                Err(if source == other {
-                    Error::Network
+            let found = resolve_sources(source, ALL, &|| false, |asked| {
+                calls.push(asked);
+                match asked {
+                    Source::Genius => Ok(Arc::new(super::super::test_data(6, false))),
+                    asked if asked == source => Err(Error::Restricted),
+                    _ => Err(Error::NotFound),
+                }
+            })
+            .unwrap();
+            assert_eq!(found.lines.len(), 6);
+            assert_eq!(calls.last(), Some(&Source::Genius));
+            let error = resolve_sources(source, ALL, &|| false, |asked| {
+                if asked == source {
+                    Err(Error::Restricted)
                 } else {
-                    Error::NotFound
-                })
+                    Err(Error::NotFound)
+                }
             })
             .unwrap_err();
-            assert_eq!(error, Error::NotFound);
-            assert_eq!(calls, [source, other, Source::Genius]);
-            // The other source's plain lyrics wait until Genius has failed.
-            for genius_found in [true, false] {
-                calls.clear();
-                let found = resolve_sources(source, true, true, &|| false, |source| {
-                    calls.push(source);
-                    match source {
-                        Source::Genius if genius_found => {
-                            Ok(Arc::new(super::super::test_data(3, false)))
-                        }
-                        source if source == other => {
-                            Ok(Arc::new(super::super::test_data(2, false)))
-                        }
-                        _ => Err(Error::NotFound),
-                    }
-                })
-                .unwrap();
-                assert_eq!(calls, [source, other, Source::Genius]);
-                assert_eq!(found.lines.len(), if genius_found { 3 } else { 2 });
-            }
+            assert_eq!(error, Error::Restricted);
         }
+        // LRCLIB off: it is not asked.
+        let mut calls = Vec::new();
+        let _ = resolve_sources(
+            Source::Vk,
+            Fallbacks {
+                lrclib: false,
+                ..ALL
+            },
+            &|| false,
+            |asked| {
+                calls.push(asked);
+                Err(Error::NotFound)
+            },
+        );
+        assert_eq!(calls, [Source::Vk, Source::Musixmatch, Source::Genius]);
     }
 
     #[test]

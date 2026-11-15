@@ -166,6 +166,7 @@ fn lyric_seek_uses_the_shared_player_position_and_musixmatch_offers_only_its_tok
     app.lyrics.status = Some(Status {
         fallback_to_genius: true,
         fallback_to_other: true,
+        fallback_to_lrclib: true,
         ..Default::default()
     });
     let mut frame = 0;
@@ -187,19 +188,20 @@ fn lyric_seek_uses_the_shared_player_position_and_musixmatch_offers_only_its_tok
         );
     }
     assert!(account_ui_text_rect(&output, "Normalize volume").is_none());
-    // The fallbacks are the same switches as the rest of Settings: a pill,
-    // not a checkbox, next to each label.
+    // The fallbacks are the app's own check boxes, not egui's or switches:
+    // a rounded 22-point square next to each label.
     let shapes = account_ui_shapes(&output);
-    for label in ["Fallback to VK", "Fallback to Genius"] {
+    for label in ["Fallback to VK", "Fallback to LRCLIB", "Fallback to Genius"] {
         let text = account_ui_text_rect(&output, label).unwrap();
         assert!(
             shapes
                 .iter()
                 .any(|shape| matches!(shape, egui::Shape::Rect(rect)
-                if rect.rect.width() == 38.0 && rect.rect.height() == 22.0
+                if rect.rect.width() == 22.0 && rect.rect.height() == 22.0
+                    && rect.corner_radius == 7.0.into()
                     && (rect.rect.center().y - text.center().y).abs() < 4.0
                     && rect.rect.right() < text.left())),
-            "{label} has a switch"
+            "{label} has a check box"
         );
     }
 }

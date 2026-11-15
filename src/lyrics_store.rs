@@ -16,13 +16,14 @@ pub enum Source {
     Musixmatch,
     Vk,
     Genius,
+    Lrclib,
 }
 impl Source {
     /// The other synced source a lookup can fall back to.
     pub fn other(self) -> Option<Self> {
         match self {
             Self::Vk => Some(Self::Musixmatch),
-            Self::Musixmatch => Some(Self::Vk),
+            Self::Musixmatch | Self::Lrclib => Some(Self::Vk),
             Self::Genius => None,
         }
     }
@@ -32,6 +33,7 @@ impl Source {
             Self::Musixmatch => "Musixmatch",
             Self::Vk => "VK",
             Self::Genius => "Genius",
+            Self::Lrclib => "LRCLIB",
         }
     }
 }
@@ -47,8 +49,13 @@ pub(super) struct Config {
     /// VK falls back to Musixmatch and Musixmatch to VK. On by default.
     #[serde(default = "genius_fallback_default")]
     pub fallback_to_other: bool,
+    /// LRCLIB, an open database with timed lyrics. On by default.
+    #[serde(default = "genius_fallback_default")]
+    pub fallback_to_lrclib: bool,
     #[serde(default)]
     pub genius_retry_after: u64,
+    #[serde(default)]
+    pub lrclib_retry_after: u64,
     #[serde(default)]
     pub vk_retry_after: u64,
     /// The retired personal API key option: read so older files still load,
@@ -82,7 +89,9 @@ impl Default for Config {
             source: Source::default(),
             fallback_to_genius: genius_fallback_default(),
             fallback_to_other: genius_fallback_default(),
+            fallback_to_lrclib: genius_fallback_default(),
             genius_retry_after: 0,
+            lrclib_retry_after: 0,
             vk_retry_after: 0,
             retired_mode: None,
             retired_key: None,
@@ -108,6 +117,7 @@ pub struct Status {
     pub source: Source,
     pub fallback_to_genius: bool,
     pub fallback_to_other: bool,
+    pub fallback_to_lrclib: bool,
     pub token_ready: bool,
     pub token_rejected: bool,
     pub token_retry_after: u64,
@@ -119,6 +129,7 @@ impl Config {
             source: self.source,
             fallback_to_genius: self.fallback_to_genius,
             fallback_to_other: self.fallback_to_other,
+            fallback_to_lrclib: self.fallback_to_lrclib,
             token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
@@ -128,6 +139,9 @@ impl Config {
                     && let Some(other) = self.source.other()
                 {
                     retry = retry.min(self.retry_after(other));
+                }
+                if self.fallback_to_lrclib && self.source != Source::Lrclib {
+                    retry = retry.min(self.lrclib_retry_after);
                 }
                 if self.fallback_to_genius && self.source != Source::Genius {
                     retry = retry.min(self.genius_retry_after);
@@ -145,6 +159,7 @@ impl Config {
         match source {
             Source::Vk => self.vk_retry_after,
             Source::Genius => self.genius_retry_after,
+            Source::Lrclib => self.lrclib_retry_after,
             Source::Musixmatch => self.anonymous_retry_after,
         }
     }

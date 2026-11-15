@@ -8,6 +8,8 @@ use zeroize::Zeroizing;
 
 #[path = "lyrics_genius.rs"]
 mod genius;
+#[path = "lyrics_lrclib.rs"]
+mod lrclib;
 #[path = "lyrics_service.rs"]
 mod service;
 #[path = "lyrics_store.rs"]

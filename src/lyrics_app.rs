@@ -511,8 +511,8 @@ impl MusicApp {
                 ui.label(t("Источник текстов", "Lyrics source"));
                 ui.label(
                     RichText::new(t(
-                        "VK и Musixmatch поддерживают таймкоды, если они доступны. Genius — обычный текст.",
-                        "VK and Musixmatch support timing when available. Genius provides plain lyrics.",
+                        "VK, Musixmatch и LRCLIB дают текст с таймкодами, если он есть. Genius — обычный текст.",
+                        "VK, Musixmatch and LRCLIB give timed lyrics when they have them. Genius provides plain lyrics.",
                     ))
                     .small()
                     .color(theme::muted()),
@@ -520,7 +520,7 @@ impl MusicApp {
                 egui::ComboBox::from_id_salt("lyrics-source")
                     .selected_text(source.name())
                     .show_ui(ui, |ui| {
-                        for item in [Source::Vk, Source::Musixmatch, Source::Genius] {
+                        for item in [Source::Vk, Source::Musixmatch, Source::Lrclib, Source::Genius] {
                             ui.selectable_value(&mut source, item, item.name());
                         }
                     });
@@ -542,13 +542,35 @@ impl MusicApp {
             if ui
                 .add_enabled_ui(
                     !self.lyrics.settings_busy && self.lyrics.status.is_some(),
-                    |ui| theme::switch(ui, &mut fallback_other, label),
+                    |ui| theme::check_row(ui, &mut fallback_other, label),
                 )
                 .inner
                 .changed()
             {
                 self.configure_lyrics(&ctx, ConfigAction::FallbackOther(fallback_other));
             }
+        }
+        let mut fallback_lrclib = status.fallback_to_lrclib;
+        if ui
+            .add_enabled_ui(
+                !self.lyrics.settings_busy
+                    && self.lyrics.status.is_some()
+                    && source != Source::Lrclib,
+                |ui| {
+                    theme::check_row(
+                        ui,
+                        &mut fallback_lrclib,
+                        t(
+                            "Искать в LRCLIB, если текст недоступен",
+                            "Fallback to LRCLIB",
+                        ),
+                    )
+                },
+            )
+            .inner
+            .changed()
+        {
+            self.configure_lyrics(&ctx, ConfigAction::FallbackLrclib(fallback_lrclib));
         }
         let mut fallback = status.fallback_to_genius;
         if ui
@@ -557,7 +579,7 @@ impl MusicApp {
                     && self.lyrics.status.is_some()
                     && source != Source::Genius,
                 |ui| {
-                    theme::switch(
+                    theme::check_row(
                         ui,
                         &mut fallback,
                         t(
@@ -572,6 +594,14 @@ impl MusicApp {
         {
             self.configure_lyrics(&ctx, ConfigAction::Fallback(fallback));
         }
+        ui.label(
+            RichText::new(t(
+                "Сначала ищется текст с таймкодами во всех источниках, и только без него — обычный.",
+                "Timed lyrics are looked for in every source first, plain ones only when none has timing.",
+            ))
+            .small()
+            .color(theme::muted()),
+        );
         ui.add_space(8.0);
         if source == Source::Musixmatch {
             ui.label(

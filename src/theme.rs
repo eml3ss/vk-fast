@@ -393,29 +393,83 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
 /// filled with the accent when on, where a rounded check draws itself in.
 /// `label` is for screen readers and the tooltip; nothing is written beside it.
 pub fn check(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
-    const SIZE: f32 = 22.0;
-    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(CHECK_SIZE, CHECK_SIZE), egui::Sense::click());
+    toggle_check(&mut response, value, ui.is_enabled(), label);
+    paint_check(ui, rect, &response, *value);
+    let label = label.to_owned();
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
+/// The same check box with `label` written beside it; the whole line is
+/// one click target, like a switch's.
+pub fn check_row(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    toggle_check(&mut response, value, ui.is_enabled(), label);
+    let square = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + CHECK_SIZE * 0.5, rect.center().y),
+        egui::vec2(CHECK_SIZE, CHECK_SIZE),
+    );
+    paint_check(ui, square, &response, *value);
+    let label_rect =
+        egui::Rect::from_min_max(egui::pos2(square.right() + 12.0, rect.top()), rect.max);
+    let color = if ui.is_enabled() {
+        ui.visuals().text_color()
+    } else {
+        muted()
+    };
+    let mut text = egui::text::LayoutJob::simple_singleline(
+        label.to_owned(),
+        TextStyle::Body.resolve(ui.style()),
+        color,
+    );
+    text.wrap = egui::text::TextWrapping::truncate_at_width(label_rect.width().max(0.0));
+    let galley = ui.painter().layout_job(text);
+    ui.painter().galley(
+        egui::pos2(
+            label_rect.left(),
+            label_rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+const CHECK_SIZE: f32 = 22.0;
+
+fn toggle_check(response: &mut egui::Response, value: &mut bool, enabled: bool, label: &str) {
     if response.clicked() {
         *value = !*value;
         response.mark_changed();
     }
+    let checked = *value;
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, label)
     });
-    let progress = ui.ctx().animate_bool_responsive(response.id, *value);
-    let hovered = response.hovered() || response.has_focus();
+}
+
+fn paint_check(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, value: bool) {
+    let progress = ui.ctx().animate_bool_responsive(response.id, value);
+    let hovered = ui.is_enabled() && (response.hovered() || response.has_focus());
     let off = tone(if hovered {
         Color32::from_rgb(62, 70, 83)
     } else {
         Color32::from_rgb(49, 56, 67)
     });
     let on = if hovered { accent() } else { primary() };
-    let fill = lerp_color(off, on, progress);
+    let mut fill = lerp_color(off, on, progress);
+    if !ui.is_enabled() {
+        fill = fill.gamma_multiply(0.5);
+    }
     let painter = ui.painter();
     painter.rect_filled(rect, 7.0, fill);
     if progress > 0.0 {
         // The check is drawn along its path as the box turns on.
-        let point = |x: f32, y: f32| rect.min + egui::vec2(x, y) * SIZE;
+        let point = |x: f32, y: f32| rect.min + egui::vec2(x, y) * CHECK_SIZE;
         let path = [point(0.27, 0.52), point(0.43, 0.67), point(0.74, 0.35)];
         let first = path[0].distance(path[1]);
         let second = path[1].distance(path[2]);
@@ -427,18 +481,19 @@ pub fn check(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response
             points.push(path[1]);
             points.push(path[1] + (path[2] - path[1]) * ((drawn - first) / second));
         }
-        let color = on_fill(on, Color32::WHITE);
-        let stroke = egui::Stroke::new(2.2, color);
-        painter.add(egui::Shape::line(points.clone(), stroke));
+        let mut color = on_fill(on, Color32::WHITE);
+        if !ui.is_enabled() {
+            color = color.gamma_multiply(0.6);
+        }
+        painter.add(egui::Shape::line(
+            points.clone(),
+            egui::Stroke::new(2.2, color),
+        ));
         // Round ends and joint: the line's own caps are square.
         for point in points {
             painter.circle_filled(point, 1.1, color);
         }
     }
-    let label = label.to_owned();
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(label)
 }
 
 fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {

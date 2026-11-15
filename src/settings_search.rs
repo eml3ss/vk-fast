@@ -115,7 +115,7 @@ impl Query {
                 "воспроизведение транслировать трансляция статус страница моя аудиозаписи музыка друзья playback broadcast status page profile now playing friends"
             }
             Setting::Lyrics => {
-                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный токен обновить playback lyrics musixmatch vk genius source fallback anonymous token renew synced источник резервный"
+                "воспроизведение текст тексты песни слова синхронизация мусиксматч музиксматч анонимный токен обновить playback lyrics musixmatch vk genius lrclib лрклиб source fallback anonymous token renew synced источник резервный таймкоды"
             }
             Setting::Crossfade => {
                 "воспроизведение кроссфейд плавный переход между треками затухание наложение смена следующий трек длительность секунды playback crossfade cross fade smooth transition between tracks fade overlap next track length seconds gapless"
