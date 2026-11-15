@@ -92,7 +92,16 @@ impl AddTracks {
 enum Entry {
     Heading(&'static str),
     Note(String),
-    Track(Box<Track>),
+    /// A track, and whether it came from VK's search (else My music).
+    Track(Box<Track>, bool),
+}
+
+/// What a click on a track's row asked for.
+#[derive(PartialEq, Eq)]
+enum RowClick {
+    None,
+    Add,
+    Play,
 }
 
 impl MusicApp {
@@ -301,7 +310,10 @@ impl MusicApp {
                 t("Ничего не найдено.", "Nothing found.").to_owned(),
             ));
         }
-        entries.extend(mine.into_iter().map(|track| Entry::Track(Box::new(track))));
+        entries.extend(
+            mine.iter()
+                .map(|track| Entry::Track(Box::new(track.clone()), false)),
+        );
         if !query.is_empty() {
             entries.push(Entry::Heading(t("Поиск VK", "VK search")));
             if let Some(error) = &dialog.search_error {
@@ -317,11 +329,12 @@ impl MusicApp {
                 dialog
                     .found
                     .iter()
-                    .map(|track| Entry::Track(Box::new(track.clone()))),
+                    .map(|track| Entry::Track(Box::new(track.clone()), true)),
             );
         }
         let mut close = false;
         let mut chosen = None;
+        let mut play: Option<((i64, i64), bool)> = None;
         let modal = egui::Modal::new(egui::Id::new("add-tracks-to-playlist"))
             .frame(
                 egui::Frame::popup(&ctx.global_style())
@@ -442,14 +455,16 @@ impl MusicApp {
                                         theme::muted(),
                                     );
                                 }
-                                Entry::Track(track) => {
+                                Entry::Track(track, from_vk) => {
                                     let state = if dialog.present.contains(&track.key()) {
                                         Some(None)
                                     } else {
                                         dialog.states.get(&track.key()).copied().map(Some)
                                     };
-                                    if self.add_tracks_row(ui, rect, track, state, index) {
-                                        chosen = Some(track.as_ref().clone());
+                                    match self.add_tracks_row(ui, rect, track, state, index) {
+                                        RowClick::Add => chosen = Some(track.as_ref().clone()),
+                                        RowClick::Play => play = Some((track.key(), *from_vk)),
+                                        RowClick::None => {}
                                     }
                                 }
                             }
@@ -460,11 +475,49 @@ impl MusicApp {
         if let Some(track) = chosen {
             Self::add_from_dialog(dialog, &track);
         }
+        if let Some((key, from_vk)) = play {
+            // The list it was clicked in plays on: VK's results, the matches
+            // from My music, or My music itself when nothing is typed.
+            let (tracks, origin) = if from_vk {
+                (
+                    Some(dialog.found.clone()),
+                    format!("search:{}", dialog.searched),
+                )
+            } else if query.is_empty() {
+                (None, "library".to_owned())
+            } else {
+                (Some(mine), format!("library-search:{query}"))
+            };
+            self.play_from_add_tracks(ctx, key, tracks, origin);
+        }
         close || modal.should_close()
     }
 
+    fn play_from_add_tracks(
+        &mut self,
+        ctx: &egui::Context,
+        key: (i64, i64),
+        tracks: Option<Vec<Track>>,
+        origin: String,
+    ) {
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|track| track.key() == key)
+        {
+            self.toggle_playback(ctx);
+            return;
+        }
+        self.unavailable_playback.clear();
+        self.leave_mix();
+        self.replace_play_queue_from(tracks, origin);
+        self.play_order.select_source(key);
+        self.play_track(ctx, key);
+    }
+
     /// One track with its plus; `state` is `Some(None)` for a track the
-    /// playlist already has. Returns whether its plus was clicked.
+    /// playlist already has. A click on the row plays the track (a double
+    /// click where Settings ask for one), on its plus adds it.
     fn add_tracks_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -472,14 +525,22 @@ impl MusicApp {
         track: &Track,
         state: Option<Option<Added>>,
         index: usize,
-    ) -> bool {
+    ) -> RowClick {
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
         let inner = rect.shrink2(egui::vec2(4.0, 6.0));
-        let hovered = ui.rect_contains_pointer(inner);
-        if hovered {
+        let row = ui.interact(
+            inner,
+            ui.id().with(("add-track-play", index, track.key())),
+            Sense::click(),
+        );
+        if row.hovered() {
             ui.painter().rect_filled(inner, 8.0, theme::selected());
         }
+        let playing = self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| playing.key() == track.key());
         let mut clicked = false;
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -496,11 +557,23 @@ impl MusicApp {
                     |ui| {
                         ui.set_width(text_width);
                         ui.spacing_mut().item_spacing.y = 1.0;
+                        // Title and artists centred on the cover, not pinned
+                        // to its top.
+                        let title_font = egui::FontId::new(14.0, theme::semibold());
+                        let small = egui::TextStyle::Small.resolve(ui.style());
+                        let (title, artist) = ui.fonts_mut(|fonts| {
+                            (fonts.row_height(&title_font), fonts.row_height(&small))
+                        });
+                        ui.add_space(((36.0 - title - 1.0 - artist) * 0.5).max(0.0));
                         ui.add(
                             egui::Label::new(
-                                RichText::new(track.display_title())
-                                    .family(theme::semibold())
-                                    .size(14.0),
+                                RichText::new(track.display_title()).font(title_font).color(
+                                    if playing {
+                                        theme::accent()
+                                    } else {
+                                        ui.visuals().text_color()
+                                    },
+                                ),
                             )
                             .truncate()
                             .selectable(false),
@@ -562,6 +635,14 @@ impl MusicApp {
                 });
             },
         );
-        clicked
+        if clicked {
+            return RowClick::Add;
+        }
+        let play = if self.double_click_to_play {
+            row.double_clicked()
+        } else {
+            row.clicked()
+        };
+        if play { RowClick::Play } else { RowClick::None }
     }
 }

@@ -85,6 +85,26 @@ fn a_plus_adds_one_track_at_a_time_and_tracks_already_there_are_marked() {
             _ => None,
         })
         .unwrap();
+    // Title and artists sit in the middle of the row, like its time.
+    let artist = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text)
+                if text.galley.text() == tracks[1].artist
+                    && text.visual_bounding_rect().top() > beta.top() =>
+            {
+                Some(text.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let middle = (beta.top() + artist.bottom()) * 0.5;
+    assert!(
+        (middle - duration.center().y).abs() < 2.5,
+        "text centred: {middle} vs {}",
+        duration.center().y
+    );
     let plus = egui::pos2(duration.right() + 10.0 + 11.0, duration.center().y);
     for pressed in [true, false] {
         frame(
@@ -119,6 +139,34 @@ fn a_plus_adds_one_track_at_a_time_and_tracks_already_there_are_marked() {
     assert!(text(&output, "Gamma tune").is_some());
     assert!(text(&output, "Alpha song").is_none());
     assert!(text(&output, "VK search").is_some());
+
+    // A click on a row plays it, in My music's matches.
+    app.double_click_to_play = false;
+    let output = frame(&ctx, &mut app, &mut tick, Vec::new());
+    let gamma = text(&output, "Gamma tune").unwrap().center();
+    for pressed in [true, false] {
+        frame(
+            &ctx,
+            &mut app,
+            &mut tick,
+            vec![
+                egui::Event::PointerMoved(gamma),
+                egui::Event::PointerButton {
+                    pos: gamma,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert_eq!(app.playing.as_ref().map(Track::key), Some(tracks[2].key()));
+    assert_eq!(
+        app.play_queue.as_ref().map(|queue| queue.len()),
+        Some(1),
+        "the matches it was clicked in"
+    );
+    assert!(work.try_recv().is_err(), "playing adds nothing");
 
     // Escape closes it and says how many were added.
     frame(
