@@ -30,6 +30,8 @@ pub struct View<'a> {
     pub dislike_pending: bool,
     /// The open playlist this row can be removed from, checked by the caller.
     pub removable_from: Option<&'a AlbumRef>,
+    /// The track is being downloaded already.
+    pub downloading: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +44,7 @@ pub enum Action {
     Artist(ArtistRef),
     Album,
     CopyLink,
+    Download,
     /// From the menu of an album right-clicked in a row.
     OpenAlbum(AlbumRef),
     CopyArtistLink(ArtistRef),
@@ -448,6 +451,18 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     {
         action = Some(Action::CopyLink);
     }
+    if row(
+        ui,
+        Icon::Save,
+        language.text("Скачать", "Download"),
+        view.connected && view.track.unavailable != Some(true) && !view.downloading,
+        false,
+        view.downloading,
+    )
+    .clicked()
+    {
+        action = Some(Action::Download);
+    }
     if action.is_some() {
         ui.close();
     }
@@ -709,6 +724,7 @@ mod tests {
                                 disliked: self.disliked,
                                 dislike_pending: false,
                                 removable_from: self.removable.as_ref(),
+                                downloading: false,
                             },
                         );
                     });

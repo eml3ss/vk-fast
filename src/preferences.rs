@@ -101,6 +101,17 @@ struct Preferences {
     /// On unless turned off: VK's popular searches on the empty search page.
     #[serde(deserialize_with = "deserialize_on")]
     popular_searches: bool,
+    /// The buttons beside a track, as `track_buttons::Set` bits.
+    #[serde(deserialize_with = "deserialize_track_buttons")]
+    track_buttons_player: u8,
+    #[serde(deserialize_with = "deserialize_track_buttons")]
+    track_buttons_lists: u8,
+    /// Where downloaded tracks go; empty for the system's Downloads folder.
+    #[serde(
+        deserialize_with = "deserialize_download_dir",
+        skip_serializing_if = "String::is_empty"
+    )]
+    download_dir: String,
     #[serde(deserialize_with = "deserialize_ui_scale")]
     ui_scale: u16,
     /// Off unless turned on: the scale follows the monitor's resolution.
@@ -151,6 +162,9 @@ impl Default for Preferences {
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
             search_history: true,
             popular_searches: true,
+            track_buttons_player: crate::track_buttons::Set::default().bits(),
+            track_buttons_lists: crate::track_buttons::Set::default().bits(),
+            download_dir: String::new(),
             ui_scale: DEFAULT_UI_SCALE,
             auto_ui_scale: false,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
@@ -348,6 +362,34 @@ fn deserialize_ui_scale<'de, D: serde::Deserializer<'de>>(
         .and_then(|scale| u16::try_from(scale).ok())
         .filter(|scale| UI_SCALE_RANGE.contains(scale))
         .unwrap_or(DEFAULT_UI_SCALE))
+}
+
+fn deserialize_track_buttons<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_u64()
+        .and_then(|bits| u8::try_from(bits).ok())
+        .map_or(
+            crate::track_buttons::Set::default(),
+            crate::track_buttons::Set::from_bits,
+        )
+        .bits())
+}
+
+/// An absolute folder of reasonable length, or empty (the default).
+fn deserialize_download_dir<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .filter(|path| valid_download_dir(path))
+        .map(str::to_owned)
+        .unwrap_or_default())
+}
+
+fn valid_download_dir(path: &str) -> bool {
+    path.len() <= 4096 && !path.chars().any(char::is_control) && Path::new(path).is_absolute()
 }
 
 /// A switch that is on unless explicitly turned off.
@@ -1012,6 +1054,51 @@ pub fn save_search_lists(history: bool, popular: bool) -> io::Result<()> {
     })
 }
 
+/// The buttons beside a track in the player and in track lists.
+pub fn load_track_buttons() -> (crate::track_buttons::Set, crate::track_buttons::Set) {
+    let read = |preferences: Preferences| {
+        (
+            crate::track_buttons::Set::from_bits(preferences.track_buttons_player),
+            crate::track_buttons::Set::from_bits(preferences.track_buttons_lists),
+        )
+    };
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map_or_else(Default::default, read)
+}
+
+pub fn save_track_buttons(
+    player: crate::track_buttons::Set,
+    lists: crate::track_buttons::Set,
+) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.track_buttons_player = player.bits();
+        preferences.track_buttons_lists = lists.bits();
+    })
+}
+
+/// The folder for downloaded tracks; empty for the system's Downloads.
+pub fn load_download_dir() -> String {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .map(|preferences| preferences.download_dir)
+        .unwrap_or_default()
+}
+
+pub fn save_download_dir(path: &str) -> io::Result<()> {
+    if !path.is_empty() && !valid_download_dir(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid folder",
+        ));
+    }
+    update_at(&preferences_path()?, |preferences| {
+        preferences.download_dir = path.to_owned()
+    })
+}
+
 pub fn load_explicit_badge() -> bool {
     preferences_path()
         .ok()
@@ -1399,6 +1486,31 @@ mod tests {
         update_at(&path, |preferences| preferences.auto_ui_scale = true).unwrap();
         let restored = load_preferences_at(&path).unwrap().unwrap();
         assert!(restored.auto_ui_scale && restored.ui_scale == 125);
+    }
+
+    #[test]
+    fn track_buttons_and_the_download_folder_have_defaults_and_survive_bad_values() {
+        let preferences: Preferences = serde_json::from_str(
+            r#"{"track_buttons_player":"x","track_buttons_lists":300,"download_dir":"relative/dir"}"#,
+        )
+        .unwrap();
+        let default = crate::track_buttons::Set::default().bits();
+        assert_eq!(preferences.track_buttons_player, default);
+        assert_eq!(preferences.track_buttons_lists, default);
+        assert!(preferences.download_dir.is_empty());
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        let folder = directory.0.join("music").to_string_lossy().into_owned();
+        update_at(&path, |preferences| {
+            preferences.track_buttons_lists = 9;
+            preferences.download_dir = folder.clone();
+        })
+        .unwrap();
+        save_at(&path, 0.5).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert_eq!(restored.track_buttons_lists, 9);
+        assert_eq!(restored.track_buttons_player, default);
+        assert_eq!(restored.download_dir, folder);
     }
 
     #[test]

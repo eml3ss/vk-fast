@@ -512,3 +512,28 @@ fn a_background_download_stores_the_file_and_skips_playlists() {
     source::download(server.net(), playlist_url.as_str(), &other).unwrap();
     assert!(other.total().is_none());
 }
+
+#[test]
+fn a_stored_track_is_saved_byte_for_byte_and_named_by_its_content() {
+    let file = long_tone();
+    let server = Server::new(HashMap::from([("/track.mp3".into(), file.clone())]));
+    let directory = tempfile::tempdir().unwrap();
+    let (_cache, store) = media_store(directory.path());
+    let url = server.url.join("track.mp3").unwrap();
+    let (input, origin) = source::from_net(server.net(), url, 0.0, Some(store.clone())).unwrap();
+    decode(input, origin, 0.0);
+    drop(server);
+    let mut saved = Vec::new();
+    let extension = save_whole(None, Some(store), &Cancellation::default(), &mut saved).unwrap();
+    assert_eq!(extension, "mp3");
+    assert_eq!(saved, file, "the original file, untouched");
+
+    assert_eq!(audio_extension(b"ID3\x03\x00"), Some("mp3"));
+    assert_eq!(audio_extension(&[0xff, 0xfb, 0x90, 0x00]), Some("mp3"));
+    assert_eq!(audio_extension(&[0xff, 0xf1, 0x50, 0x80]), Some("aac"));
+    assert_eq!(audio_extension(b"\0\0\0\x18ftypM4A "), Some("m4a"));
+    assert_eq!(audio_extension(b"<html>"), None);
+    let canceled = Cancellation::default();
+    canceled.cancel();
+    assert!(save_whole(None, None, &canceled, &mut Vec::new()).is_err());
+}

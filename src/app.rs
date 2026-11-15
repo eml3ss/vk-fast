@@ -27,6 +27,8 @@ mod crossfade_tests;
 mod current_settings_tests;
 #[path = "discord_rpc_app.rs"]
 mod discord_rpc_app;
+#[path = "download_app.rs"]
+mod download_app;
 #[path = "library_app.rs"]
 mod library_app;
 #[cfg(test)]
@@ -1408,6 +1410,15 @@ pub struct MusicApp {
     popular_searches: bool,
     search_lists_save_failed: bool,
     search_history_writer: crate::search_history::Writer,
+    /// The buttons beside a track in the player and in track lists.
+    track_buttons_player: crate::track_buttons::Set,
+    track_buttons_lists: crate::track_buttons::Set,
+    track_buttons_save_failed: bool,
+    /// The folder for downloads; empty for the system's Downloads.
+    download_dir: String,
+    download_dir_save_failed: bool,
+    download_dir_pick: Option<mpsc::Receiver<Option<std::path::PathBuf>>>,
+    downloads: Vec<download_app::DownloadJob>,
     middle_autoscroll: bool,
     middle_autoscroll_save_failed: bool,
     /// The "E" badge by explicit tracks' titles.
@@ -1688,6 +1699,14 @@ impl MusicApp {
         } else {
             preferences::load_search_lists()
         };
+        let (track_buttons, download_dir) = if cfg!(test) {
+            (Default::default(), String::new())
+        } else {
+            (
+                preferences::load_track_buttons(),
+                preferences::load_download_dir(),
+            )
+        };
         #[cfg(not(test))]
         let audio_cache = AudioCache::new(u64::from(cache_limit_mb) * 1024 * 1024).ok();
         // UI tests inject a temporary cache and must never prune the user's cache.
@@ -1865,6 +1884,13 @@ impl MusicApp {
             popular_searches: search_lists.1,
             search_lists_save_failed: false,
             search_history_writer: Default::default(),
+            track_buttons_player: track_buttons.0,
+            track_buttons_lists: track_buttons.1,
+            track_buttons_save_failed: false,
+            download_dir,
+            download_dir_save_failed: false,
+            download_dir_pick: None,
+            downloads: Vec::new(),
             search_on_enter_save_failed: false,
             middle_autoscroll: preferences::load_middle_autoscroll(),
             middle_autoscroll_save_failed: false,
@@ -7854,9 +7880,15 @@ impl MusicApp {
                 let sorted = if artist.is_none() && !tracks.is_empty() {
                     let sort = self.current_sort();
                     let index_width = track_index_width(ui, tracks.len());
-                    if let Some(column) =
-                        track_sort::header(ui, language, sort, show_date, index_width, false)
-                    {
+                    if let Some(column) = track_sort::header(
+                        ui,
+                        language,
+                        sort,
+                        show_date,
+                        index_width,
+                        false,
+                        download_app::controls_width(self.track_buttons_lists),
+                    ) {
                         self.set_sort(column);
                         ui.ctx().request_repaint();
                     }
@@ -8166,6 +8198,7 @@ impl MusicApp {
                     },
                     index_width,
                     false,
+                    download_app::controls_width(self.track_buttons_lists),
                 ) {
                     self.set_sort(column);
                     ui.ctx().request_repaint();
@@ -8924,9 +8957,15 @@ impl MusicApp {
         if !visible.is_empty() {
             let index_width = track_index_width(ui, self.view_tracks().len());
             let sort = self.current_sort();
-            if let Some(column) =
-                track_sort::header(ui, self.language, sort, show_date, index_width, true)
-            {
+            if let Some(column) = track_sort::header(
+                ui,
+                self.language,
+                sort,
+                show_date,
+                index_width,
+                true,
+                download_app::controls_width(self.track_buttons_lists),
+            ) {
                 self.set_sort(column);
                 ui.ctx().request_repaint();
             }
@@ -9176,6 +9215,7 @@ impl MusicApp {
                 disliked: self.disliked.contains(&track.key()),
                 dislike_pending: self.dislike_request.is_some(),
                 removable_from: removable.as_ref(),
+                downloading: self.downloading(track.key()),
             },
         )?;
         Some(TrackAction::Menu(track.clone(), action))
@@ -9266,6 +9306,7 @@ impl MusicApp {
                 }
             }
             track_menu::Action::ToggleFollow(artist) => self.toggle_artist_follow(ctx, artist),
+            track_menu::Action::Download => self.download_track(ctx, track),
             track_menu::Action::RefreshPlaylists => self.load_playlists(ctx, true),
             track_menu::Action::CopyDetails(detail) => {
                 let text = detail.text(track);
@@ -9521,7 +9562,9 @@ impl MusicApp {
                     );
                 }
                 self.covers.show(ui, track.cover_url.as_deref(), 40.0);
-                let columns = show_date.fit(ui.available_width() - track_sort::CONTROLS_WIDTH);
+                let columns = show_date.fit(
+                    ui.available_width() - download_app::controls_width(self.track_buttons_lists),
+                );
                 let width = columns.title;
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, 40.0),
@@ -9631,26 +9674,15 @@ impl MusicApp {
                         },
                     );
                 }
-                let mix = self.track_mix_button(ui);
-                controls_contain_pointer |= mix.contains_pointer();
-                if mix.clicked() {
-                    action = Some(TrackAction::Menu(
-                        track.clone(),
-                        track_menu::Action::TrackMix,
-                    ));
-                }
-                let dislike = self.dislike_button(ui, track);
-                controls_contain_pointer |= dislike.contains_pointer();
-                if dislike.clicked() {
-                    action = Some(TrackAction::Menu(
-                        track.clone(),
-                        track_menu::Action::ToggleDislike,
-                    ));
-                }
-                let heart = self.like_button(ui, track);
-                controls_contain_pointer |= heart.contains_pointer();
-                if heart.clicked() {
-                    action = Some(TrackAction::ToggleLike(track.clone()));
+                for button in crate::track_buttons::Button::ROW {
+                    if !self.track_buttons_lists.has(button) {
+                        continue;
+                    }
+                    let response = self.track_button(ui, track, button);
+                    controls_contain_pointer |= response.contains_pointer();
+                    if response.clicked() {
+                        action = Some(Self::track_button_action(track, button));
+                    }
                 }
                 ui.add(
                     egui::Label::new(RichText::new(track.duration_label()).color(theme::muted()))
@@ -9835,7 +9867,8 @@ impl MusicApp {
                 let cover_gap = ui.spacing().item_spacing.x;
                 let heart_gap = 10.0;
                 let action_gap = 6.0;
-                let actions_width = 3.0 * 22.0 + 2.0 * action_gap;
+                let shown = self.track_buttons_player.count() as f32;
+                let actions_width = (shown * 22.0 + (shown - 1.0).max(0.0) * action_gap).max(0.0);
                 let max_text_width = (metadata.width()
                     - artwork_size
                     - cover_gap
@@ -9977,20 +10010,13 @@ impl MusicApp {
                             .layout(Layout::left_to_right(Align::Center)),
                         |ui| {
                             ui.spacing_mut().item_spacing.x = action_gap;
-                            if self.like_button(ui, track).clicked() {
-                                metadata_action = Some(TrackAction::ToggleLike(track.clone()));
-                            }
-                            if self.dislike_button(ui, track).clicked() {
-                                metadata_action = Some(TrackAction::Menu(
-                                    track.clone(),
-                                    track_menu::Action::ToggleDislike,
-                                ));
-                            }
-                            if self.track_mix_button(ui).clicked() {
-                                metadata_action = Some(TrackAction::Menu(
-                                    track.clone(),
-                                    track_menu::Action::TrackMix,
-                                ));
+                            for button in crate::track_buttons::Button::ALL {
+                                if self.track_buttons_player.has(button)
+                                    && self.track_button(ui, track, button).clicked()
+                                {
+                                    metadata_action =
+                                        Some(Self::track_button_action(track, button));
+                                }
                             }
                         },
                     );
@@ -11297,6 +11323,7 @@ impl MusicApp {
                 Setting::LinkHandler,
                 Setting::DiscordRpc,
                 Setting::Logging,
+                Setting::DownloadFolder,
             ],
             SettingsSection::Appearance => &[Setting::Theme, Setting::Accent],
             SettingsSection::Interface => &[
@@ -11309,6 +11336,7 @@ impl MusicApp {
                 Setting::MiddleAutoscroll,
                 Setting::ExplicitBadge,
                 Setting::AnimatedBackdrop,
+                Setting::TrackButtons,
             ],
             SettingsSection::Playback => &[
                 Setting::VolumeKeys,
@@ -11379,6 +11407,7 @@ impl MusicApp {
                         || query.matches(Setting::LinkHandler)
                         || query.matches(Setting::DiscordRpc)
                         || query.matches(Setting::Logging)
+                        || query.matches(Setting::DownloadFolder)
                     {
                         ui.add_space(16.0);
                     }
@@ -11420,13 +11449,17 @@ impl MusicApp {
                     if query.matches(Setting::LinkHandler)
                         || query.matches(Setting::DiscordRpc)
                         || query.matches(Setting::Logging)
+                        || query.matches(Setting::DownloadFolder)
                     {
                         ui.add_space(16.0);
                     }
                 }
                 if query.matches(Setting::LinkHandler) {
                     self.link_handler_settings(ui, &ctx);
-                    if query.matches(Setting::DiscordRpc) || query.matches(Setting::Logging) {
+                    if query.matches(Setting::DiscordRpc)
+                        || query.matches(Setting::Logging)
+                        || query.matches(Setting::DownloadFolder)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -11452,7 +11485,7 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::Logging) {
+                    if query.matches(Setting::Logging) || query.matches(Setting::DownloadFolder) {
                         ui.add_space(16.0);
                     }
                 }
@@ -11495,6 +11528,12 @@ impl MusicApp {
                             ),
                         );
                     }
+                    if query.matches(Setting::DownloadFolder) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::DownloadFolder) {
+                    self.download_folder_settings(ui, &ctx);
                 }
             }
             SettingsSection::Appearance => {
@@ -11579,6 +11618,7 @@ impl MusicApp {
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
                     }
@@ -11614,6 +11654,7 @@ impl MusicApp {
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
                     }
@@ -11646,6 +11687,7 @@ impl MusicApp {
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
                     }
@@ -11704,6 +11746,7 @@ impl MusicApp {
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
                     }
@@ -11743,6 +11786,7 @@ impl MusicApp {
                     if query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
                     }
@@ -11800,7 +11844,9 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::AnimatedBackdrop) {
+                    if query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
+                    {
                         ui.add_space(16.0);
                     }
                 }
@@ -11830,6 +11876,12 @@ impl MusicApp {
                             ),
                         );
                     }
+                    if query.matches(Setting::TrackButtons) {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::TrackButtons) {
+                    self.track_buttons_settings(ui);
                 }
             }
             SettingsSection::Playback => {
@@ -12562,6 +12614,8 @@ impl MusicApp {
         }
         self.poll_search(ctx);
         self.drive_search(ctx);
+        self.poll_downloads();
+        self.poll_download_dir();
         self.poll_detail(ctx);
         self.poll_metadata(ctx);
         self.hydrate_library_dates(ctx);
@@ -13343,6 +13397,13 @@ mod tests {
             popular_searches: true,
             search_lists_save_failed: false,
             search_history_writer: Default::default(),
+            track_buttons_player: Default::default(),
+            track_buttons_lists: Default::default(),
+            track_buttons_save_failed: false,
+            download_dir: String::new(),
+            download_dir_save_failed: false,
+            download_dir_pick: None,
+            downloads: Vec::new(),
             search_on_enter_save_failed: false,
             middle_autoscroll: false,
             middle_autoscroll_save_failed: false,

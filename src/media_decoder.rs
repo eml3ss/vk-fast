@@ -86,6 +86,72 @@ pub fn download(
     }
     source::download(net::Net::new(cancellation.0.clone())?, url, store)
 }
+/// The most a saved track may weigh.
+const MAX_SAVED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Writes a track's whole file to `out`, for saving: the original file
+/// (from the cache when stored whole, otherwise from VK, storing what it
+/// fetches) or, for HLS, its audio stream joined. Returns the extension
+/// its content calls for: `mp3`, `aac` or `m4a`. Call on a worker thread.
+pub fn save_whole(
+    url: Option<&str>,
+    store: Option<crate::audio_cache::MediaStore>,
+    cancellation: &Cancellation,
+    out: &mut dyn io::Write,
+) -> io::Result<&'static str> {
+    let stored = store.clone().and_then(|store| source::stored(store, 0.0));
+    let mut source = match (stored, url) {
+        (Some(stored), _) => stored,
+        (None, Some(url)) => {
+            let parsed = reqwest::Url::parse(url).map_err(|_| invalid())?;
+            if !net::valid_url(&parsed) {
+                return Err(invalid());
+            }
+            let net = net::Net::new(cancellation.0.clone())?;
+            source::from_net(net, parsed, 0.0, store)?.0
+        }
+        (None, None) => return Err(invalid()),
+    };
+    let mut buffer = vec![0; 256 * 1024];
+    let mut head = Vec::new();
+    let mut written = 0u64;
+    loop {
+        if cancellation.is_canceled() {
+            return Err(canceled());
+        }
+        let read = match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        written += read as u64;
+        if written > MAX_SAVED_BYTES {
+            return Err(invalid());
+        }
+        if head.len() < 16 {
+            head.extend_from_slice(&buffer[..read.min(16 - head.len())]);
+        }
+        out.write_all(&buffer[..read])?;
+    }
+    audio_extension(&head).ok_or_else(invalid)
+}
+
+/// The file kind of audio starting with `head`: MP3 (an ID3 tag or an MPEG
+/// audio frame), AAC in ADTS frames, or MP4.
+fn audio_extension(head: &[u8]) -> Option<&'static str> {
+    match head {
+        [b'I', b'D', b'3', ..] => Some("mp3"),
+        [_, _, _, _, b'f', b't', b'y', b'p', ..]
+        | [_, _, _, _, b's', b't', b'y', b'p', ..]
+        | [_, _, _, _, b'm', b'o', b'o', b'f', ..] => Some("m4a"),
+        // ADTS has layer 00 where MPEG audio layers are 01–11.
+        [0xff, second, ..] if second & 0xf6 == 0xf0 => Some("aac"),
+        [0xff, second, ..] if second & 0xe0 == 0xe0 && second & 0x06 != 0 => Some("mp3"),
+        _ => None,
+    }
+}
+
 struct Lazy {
     url: Option<Zeroizing<String>>,
     offset: f64,

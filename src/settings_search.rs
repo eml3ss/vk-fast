@@ -21,6 +21,7 @@ pub enum Setting {
     MiddleAutoscroll,
     ExplicitBadge,
     AnimatedBackdrop,
+    TrackButtons,
     VolumeKeys,
     MixAfterQueue,
     Crossfade,
@@ -30,6 +31,7 @@ pub enum Setting {
     MinimizeToTray,
     LinkHandler,
     Logging,
+    DownloadFolder,
     DiscordRpc,
     CacheLimit,
     CacheClear,
@@ -96,6 +98,12 @@ impl Query {
             }
             Setting::AnimatedBackdrop => {
                 "интерфейс анимированный анимация фон размытый размытие обложка полноэкранный полный экран текст плеер interface animated animation background backdrop blur blurred cover fullscreen lyrics player"
+            }
+            Setting::TrackButtons => {
+                "интерфейс кнопки у трека справа плеер списки сердечко лайк нравится не нравится дизлайк микс по треку скачать загрузить показывать скрыть interface track buttons player lists heart like dislike mix download show hide"
+            }
+            Setting::DownloadFolder => {
+                "общие папка сохранения скачивание скачать загрузки загрузить треки музыка файлы путь general download folder save location downloads tracks music files path"
             }
             Setting::VolumeKeys => {
                 "воспроизведение громкость клавиши кнопки мультимедийные ctrl контрол глобально горячие сочетание приложения playback volume keys media multimedia keyboard ctrl control global hotkey shortcut app"

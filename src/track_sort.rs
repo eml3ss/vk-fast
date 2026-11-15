@@ -27,8 +27,6 @@ pub(super) type Cached = (String, Sort, u64, usize, String, Arc<[usize]>);
 pub(super) const DATE_WIDTH: f32 = 138.0;
 /// The middle of a row's duration, from the row's inner right edge.
 const DURATION_CENTER: f32 = 36.0;
-/// Width the row keeps on the right for mix, dislike, heart and duration.
-pub(super) const CONTROLS_WIDTH: f32 = 142.0;
 /// Narrowest title before the list drops a column.
 const TITLE_MIN: f32 = 200.0;
 const ALBUM_MIN: f32 = 140.0;
@@ -213,6 +211,8 @@ pub(super) fn header(
     extra: Extra,
     index_width: f32,
     scrollbar: bool,
+    // What the rows keep on the right for their buttons and duration.
+    controls: f32,
 ) -> Option<Column> {
     let (full, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
     // Rows inside their own scroll area leave room for its bar on the right.
@@ -223,7 +223,7 @@ pub(super) fn header(
     // The same insets as a track row: 4 px, then index, cover and title.
     let inner = rect.shrink2(egui::vec2(4.0, 0.0));
     let title_left = inner.left() + index_width + 6.0;
-    let columns = extra.fit(inner.width() - index_width - 6.0 - 40.0 - 6.0 - CONTROLS_WIDTH);
+    let columns = extra.fit(inner.width() - index_width - 6.0 - 40.0 - 6.0 - controls);
     let title_width = columns.title;
     let album_left = title_left + 40.0 + 6.0 + title_width + GAP;
     let date_left = album_left + columns.album.map_or(0.0, |width| width + GAP);
