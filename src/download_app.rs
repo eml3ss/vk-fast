@@ -58,7 +58,17 @@ impl MusicApp {
             .named(track)
             .map(|album| album.title)
             .filter(|title| !title.trim().is_empty());
-        let cover_url = track.cover_url.clone();
+        // The album's own cover first (asked of VK at its largest), then
+        // the album's and the track's copies from the list.
+        let owner = session.profile.id;
+        let album_ref = track.album.clone().filter(|album| album.id > 0);
+        let cover_urls: Vec<String> = track
+            .album
+            .as_ref()
+            .and_then(|album| album.cover_url.clone())
+            .into_iter()
+            .chain(track.cover_url.clone())
+            .collect();
         let disk = self.covers.disk();
         let (sender, receiver) = mpsc::sync_channel(1);
         let repaint = self.repaint_target.with_context(ctx);
@@ -74,7 +84,10 @@ impl MusicApp {
                     let url = if complete {
                         None
                     } else {
-                        match music.map(|music| music.resolve_cached(key, &canceled)) {
+                        match music
+                            .as_ref()
+                            .map(|music| music.resolve_cached(key, &canceled))
+                        {
                             Some(Ok(url)) => Some(url),
                             _ => Some(own_url.ok_or(())?),
                         }
@@ -94,10 +107,20 @@ impl MusicApp {
                     // only the encoder); an M4A keeps its own atoms.
                     let (start, end) = if matches!(extension, "mp3" | "aac") {
                         let range = crate::downloads::audio_range(source).map_err(|_| ())?;
-                        // The full-size cover from VK, else the largest kept.
-                        let cover = cover_url
-                            .as_deref()
-                            .and_then(|url| crate::cover_art::original(&disk, url).ok())
+                        // The largest real cover: never VK's note stand-in for
+                        // a track without one.
+                        let largest = music
+                            .as_ref()
+                            .zip(album_ref.as_ref())
+                            .and_then(|(music, album)| music.album_cover(owner, album, &canceled));
+                        let cover = largest
+                            .into_iter()
+                            .chain(cover_urls)
+                            .find_map(|url| {
+                                crate::cover_art::original(&disk, &url)
+                                    .ok()
+                                    .filter(|bytes| !crate::downloads::vk_placeholder(bytes))
+                            })
                             .and_then(crate::downloads::tag_cover);
                         let tag = crate::downloads::id3(&crate::downloads::Tags {
                             title: &title,

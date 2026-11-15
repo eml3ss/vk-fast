@@ -237,6 +237,50 @@ pub fn audio_range<R: Read + Seek>(source: &mut R) -> io::Result<(u64, u64)> {
     Ok((start, end))
 }
 
+/// The shape VK's stand-in cover for a track without one has (a big
+/// music note, in one of several colours): its 8×8 brightness, centred and
+/// scaled to unit spread. Colours differ, the shape does not.
+const PLACEHOLDER_SHAPE: [f32; 64] = [
+    -0.87, -0.78, -0.34, -0.44, -0.95, -1.36, -1.47, -1.46, -0.45, -0.31, 0.30, 0.22, -0.19, -0.74,
+    -1.01, -1.37, 0.01, 0.23, 1.03, 0.31, 0.04, -0.00, -0.23, -1.26, 0.72, 0.98, 1.80, 0.78, 0.48,
+    0.48, 0.22, -1.18, 0.64, 1.41, 2.08, 1.24, 1.05, 1.02, 0.46, -1.14, 0.26, 0.96, 1.52, 1.56,
+    1.30, 0.55, -0.53, -1.38, -0.53, 0.24, 0.86, 1.66, 0.62, -0.29, -1.19, -1.47, -1.27, -0.77,
+    0.38, 1.87, -0.24, -1.16, -1.46, -1.47,
+];
+
+/// VK's stand-in cover rather than a real one: its brightness follows the
+/// note's shape. VK's six stand-ins match it by 0.75 or more; two hundred
+/// real covers by at most about 0.62.
+pub fn vk_placeholder(bytes: &[u8]) -> bool {
+    let Ok(picture) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    let small = image::imageops::resize(
+        &picture.into_luma8(),
+        8,
+        8,
+        image::imageops::FilterType::Triangle,
+    );
+    let values: Vec<f32> = small.pixels().map(|pixel| f32::from(pixel.0[0])).collect();
+    let mean = values.iter().sum::<f32>() / 64.0;
+    let spread = (values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f32>()
+        / 64.0)
+        .sqrt();
+    if spread < 1.0 {
+        return false;
+    }
+    let likeness = values
+        .iter()
+        .zip(PLACEHOLDER_SHAPE)
+        .map(|(value, shape)| (value - mean) / spread * shape)
+        .sum::<f32>()
+        / 64.0;
+    likeness >= 0.7
+}
+
 /// A cover every player shows: JPEG and PNG as they are, anything else
 /// (VK also serves WebP) turned into a JPEG. `None` if it is no picture.
 pub fn tag_cover(bytes: Vec<u8>) -> Option<Vec<u8>> {
@@ -315,6 +359,34 @@ mod tests {
         two.extend_from_slice(b"\xff\xfbREST");
         let (start, end) = audio_range(&mut io::Cursor::new(&two)).unwrap();
         assert_eq!(&two[start as usize..end as usize], b"\xff\xfbREST");
+    }
+
+    #[test]
+    fn vks_note_stand_in_is_told_from_a_real_cover_in_any_colour() {
+        let encode = |picture: image::RgbImage| {
+            let mut png = Vec::new();
+            image::DynamicImage::ImageRgb8(picture)
+                .write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            png
+        };
+        // The note's shape drawn large in two colours, as VK does.
+        for tint in [[230_u8, 130, 90], [60, 110, 240]] {
+            let note = image::RgbImage::from_fn(240, 240, |x, y| {
+                let shade = PLACEHOLDER_SHAPE[(y / 30 * 8 + x / 30) as usize];
+                let light = (0.6 + shade * 0.15).clamp(0.0, 1.0);
+                image::Rgb(tint.map(|channel| (f32::from(channel) * light) as u8))
+            });
+            assert!(vk_placeholder(&encode(note)), "{tint:?}");
+        }
+        // A real picture: a diagonal split and a flat one; and no picture.
+        let split = image::RgbImage::from_fn(240, 240, |x, y| {
+            image::Rgb(if x > y { [20, 20, 30] } else { [220, 200, 180] })
+        });
+        assert!(!vk_placeholder(&encode(split)));
+        let flat = image::RgbImage::from_pixel(64, 64, image::Rgb([90, 90, 90]));
+        assert!(!vk_placeholder(&encode(flat)));
+        assert!(!vk_placeholder(b"not a picture"));
     }
 
     #[test]

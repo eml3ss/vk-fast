@@ -55,6 +55,20 @@ impl WebAudioClient {
         .map(|(_, details)| details)
     }
 
+    /// The album's own cover at its largest (VK gives up to 2400 points),
+    /// for a downloaded track's tag; rows carry only small copies.
+    pub fn album_cover(
+        &self,
+        expected_owner: i64,
+        album: &AlbumRef,
+        canceled: &AtomicBool,
+    ) -> Option<String> {
+        self.playlist_edit_details(expected_owner, album, canceled)
+            .ok()?
+            .playlist
+            .cover_url
+    }
+
     pub fn edit_playlist(
         &self,
         expected_owner: i64,
