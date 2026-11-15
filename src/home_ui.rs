@@ -1163,8 +1163,14 @@ fn cover_icon(painter: &egui::Painter, art: egui::Rect, icon: Icon) {
 }
 
 /// The cover of a track on Home: Pause over the one playing, Play over the
-/// paused one and over any other under the pointer.
-fn track_cover_state(painter: &egui::Painter, art: egui::Rect, state: PlayState, hovered: bool) {
+/// paused one and over any other under the pointer. Track lists in windows
+/// draw theirs the same way.
+pub(crate) fn track_cover_state(
+    painter: &egui::Painter,
+    art: egui::Rect,
+    state: PlayState,
+    hovered: bool,
+) {
     match state {
         PlayState::Playing => cover_icon(painter, art, Icon::Pause),
         PlayState::Paused | PlayState::Pending => cover_icon(painter, art, Icon::Play),

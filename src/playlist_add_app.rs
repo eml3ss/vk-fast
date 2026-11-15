@@ -590,24 +590,18 @@ impl MusicApp {
             |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let cover = self.covers.show(ui, track.cover_url.as_deref(), 36.0);
-                // Play or pause on the cover, as on Home: while the row is
-                // hovered, and always on the current track.
-                if over || playing {
-                    let label = if play_state == crate::cover_play::PlayState::Playing {
-                        t("Пауза", "Pause")
-                    } else {
-                        t("Слушать", "Play")
-                    };
-                    cover_clicked = crate::cover_play::button(
-                        ui,
-                        cover.rect.center(),
-                        13.0,
+                // Play or pause on the cover, as on Home's recent tracks: the
+                // cover dimmed under the sign while the row is hovered, and
+                // always on the current track.
+                crate::home_ui::track_cover_state(ui.painter(), cover.rect, play_state, over);
+                let play = ui
+                    .interact(
+                        cover.rect,
                         ui.id().with(("add-track-cover-play", index, track.key())),
-                        play_state,
-                        label,
+                        Sense::click(),
                     )
-                    .clicked();
-                }
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                cover_clicked = play.clicked();
                 let text_width = (ui.available_width() - 90.0).max(40.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(text_width, 36.0),

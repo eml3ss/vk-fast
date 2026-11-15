@@ -272,7 +272,8 @@ fn headings_keep_even_gaps_and_a_hovered_cover_offers_play() {
     // under the field.
     assert!((gaps[0] - 18.0).abs() < 1.0, "{gaps:?}");
 
-    // Hovering a row puts the round play button on its cover.
+    // Hovering a row dims its cover under a white play sign, as on Home's
+    // recent tracks: no round button, no outline.
     let row = text(&output, "Beta song").unwrap().center();
     frame(
         &ctx,
@@ -282,5 +283,8 @@ fn headings_keep_even_gaps_and_a_hovered_cover_offers_play() {
     );
     let output = frame(&ctx, &mut app, &mut tick, Vec::new());
     assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_black_alpha(165)
+            && (rect.rect.center() - covers[1].center()).length() < 1.0)));
+    assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
         egui::Shape::Circle(circle) if (circle.center - covers[1].center()).length() < 1.0)));
 }
