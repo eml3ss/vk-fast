@@ -10274,6 +10274,9 @@ impl MusicApp {
                             | PlaybackState::Loading
                             | PlaybackState::Ended
                     );
+                // Fetching the link, or buffering before the first sound.
+                let loading = self.playing.is_some()
+                    && (resolving || snapshot.state == PlaybackState::Loading);
                 let gap = PLAYER_TIME_GAP;
                 let elapsed_rect = egui::Rect::from_min_size(
                     seek_row.min,
@@ -10303,6 +10306,7 @@ impl MusicApp {
                                         duration: f64::from(duration.max(1)),
                                         width: control_rect.width(),
                                         label: t("Позиция воспроизведения", "Playback position"),
+                                        loading,
                                     },
                                 )
                             })
@@ -13059,6 +13063,7 @@ mod tests {
                                     duration: 100.0,
                                     width: 240.0,
                                     label: "Synthetic seek",
+                                    loading: false,
                                 },
                             )
                         })

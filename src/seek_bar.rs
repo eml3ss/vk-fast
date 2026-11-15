@@ -12,7 +12,13 @@ pub struct Progress<'a> {
     pub duration: f64,
     pub width: f32,
     pub label: &'a str,
+    /// The track is being fetched or buffered and isn't playing yet: a
+    /// soft glow sweeps along the bar.
+    pub loading: bool,
 }
+
+/// One sweep of the loading glow, in seconds.
+const LOADING_SWEEP: f64 = 1.3;
 
 pub fn show(ui: &mut egui::Ui, position: &mut f64, progress: Progress<'_>) -> Response {
     let duration = if progress.duration.is_finite() {
@@ -20,7 +26,20 @@ pub fn show(ui: &mut egui::Ui, position: &mut f64, progress: Progress<'_>) -> Re
     } else {
         1.0
     };
-    control(ui, position, duration, 5.0, progress.width, progress.label)
+    let id = ui.id().with("seek-loading");
+    let loading = ui.ctx().animate_bool_with_time(id, progress.loading, 0.25);
+    if loading > 0.0 {
+        ui.ctx().request_repaint();
+    }
+    control(
+        ui,
+        position,
+        duration,
+        5.0,
+        progress.width,
+        progress.label,
+        loading,
+    )
 }
 
 /// Scrolled points per 5 % of volume: about one wheel notch.
@@ -28,7 +47,7 @@ const WHEEL_POINTS_PER_STEP: f32 = 40.0;
 
 pub fn volume(ui: &mut egui::Ui, value: &mut f32, width: f32, label: &str) -> Response {
     let mut precise = f64::from(*value);
-    let mut response = control(ui, &mut precise, 1.0, 0.05, width, label);
+    let mut response = control(ui, &mut precise, 1.0, 0.05, width, label, 0.0);
     if response.changed() {
         *value = precise as f32;
     }
@@ -100,6 +119,7 @@ fn control(
     step: f64,
     width: f32,
     label: &str,
+    loading: f32,
 ) -> Response {
     let width = if width.is_finite() {
         width.max(KNOB_RADIUS * 2.0 + 1.0)
@@ -243,6 +263,10 @@ fn control(
                 theme::accent().gamma_multiply(opacity),
             );
         }
+        if loading > 0.0 {
+            let time = ui.input(|input| input.time);
+            painter.add(loading_glow(track, time, loading));
+        }
         let show_knob = ui.is_enabled()
             && (pointer_over_control
                 || response.dragged_by(egui::PointerButton::Primary)
@@ -273,6 +297,44 @@ fn control(
         }
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The loading glow at `time`: an accent band with soft edges that sweeps
+/// left to right across the bar, eased so it slows at both ends, drawn as
+/// a mesh following the bar's capsule so its rounded ends stay round.
+/// `strength` fades it in and out.
+fn loading_glow(track: egui::Rect, time: f64, strength: f32) -> egui::Shape {
+    const COLUMNS: usize = 96;
+    let phase = (time / LOADING_SWEEP).fract() as f32;
+    let eased = phase * phase * (3.0 - 2.0 * phase);
+    let band = (track.width() * 0.4).max(TRACK_HEIGHT * 2.0);
+    let center = track.left() - band * 0.5 + (track.width() + band) * eased;
+    let radius = (track.height() * 0.5).min(track.width() * 0.5);
+    let color = theme::accent();
+    let mut mesh = egui::Mesh::default();
+    for column in 0..=COLUMNS {
+        let x = track.left() + track.width() * column as f32 / COLUMNS as f32;
+        // The capsule's half height here: full in the middle, round at the
+        // ends.
+        let edge = (x - track.left()).min(track.right() - x).clamp(0.0, radius);
+        let half = (radius * radius - (radius - edge).powi(2)).max(0.0).sqrt();
+        let distance = ((x - center) / (band * 0.5)).abs();
+        let glow = if distance < 1.0 {
+            let fall = 1.0 - distance;
+            fall * fall * (3.0 - 2.0 * fall)
+        } else {
+            0.0
+        };
+        let tint = color.gamma_multiply(glow * strength * 0.85);
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x, track.center().y - half), tint);
+        mesh.colored_vertex(egui::pos2(x, track.center().y + half), tint);
+        if column > 0 {
+            mesh.add_triangle(base - 2, base - 1, base);
+            mesh.add_triangle(base - 1, base, base + 1);
+        }
+    }
+    egui::Shape::mesh(mesh)
 }
 
 fn bounded(value: f64, maximum: f64) -> f64 {
@@ -322,6 +384,7 @@ mod tests {
                                 duration: 100.0,
                                 width: 200.0,
                                 label: "Seek",
+                                loading: false,
                             },
                         ),
                         Kind::Volume => {
@@ -415,6 +478,100 @@ mod tests {
             destination[2].round() as u8,
             destination[3].round() as u8,
         )
+    }
+
+    #[test]
+    fn a_loading_bar_sweeps_a_glow_inside_its_capsule_and_keeps_repainting() {
+        let context = egui::Context::default();
+        let run = |loading: bool, time: f64| {
+            let mut value = 0.0;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(240.0, 100.0),
+                    )),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        &mut value,
+                        Progress {
+                            duration: 100.0,
+                            width: 200.0,
+                            label: "Seek",
+                            loading,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let glow = |output: &egui::FullOutput| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.clone()),
+                _ => None,
+            })
+        };
+        let quiet = run(false, 0.0);
+        assert!(glow(&quiet).is_none());
+        // Fade in, then look at it mid-sweep.
+        for step in 1..6 {
+            run(true, f64::from(step) * 0.1);
+        }
+        let output = run(true, 0.65);
+        let mesh = glow(&output).expect("a glow while loading");
+        let painted = |output: &egui::FullOutput| {
+            output
+                .viewport_output
+                .values()
+                .any(|viewport| viewport.repaint_delay.is_zero())
+        };
+        assert!(painted(&output), "it keeps animating");
+        let bounds = mesh.calc_bounds();
+        let track = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) => Some(rect.rect),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            track.expand(0.01).contains_rect(bounds),
+            "{bounds:?} in {track:?}"
+        );
+        // Bright in the band, clear far from it: at mid-sweep the band is
+        // in the middle and the ends are untouched.
+        let alpha_at = |x: f32| {
+            mesh.vertices
+                .iter()
+                .min_by(|a, b| (a.pos.x - x).abs().total_cmp(&(b.pos.x - x).abs()))
+                .unwrap()
+                .color
+                .a()
+        };
+        assert!(alpha_at(track.center().x) > 150);
+        assert_eq!(alpha_at(track.left() + 2.0), 0);
+        assert_eq!(alpha_at(track.right() - 2.0), 0);
+        // The ends are round: no vertex outside the capsule.
+        let radius = track.height() * 0.5;
+        for vertex in &mesh.vertices {
+            let edge = (vertex.pos.x - track.left()).min(track.right() - vertex.pos.x);
+            if edge < radius {
+                let dy = (vertex.pos.y - track.center().y).abs();
+                assert!(dy <= radius * (1.0 - ((radius - edge) / radius).powi(2)).sqrt() + 0.01);
+            }
+        }
+        // Done loading: it fades away and stops asking for frames.
+        for step in 0..6 {
+            run(false, 0.7 + f64::from(step) * 0.1);
+        }
+        let done = run(false, 1.4);
+        assert!(glow(&done).is_none());
     }
 
     #[test]
