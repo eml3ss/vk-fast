@@ -60,6 +60,10 @@ pub struct State {
     /// lines under a press that began outside them.
     press_on_lines: bool,
     selection: Selection,
+    /// How far left of the lines a press still selects their text: in
+    /// fullscreen, the whole gap to the cover, so a press just left of the
+    /// words is not lost on the empty space.
+    select_reach: f32,
 }
 
 /// Text selected by dragging over the lines: copied when the button is
@@ -149,6 +153,7 @@ impl Default for State {
             gap_clock: GapClock::default(),
             press_on_lines: false,
             selection: Selection::default(),
+            select_reach: 0.0,
         }
     }
 }
@@ -305,6 +310,7 @@ pub fn show(
         }
     }
     let mut content = Rect::from_min_max(egui::pos2(rect.left(), header.bottom() + 12.0), rect.max);
+    state.select_reach = 0.0;
     // With no lines to show, the fullscreen cover moves to the middle and
     // says why below the artists.
     let missing = view.fullscreen
@@ -381,6 +387,8 @@ pub fn show(
             );
         }
         content.min.x = artwork.right() + gap;
+        // Up to a few points short of the cover.
+        state.select_reach = (gap - 4.0).max(0.0);
     } else if let Some(track) = view.track.filter(|_| view.show_track) {
         let metadata = Rect::from_min_size(content.min, egui::vec2(content.width(), 52.0));
         let cover = Rect::from_min_size(metadata.min, egui::vec2(40.0, 40.0));
@@ -460,7 +468,11 @@ pub fn show(
             ) {
                 action = Some(Action::Seek(at));
             }
-            if !state.follow && lyrics.synced {
+            // Selecting text holds the view still only for a moment: while
+            // the selection is held and fades, the view will follow again by
+            // itself, so it offers no button to.
+            let returning = state.selection.anchor.is_some() && state.selection.follow;
+            if !state.follow && !returning && lyrics.synced {
                 let follow = Rect::from_center_size(
                     content.center_bottom() - egui::vec2(0.0, 20.0),
                     egui::vec2(content.width().min(220.0), 32.0),
@@ -634,10 +646,11 @@ fn lines(
     // held down elsewhere, such as on the seek bar, may pass over the lines.
     let manually_scrolling = ui.input(|input| {
         if input.pointer.primary_pressed() {
+            let zone = rect.with_min_x(rect.left() - state.select_reach);
             state.press_on_lines = input
                 .pointer
                 .press_origin()
-                .is_some_and(|start| rect.contains(start));
+                .is_some_and(|start| zone.contains(start));
         } else if !input.pointer.primary_down() {
             state.press_on_lines = false;
         }
@@ -916,7 +929,8 @@ fn select_text(ui: &egui::Ui, state: &mut State, data: &Lyrics, rect: Rect, whol
         (index, row.galley.cursor_from_pos(local).index.0)
     };
     // The bar on the right edge scrolls; it does not select.
-    let on_text = |point: egui::Pos2| rect.contains(point) && point.x < rect.right() - 16.0;
+    let zone = rect.with_min_x(rect.left() - state.select_reach);
+    let on_text = |point: egui::Pos2| zone.contains(point) && point.x < rect.right() - 16.0;
     let selection = &mut state.selection;
     if pressed && let Some(origin) = origin.filter(|origin| on_text(*origin)) {
         let start = hit(origin);
@@ -1595,6 +1609,104 @@ mod tests {
         let above = track.top();
         let below = size.y - track.bottom();
         assert!((above - below).abs() < 0.5, "{above} vs {below}");
+    }
+
+    #[test]
+    fn in_fullscreen_a_press_just_left_of_the_lines_selects_them_and_offers_no_follow_button() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(12, true);
+        let size = egui::vec2(1000.0, 600.0);
+        let mut run = |state: &mut State, tick: u32, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(f64::from(tick) * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        state,
+                        &mut covers,
+                        None,
+                        View {
+                            language: Language::English,
+                            track: None,
+                            lyrics: Some(&data),
+                            error: None,
+                            loading: false,
+                            position: 0.0,
+                            playing: false,
+                            fullscreen: true,
+                            retry_allowed: true,
+                            show_track: true,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let mut output = run(&mut state, 0, Vec::new());
+        for tick in 1..6 {
+            output = run(&mut state, tick, Vec::new());
+        }
+        let line = |label: &str| {
+            texts(&output)
+                .into_iter()
+                .find(|(text, ..)| text == label)
+                .unwrap()
+                .1
+        };
+        let (first, third) = (
+            line("Synthetic lyric line 1"),
+            line("Synthetic lyric line 3"),
+        );
+        // A little left of the words, in the empty space before the cover,
+        // dragged down to the middle of a lower line.
+        let start = egui::pos2(first.left() - 14.0, first.center().y);
+        let end = egui::pos2(third.center().x, third.center().y);
+        // The view follows the current line again by itself after the
+        // selection, so no "Follow current line" button shows meanwhile.
+        let offers_follow = |output: &egui::FullOutput| {
+            texts(output)
+                .iter()
+                .any(|(text, ..)| text == "Follow current line")
+        };
+        let mut tick = 10;
+        run(&mut state, tick, button(start, true));
+        for step in 1..=8 {
+            tick += 1;
+            let point = start + (end - start) * (step as f32 / 8.0);
+            let output = run(&mut state, tick, vec![egui::Event::PointerMoved(point)]);
+            assert!(!offers_follow(&output), "while selecting");
+        }
+        tick += 1;
+        let output = run(&mut state, tick, button(end, false));
+        assert!(!offers_follow(&output));
+        let copied = output
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the drag selected and copied the lines");
+        assert!(
+            copied.starts_with("Synthetic lyric line 1\nSynthetic lyric line 2\n"),
+            "{copied:?}"
+        );
+        for _ in 0..20 {
+            tick += 1;
+            let output = run(&mut state, tick, Vec::new());
+            assert!(!offers_follow(&output), "while it fades, and after");
+        }
+        assert!(state.follow);
     }
 
     #[test]
