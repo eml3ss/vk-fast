@@ -501,13 +501,12 @@ impl MusicApp {
         self.ensure_lyrics_service(&ctx);
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
-        ui.label(RichText::new(t("Тексты", "Lyrics")).family(theme::semibold()));
-        ui.add_space(4.0);
         let status = self.lyrics.status.unwrap_or_default();
         let mut source = status.source;
         // Changes show at once and save in the background: nothing greys
-        // out or spins while the service writes them.
-        ui.label(t("Источник текстов", "Lyrics source"));
+        // out or spins while the service writes them. The source is the
+        // block's title.
+        ui.label(RichText::new(t("Источник текстов", "Lyrics source")).family(theme::semibold()));
         ui.label(
             RichText::new(t(
                 "VK, Musixmatch, LRCLIB и NetEase дают текст с таймкодами, если он есть. Genius — обычный текст.",
