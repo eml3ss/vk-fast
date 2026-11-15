@@ -1291,6 +1291,13 @@ fn controls(
                 action = Some(Action::ToggleLibraryLike);
             }
         }
+        // On an own playlist the plus comes first, then the mix.
+        if add_tracks {
+            let label = language.text("Добавить треки", "Add tracks");
+            if square_button(ui, Icon::Plus, label, true).clicked() {
+                action = Some(Action::AddTracks);
+            }
+        }
         // Between the heart and Copy link.
         if let Some((kind, enabled)) = mix {
             let (label, mix) = match kind {
@@ -1309,12 +1316,6 @@ fn controls(
             };
             if square_button(ui, Icon::Radio, label, enabled).clicked() {
                 action = Some(mix);
-            }
-        }
-        if add_tracks {
-            let label = language.text("Добавить треки", "Add tracks");
-            if square_button(ui, Icon::Plus, label, true).clicked() {
-                action = Some(Action::AddTracks);
             }
         }
         let label = language.text("Копировать ссылку", "Copy link");
@@ -1356,7 +1357,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_own_playlist_has_its_mix_and_an_add_tracks_plus_before_copy_link() {
+    fn an_own_playlist_has_an_add_tracks_plus_and_its_mix_before_copy_link() {
         // Clicks the square button at `which` (left to right); returns the
         // action and how many square buttons there are.
         let click = |which: usize| {
@@ -1414,9 +1415,9 @@ mod tests {
             }
             (action, squares.len())
         };
-        // The mix, the plus, then Copy link.
-        assert_eq!(click(0), (Some(Action::CollectionMix), 3));
-        assert_eq!(click(1), (Some(Action::AddTracks), 3));
+        // The plus, the mix, then Copy link.
+        assert_eq!(click(0), (Some(Action::AddTracks), 3));
+        assert_eq!(click(1), (Some(Action::CollectionMix), 3));
         assert_eq!(click(2), (Some(Action::CopyLink), 3));
     }
 
