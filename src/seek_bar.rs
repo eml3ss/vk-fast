@@ -247,36 +247,16 @@ fn control(
     if ui.is_rect_visible(rect) {
         let opacity = if ui.is_enabled() { 1.0 } else { 0.4 };
         let painter = ui.painter();
-        painter.rect_filled(
-            track,
-            TRACK_HEIGHT * 0.5,
-            theme::tone(REMAINING).gamma_multiply(opacity),
-        );
+        let feather = 1.0 / ui.ctx().pixels_per_point();
+        let remaining = theme::tone(REMAINING).gamma_multiply(opacity);
+        painter.add(capsule(track, feather, 0, |_| remaining));
         if fraction > 0.0 {
             let end = track.left() + track.width() * fraction;
-            let cap_width = TRACK_HEIGHT.min(track.width());
-            let prefix = egui::Rect::from_min_max(
-                track.min,
-                egui::pos2(end.max(track.left() + cap_width), track.bottom()),
-            );
-            // A narrow rectangle would clamp the corner radius and paint blue
-            // outside the track's left cap. Keep the full capsule geometry and
-            // reveal only the actual played width until the prefix is wider.
-            let played_painter = if end < track.left() + cap_width {
-                let mut clip = painter.clip_rect();
-                clip.max.x = clip.max.x.min(end);
-                painter.with_clip_rect(clip)
-            } else {
-                painter.clone()
-            };
-            played_painter.rect_filled(
-                prefix,
-                TRACK_HEIGHT * 0.5,
-                theme::accent().gamma_multiply(opacity),
-            );
+            let played = theme::accent().gamma_multiply(opacity);
+            painter.add(played_part(track, end, played));
         }
         if loading > 0.0 {
-            painter.add(loading_glow(track, elapsed, loading));
+            painter.add(loading_glow(track, feather, elapsed, loading));
         }
         let show_knob = ui.is_enabled()
             && (pointer_over_control
@@ -310,25 +290,16 @@ fn control(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The loading glow `time` seconds into a wait: an accent band with soft edges that sweeps
-/// left to right across the bar, eased so it slows at both ends, drawn as
-/// a mesh following the bar's capsule so its rounded ends stay round.
-/// `strength` fades it in and out.
-fn loading_glow(track: egui::Rect, time: f64, strength: f32) -> egui::Shape {
-    const COLUMNS: usize = 96;
+/// The loading glow `time` seconds into a wait: an accent band with soft
+/// edges that sweeps left to right across the bar, eased so it slows at
+/// both ends. `strength` fades it in and out.
+fn loading_glow(track: egui::Rect, feather: f32, time: f64, strength: f32) -> egui::Shape {
     let phase = (time / LOADING_SWEEP).fract() as f32;
     let eased = phase * phase * (3.0 - 2.0 * phase);
     let band = (track.width() * 0.4).max(TRACK_HEIGHT * 2.0);
     let center = track.left() - band * 0.5 + (track.width() + band) * eased;
-    let radius = (track.height() * 0.5).min(track.width() * 0.5);
     let color = theme::accent();
-    let mut mesh = egui::Mesh::default();
-    for column in 0..=COLUMNS {
-        let x = track.left() + track.width() * column as f32 / COLUMNS as f32;
-        // The capsule's half height here: full in the middle, round at the
-        // ends.
-        let edge = (x - track.left()).min(track.right() - x).clamp(0.0, radius);
-        let half = (radius * radius - (radius - edge).powi(2)).max(0.0).sqrt();
+    capsule(track, feather, 96, |x| {
         let distance = ((x - center) / (band * 0.5)).abs();
         let glow = if distance < 1.0 {
             let fall = 1.0 - distance;
@@ -336,16 +307,165 @@ fn loading_glow(track: egui::Rect, time: f64, strength: f32) -> egui::Shape {
         } else {
             0.0
         };
-        let tint = color.gamma_multiply(glow * strength * 0.85);
+        color.gamma_multiply(glow * strength * 0.85)
+    })
+}
+
+/// A capsule filling `rect` (its ends half circles), coloured along its
+/// length by `color`, with `columns` even steps for a gradient. egui keeps
+/// corner radii as whole points and draws small ones with a few segments,
+/// so a 7-point bar's ends came out cut; this one follows the circle
+/// closely and blurs its edge over one pixel (`feather`), as egui does.
+fn capsule(
+    rect: egui::Rect,
+    feather: f32,
+    columns: usize,
+    color: impl Fn(f32) -> Color32,
+) -> egui::Shape {
+    const CAP_STEPS: usize = 16;
+    let radius = (rect.height() * 0.5).min(rect.width() * 0.5);
+    let middle = rect.center().y;
+    // Each column: its x on the outline, the outline's half height there,
+    // and the outward normal of its top edge.
+    let mut outline: Vec<(f32, f32, egui::Vec2)> = Vec::new();
+    for step in 0..=CAP_STEPS {
+        // Left end, from its tip up to its top.
+        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / CAP_STEPS as f32;
+        let normal = egui::vec2(-angle.cos(), -angle.sin());
+        outline.push((
+            rect.left() + radius * (1.0 - angle.cos()),
+            radius * angle.sin(),
+            normal,
+        ));
+    }
+    for column in 1..columns {
+        let x = rect.left() + rect.width() * column as f32 / columns as f32;
+        if x > rect.left() + radius && x < rect.right() - radius {
+            outline.push((x, radius, egui::vec2(0.0, -1.0)));
+        }
+    }
+    for step in (0..=CAP_STEPS).rev() {
+        // Right end, from its top down to its tip.
+        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / CAP_STEPS as f32;
+        let normal = egui::vec2(angle.cos(), -angle.sin());
+        outline.push((
+            rect.right() - radius * (1.0 - angle.cos()),
+            radius * angle.sin(),
+            normal,
+        ));
+    }
+    outline.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut mesh = egui::Mesh::default();
+    let half_feather = feather * 0.5;
+    for (index, &(x, half, normal)) in outline.iter().enumerate() {
+        let fill = color(x);
+        let clear = Color32::TRANSPARENT;
+        let top = egui::pos2(x, middle - half);
+        let bottom = egui::pos2(x, middle + half);
+        let flip = egui::vec2(normal.x, -normal.y);
         let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(x, track.center().y - half), tint);
-        mesh.colored_vertex(egui::pos2(x, track.center().y + half), tint);
-        if column > 0 {
-            mesh.add_triangle(base - 2, base - 1, base);
-            mesh.add_triangle(base - 1, base, base + 1);
+        // Outer top, inner top, inner bottom, outer bottom.
+        mesh.colored_vertex(top + normal * half_feather, clear);
+        mesh.colored_vertex(top - normal * half_feather, fill);
+        mesh.colored_vertex(bottom - flip * half_feather, fill);
+        mesh.colored_vertex(bottom + flip * half_feather, clear);
+        if index > 0 {
+            let previous = base - 4;
+            for lane in 0..3 {
+                let (a, b) = (previous + lane, previous + lane + 1);
+                let (c, d) = (base + lane, base + lane + 1);
+                mesh.add_triangle(a, b, c);
+                mesh.add_triangle(b, c, d);
+            }
         }
     }
     egui::Shape::mesh(mesh)
+}
+
+/// The played part up to `end`: round at both ends however short it is.
+/// It is the bar's capsule cut by a half circle ending at `end`, so a
+/// part shorter than the bar is thick starts as a small rounded lens in the
+/// bar's round end instead of a sliver with a square edge. Convex, so
+/// egui's own fill smooths its edge.
+fn played_part(track: egui::Rect, end: f32, color: Color32) -> egui::Shape {
+    let radius = (track.height() * 0.5).min(track.width() * 0.5);
+    let end = end.clamp(track.left(), track.right());
+    let middle = track.center().y;
+    let circle = |offset: f32| (radius * radius - offset * offset).max(0.0).sqrt();
+    let half = |x: f32| {
+        let bar = if x < track.left() + radius {
+            circle(track.left() + radius - x)
+        } else if x > track.right() - radius {
+            circle(x - (track.right() - radius))
+        } else {
+            radius
+        };
+        let cut = if x > end - radius {
+            circle(x - (end - radius))
+        } else {
+            radius
+        };
+        bar.min(cut)
+    };
+    // Dense steps over the rounded stretches, by angle so the arcs stay
+    // smooth; the flat middle needs only its ends.
+    const STEPS: usize = 24;
+    let mut columns = vec![track.left(), end];
+    for step in 0..=STEPS {
+        let inset =
+            radius * (1.0 - (std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32).cos());
+        for x in [track.left() + inset, end - inset] {
+            if x > track.left() && x < end {
+                columns.push(x);
+            }
+        }
+    }
+    columns.sort_by(f32::total_cmp);
+    columns.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    let mut points: Vec<egui::Pos2> = columns
+        .iter()
+        .map(|&x| egui::pos2(x, middle - half(x)))
+        .collect();
+    points.extend(
+        columns
+            .iter()
+            .rev()
+            .map(|&x| egui::pos2(x, middle + half(x))),
+    );
+    points.dedup_by(|a, b| (*a - *b).length() < 0.001);
+    if points.len() < 3 {
+        return egui::Shape::Noop;
+    }
+    egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
+}
+
+/// For tests: the rectangle and fill of a bar part `capsule` drew, from
+/// its mesh (halfway between the feather's outer and inner edges).
+#[cfg(test)]
+pub(crate) fn painted_capsule(shape: &egui::Shape) -> Option<(egui::Rect, Color32)> {
+    let egui::Shape::Mesh(mesh) = shape else {
+        return None;
+    };
+    if mesh.vertices.len() < 8 || mesh.vertices.len() % 4 != 0 {
+        return None;
+    }
+    let bounds = |inner: bool| {
+        egui::Rect::from_points(
+            &mesh
+                .vertices
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| matches!(index % 4, 1 | 2) == inner)
+                .map(|(_, vertex)| vertex.pos)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (outer, inner) = (bounds(false), bounds(true));
+    let rect = egui::Rect::from_min_max(
+        outer.min + (inner.min - outer.min) * 0.5,
+        outer.max + (inner.max - outer.max) * 0.5,
+    );
+    Some((rect, mesh.vertices[1].color))
 }
 
 fn bounded(value: f64, maximum: f64) -> f64 {
@@ -521,14 +641,90 @@ mod tests {
             output.textures_delta.clear();
             output
         };
+        // The glow is the capsule whose colour changes along the bar; the
+        // bar under it is one colour.
+        let inner = |mesh: &egui::Mesh| -> Vec<egui::epaint::Vertex> {
+            mesh.vertices
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| matches!(index % 4, 1 | 2))
+                .map(|(_, vertex)| *vertex)
+                .collect()
+        };
         let glow = |output: &egui::FullOutput| {
             output.shapes.iter().find_map(|shape| match &shape.shape {
-                egui::Shape::Mesh(mesh) => Some(mesh.clone()),
+                egui::Shape::Mesh(mesh)
+                    if inner(mesh)
+                        .windows(2)
+                        .any(|pair| pair[0].color != pair[1].color) =>
+                {
+                    Some(mesh.clone())
+                }
                 _ => None,
             })
         };
+        let alpha_at = |mesh: &egui::Mesh, x: f32| {
+            let vertices = inner(mesh);
+            let nearest = vertices
+                .iter()
+                .map(|vertex| (vertex.pos.x - x).abs())
+                .fold(f32::MAX, f32::min);
+            vertices
+                .iter()
+                .filter(|vertex| (vertex.pos.x - x).abs() <= nearest + 0.01)
+                .map(|vertex| vertex.color.a())
+                .max()
+                .unwrap()
+        };
+        // The area a capsule's mesh covers over one rounded end.
+        let cap_area = |mesh: &egui::Mesh, track: egui::Rect, left: bool| {
+            let radius = track.height() * 0.5;
+            mesh.indices
+                .chunks(3)
+                .map(|triangle| {
+                    let [a, b, c] = [0, 1, 2].map(|i| mesh.vertices[triangle[i] as usize].pos);
+                    let inside = [a, b, c].iter().all(|point| {
+                        if left {
+                            point.x <= track.left() + radius + 0.01
+                        } else {
+                            point.x >= track.right() - radius - 0.01
+                        }
+                    });
+                    if inside {
+                        ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs() * 0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f32>()
+        };
         let quiet = run(false, 0.0);
         assert!(glow(&quiet).is_none());
+        // The bar itself: a capsule with properly round ends, its
+        // feathered edge reaching past the half disc of each end.
+        let (track, _) = quiet
+            .shapes
+            .iter()
+            .find_map(|shape| painted_capsule(&shape.shape))
+            .unwrap();
+        let radius = track.height() * 0.5;
+        let disc = std::f32::consts::PI * radius * radius * 0.5;
+        let bar = match &quiet.shapes[0].shape {
+            egui::Shape::Mesh(mesh) => mesh.clone(),
+            _ => unreachable!(),
+        };
+        for left in [true, false] {
+            let area = cap_area(&bar, track, left);
+            assert!(area > disc, "{area} of {disc}");
+            let near = inner(&bar)
+                .iter()
+                .filter(|vertex| {
+                    let edge = (vertex.pos.x - track.left()).min(track.right() - vertex.pos.x);
+                    edge < radius && (left == (vertex.pos.x < track.center().x))
+                })
+                .count();
+            assert!(near >= 30, "a round end, not a few corners: {near}");
+        }
         // Fade in, then look at it mid-sweep: the sweep's clock starts with
         // the wait, at 0.1 s.
         for step in 1..6 {
@@ -544,34 +740,23 @@ mod tests {
         };
         assert!(painted(&output), "it keeps animating");
         let bounds = mesh.calc_bounds();
-        let track = output
-            .shapes
-            .iter()
-            .find_map(|shape| match &shape.shape {
-                egui::Shape::Rect(rect) => Some(rect.rect),
-                _ => None,
-            })
-            .unwrap();
         assert!(
-            track.expand(0.01).contains_rect(bounds),
+            track.expand(0.51).contains_rect(bounds),
             "{bounds:?} in {track:?}"
         );
         // Bright in the band, clear far from it: at mid-sweep the band is
         // in the middle and the ends are untouched.
-        let alpha_at = |x: f32| {
-            mesh.vertices
-                .iter()
-                .min_by(|a, b| (a.pos.x - x).abs().total_cmp(&(b.pos.x - x).abs()))
-                .unwrap()
-                .color
-                .a()
-        };
-        assert!(alpha_at(track.center().x) > 150);
-        assert_eq!(alpha_at(track.left() + 2.0), 0);
-        assert_eq!(alpha_at(track.right() - 2.0), 0);
-        // The ends are round: no vertex outside the capsule.
-        let radius = track.height() * 0.5;
-        for vertex in &mesh.vertices {
+        assert!(alpha_at(&mesh, track.center().x) > 150);
+        assert_eq!(alpha_at(&mesh, track.left() + 2.0), 0);
+        assert_eq!(alpha_at(&mesh, track.right() - 2.0), 0);
+        // The ends are round: the glow covers each half-disc end of the
+        // bar (no unfilled pixels where it starts) and nothing it fills is
+        // outside.
+        for left in [true, false] {
+            let area = cap_area(&mesh, track, left);
+            assert!(area > disc, "{area} of {disc}");
+        }
+        for vertex in inner(&mesh) {
             let edge = (vertex.pos.x - track.left()).min(track.right() - vertex.pos.x);
             if edge < radius {
                 let dy = (vertex.pos.y - track.center().y).abs();
@@ -591,17 +776,8 @@ mod tests {
             run(true, 2.0 + f64::from(step) * 0.1);
         }
         let again = glow(&run(true, 2.65)).unwrap();
-        let alpha_at = |x: f32| {
-            again
-                .vertices
-                .iter()
-                .min_by(|a, b| (a.pos.x - x).abs().total_cmp(&(b.pos.x - x).abs()))
-                .unwrap()
-                .color
-                .a()
-        };
-        assert!(alpha_at(track.center().x) > 150);
-        assert_eq!(alpha_at(track.left() + 2.0), 0);
+        assert!(alpha_at(&again, track.center().x) > 150);
+        assert_eq!(alpha_at(&again, track.left() + 2.0), 0);
         // And right at its start the band sits off the left edge.
         run(false, 3.0);
         for step in 0..4 {
@@ -609,7 +785,7 @@ mod tests {
         }
         run(true, 4.0);
         let start = glow(&run(true, 4.05));
-        assert!(start.is_none_or(|mesh| mesh.vertices.iter().all(|vertex| {
+        assert!(start.is_none_or(|mesh| inner(&mesh).iter().all(|vertex| {
             vertex.color.a() == 0 || vertex.pos.x < track.left() + track.width() * 0.2
         })));
     }
@@ -643,13 +819,26 @@ mod tests {
                     "Square left corner at prefix width {width}"
                 );
             }
-            let after = egui::pos2(track.left() + width + 0.2, track.center().y);
+            // Past the half-pixel smoothing of its edge, nothing is filled.
+            let after = egui::pos2(track.left() + width + 0.6, track.center().y);
             if width < TRACK_HEIGHT {
                 assert_eq!(
                     color_at(&painted, after),
                     color_at(&empty, after),
                     "Tiny fill extends past its actual progress"
                 );
+            }
+            // Its right end is round too, not cut square: just inside the
+            // end, the corner near the bar's edge stays unfilled.
+            if width >= 2.5 {
+                let corner = egui::pos2(track.left() + width - 0.4, track.top() + 0.3);
+                assert_eq!(
+                    color_at(&painted, corner),
+                    color_at(&empty, corner),
+                    "Square right end at prefix width {width}"
+                );
+                let middle = egui::pos2(track.left() + width - 0.8, track.center().y);
+                assert_ne!(color_at(&painted, middle), color_at(&empty, middle));
             }
         }
         position = 99.999;

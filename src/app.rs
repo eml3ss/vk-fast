@@ -13289,18 +13289,14 @@ mod tests {
                             app.seek_position = Some(position);
                             let output =
                                 account_ui_frame(&context, &mut app, size, &mut frame, Vec::new());
-                            let track =
-                                account_ui_shapes(&output).into_iter().find_map(
-                                    |shape| match shape {
-                                        egui::Shape::Rect(rect)
-                                            if (rect.rect.height() - 7.0).abs() <= 0.5
-                                                && rect.rect.width() > size.x * 0.5 =>
-                                        {
-                                            Some(rect.rect)
-                                        }
-                                        _ => None,
-                                    },
-                                );
+                            let track = account_ui_shapes(&output).into_iter().find_map(|shape| {
+                                crate::seek_bar::painted_capsule(shape)
+                                    .map(|(rect, _)| rect)
+                                    .filter(|rect| {
+                                        (rect.height() - 7.0).abs() <= 0.5
+                                            && rect.width() > size.x * 0.5
+                                    })
+                            });
                             // The initial invisible panel-sizing pass paints no
                             // controls. Compare from the first visible frame.
                             track.map(|track| (output, track))
@@ -14317,18 +14313,17 @@ mod tests {
     fn player_volume_rail(output: &egui::FullOutput, size: egui::Vec2) -> egui::Rect {
         account_ui_shapes(output)
             .into_iter()
-            .find_map(|shape| match shape {
-                egui::Shape::Rect(rect)
-                    if rect.fill == Color32::from_rgb(43, 49, 59)
-                        && (rect.rect.height() - 7.0).abs() < 0.5
-                        && rect.rect.width() > 40.0
-                        && rect.rect.width() < 150.0
-                        && rect.rect.left() > size.x * 0.7
-                        && rect.rect.top() > size.y - 110.0 =>
-                {
-                    Some(rect.rect)
-                }
-                _ => None,
+            .find_map(|shape| {
+                crate::seek_bar::painted_capsule(shape)
+                    .filter(|(rect, fill)| {
+                        *fill == Color32::from_rgb(43, 49, 59)
+                            && (rect.height() - 7.0).abs() < 0.5
+                            && rect.width() > 40.0
+                            && rect.width() < 150.0
+                            && rect.left() > size.x * 0.7
+                            && rect.top() > size.y - 110.0
+                    })
+                    .map(|(rect, _)| rect)
             })
             .expect("Player volume rail")
     }
@@ -14336,15 +14331,14 @@ mod tests {
     fn seek_track_in_player(output: &egui::FullOutput, screen_height: f32) -> egui::Rect {
         account_ui_shapes(output)
             .into_iter()
-            .find_map(|shape| match shape {
-                egui::Shape::Rect(rect)
-                    if (rect.rect.height() - 7.0).abs() < 0.5
-                        && rect.rect.width() > 32.0
-                        && rect.rect.bottom() > screen_height - 40.0 =>
-                {
-                    Some(rect.rect)
-                }
-                _ => None,
+            .find_map(|shape| {
+                crate::seek_bar::painted_capsule(shape)
+                    .map(|(rect, _)| rect)
+                    .filter(|rect| {
+                        (rect.height() - 7.0).abs() < 0.5
+                            && rect.width() > 32.0
+                            && rect.bottom() > screen_height - 40.0
+                    })
             })
             .expect("Playback position track")
     }
@@ -14814,12 +14808,24 @@ mod tests {
         let (_sender, receiver) = mpsc::sync_channel(1);
         app.playback_pending = Some(receiver);
         let size = egui::vec2(1040.0, 720.0);
+        // The glow: a capsule over the bar whose colour changes along it.
         let glows = |output: &egui::FullOutput| {
             let seek = seek_track_in_player(output, size.y);
             account_ui_shapes(output).into_iter().any(|shape| {
-                matches!(shape, egui::Shape::Mesh(mesh)
-                    if !mesh.vertices.is_empty()
-                        && seek.expand(0.01).contains_rect(mesh.calc_bounds()))
+                let egui::Shape::Mesh(mesh) = &shape else {
+                    return false;
+                };
+                let mut fills = mesh
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| matches!(index % 4, 1 | 2))
+                    .map(|(_, vertex)| vertex.color);
+                let first = fills.next();
+                crate::seek_bar::painted_capsule(shape).is_some_and(|(rect, _)| {
+                    (rect.center() - seek.center()).length() < 0.5
+                        && fills.any(|fill| Some(fill) != first)
+                })
             })
         };
         let mut frame = 0;
@@ -15102,15 +15108,14 @@ mod tests {
                 );
                 let seek_track = shapes
                     .iter()
-                    .find_map(|shape| match shape {
-                        egui::Shape::Rect(rect)
-                            if (rect.rect.height() - 7.0).abs() <= 0.5
-                                && rect.rect.width() > size.x * 0.5
-                                && panel.contains_rect(rect.rect) =>
-                        {
-                            Some(rect.rect)
-                        }
-                        _ => None,
+                    .find_map(|shape| {
+                        crate::seek_bar::painted_capsule(shape)
+                            .map(|(rect, _)| rect)
+                            .filter(|rect| {
+                                (rect.height() - 7.0).abs() <= 0.5
+                                    && rect.width() > size.x * 0.5
+                                    && panel.contains_rect(*rect)
+                            })
                     })
                     .expect("Missing playback position track");
                 let expected_y = (panel.top() + seek_track.center().y) * 0.5;
