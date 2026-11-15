@@ -65,6 +65,8 @@ pub enum Icon {
     Pin,
     /// An arrow down into a tray, for saving a file.
     Save,
+    /// A check mark: done, or already there.
+    Check,
 }
 
 impl Icon {
@@ -873,6 +875,9 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.circle_filled(point(x, knob), 3.0 * scale, color);
             }
         }
+        Icon::Check => {
+            line(&[(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)]);
+        }
         Icon::Save => {
             line(&[(12.0, 3.5), (12.0, 15.0)]);
             line(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);
@@ -1282,6 +1287,7 @@ mod tests {
             Icon::RemoveFromLibrary,
             Icon::Pin,
             Icon::Save,
+            Icon::Check,
         ];
         for size in [12.0, 19.0, 20.0, 24.0, 32.0] {
             for icon in icons {

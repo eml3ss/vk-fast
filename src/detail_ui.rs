@@ -58,6 +58,8 @@ pub enum Action {
     CopyLink,
     /// The open artist's mix.
     ArtistMix,
+    /// Add tracks to the account's own playlist.
+    AddTracks,
     ReloadReleases,
 }
 
@@ -252,6 +254,7 @@ pub fn artist_header(
         view.playing,
         view.follow,
         Some(view.mix),
+        false,
     )
 }
 
@@ -484,6 +487,7 @@ fn collection_header(
             None
         },
         None,
+        playlist && view.can_edit_playlist,
     )
     .or(action);
     if playlist && view.can_edit_playlist {
@@ -1126,7 +1130,9 @@ pub(crate) fn fade_color(color: Option<Color32>) -> Color32 {
 }
 
 /// Play, shuffle, the heart, Copy link and, on an artist's page (`mix` is
-/// whether it can start), the artist's mix.
+/// whether it can start), the artist's mix; on an own playlist the plus
+/// that adds tracks.
+#[allow(clippy::too_many_arguments)]
 fn controls(
     ui: &mut egui::Ui,
     language: Language,
@@ -1135,6 +1141,7 @@ fn controls(
     playing: bool,
     follow: Option<FollowView>,
     mix: Option<bool>,
+    add_tracks: bool,
 ) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -1272,6 +1279,12 @@ fn controls(
                 action = Some(Action::ArtistMix);
             }
         }
+        if add_tracks {
+            let label = language.text("Добавить треки", "Add tracks");
+            if square_button(ui, Icon::Plus, label, true).clicked() {
+                action = Some(Action::AddTracks);
+            }
+        }
         let label = language.text("Копировать ссылку", "Copy link");
         if square_button(ui, Icon::CopyLink, label, true).clicked() {
             action = Some(Action::CopyLink);
@@ -1311,6 +1324,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_own_playlist_has_an_add_tracks_plus_before_copy_link() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut action = None;
+        let mut squares = Vec::new();
+        for tick in 0..4 {
+            let target = squares.first().map(egui::Rect::center);
+            let events = match (target, tick) {
+                (Some(pos), 2 | 3) => vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: tick == 2,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                _ => Vec::new(),
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 100.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let chosen = controls(ui, Language::English, 3, false, false, None, None, true);
+                    action = action.take().or(chosen);
+                },
+            );
+            if squares.is_empty() {
+                squares = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(36.0, 36.0) => {
+                            Some(rect.rect)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                squares.sort_by(|a, b| a.left().total_cmp(&b.left()));
+                assert_eq!(squares.len(), 2, "the plus and Copy link");
+            }
+            output.textures_delta.clear();
+        }
+        assert_eq!(action, Some(Action::AddTracks));
+    }
+
+    #[test]
     fn an_artists_page_has_a_mix_button_between_the_heart_and_copy_link() {
         let squares = |mix: Option<bool>, click: Option<egui::Pos2>| {
             let ctx = egui::Context::default();
@@ -1345,7 +1412,8 @@ mod tests {
                             saved: false,
                             busy: false,
                         });
-                        let chosen = controls(ui, Language::English, 3, false, false, follow, mix);
+                        let chosen =
+                            controls(ui, Language::English, 3, false, false, follow, mix, false);
                         action = action.take().or(chosen);
                     },
                 );
@@ -1409,6 +1477,7 @@ mod tests {
                                     busy: false,
                                 }),
                                 None,
+                                false,
                             );
                         },
                     );

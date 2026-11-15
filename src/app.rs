@@ -47,6 +47,8 @@ mod owner_page_tests;
 mod playback_retry;
 #[path = "playlist_actions.rs"]
 mod playlist_actions;
+#[path = "playlist_add_app.rs"]
+mod playlist_add_app;
 #[path = "playlist_removal.rs"]
 mod playlist_removal;
 #[path = "queue_app.rs"]
@@ -1419,6 +1421,8 @@ pub struct MusicApp {
     download_dir_save_failed: bool,
     download_dir_pick: Option<mpsc::Receiver<Option<std::path::PathBuf>>>,
     downloads: Vec<download_app::DownloadJob>,
+    /// The "Add tracks" window of an own playlist, while open.
+    add_tracks: Option<playlist_add_app::AddTracks>,
     middle_autoscroll: bool,
     middle_autoscroll_save_failed: bool,
     /// The "E" badge by explicit tracks' titles.
@@ -1891,6 +1895,7 @@ impl MusicApp {
             download_dir_save_failed: false,
             download_dir_pick: None,
             downloads: Vec::new(),
+            add_tracks: None,
             search_on_enter_save_failed: false,
             middle_autoscroll: preferences::load_middle_autoscroll(),
             middle_autoscroll_save_failed: false,
@@ -8024,6 +8029,11 @@ impl MusicApp {
                     );
                 }
             }
+            Some(detail_ui::Action::AddTracks) => {
+                if let MusicPage::Playlist(reference) = page {
+                    self.open_add_tracks(&ctx, reference);
+                }
+            }
             Some(detail_ui::Action::EditPlaylist) => {
                 if let MusicPage::Playlist(reference) = page {
                     self.open_playlist_editor(&ctx, reference, false);
@@ -12392,6 +12402,7 @@ impl MusicApp {
         let _ = self.qr_window(ui.ctx());
         self.mix_settings_window(ui.ctx());
         self.recommendation_settings_window(ui.ctx());
+        self.add_tracks_window(ui.ctx());
         self.playlist_create_window(ui.ctx());
         self.playlist_manage_window(ui.ctx());
         self.audio_upload_window(ui.ctx());
@@ -13433,6 +13444,7 @@ mod tests {
             download_dir_save_failed: false,
             download_dir_pick: None,
             downloads: Vec::new(),
+            add_tracks: None,
             search_on_enter_save_failed: false,
             middle_autoscroll: false,
             middle_autoscroll_save_failed: false,
