@@ -12,19 +12,24 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    #[default]
     Musixmatch,
     Vk,
     Genius,
+    /// A new install starts here: open, with timed lyrics, no account.
+    #[default]
     Lrclib,
 }
 impl Source {
-    /// The other synced source a lookup can fall back to.
-    pub fn other(self) -> Option<Self> {
+    /// Every source, in the order fallbacks are asked (Genius, which never
+    /// has timing, last).
+    pub const ALL: [Self; 4] = [Self::Vk, Self::Musixmatch, Self::Lrclib, Self::Genius];
+
+    pub(super) fn index(self) -> usize {
         match self {
-            Self::Vk => Some(Self::Musixmatch),
-            Self::Musixmatch | Self::Lrclib => Some(Self::Vk),
-            Self::Genius => None,
+            Self::Vk => 0,
+            Self::Musixmatch => 1,
+            Self::Lrclib => 2,
+            Self::Genius => 3,
         }
     }
 
@@ -46,9 +51,14 @@ pub(super) struct Config {
     /// On for a new install; an explicit choice in Settings is kept.
     #[serde(default = "genius_fallback_default")]
     pub fallback_to_genius: bool,
-    /// VK falls back to Musixmatch and Musixmatch to VK. On by default.
-    #[serde(default = "genius_fallback_default")]
-    pub fallback_to_other: bool,
+    /// Before each source had its own switch: VK and Musixmatch falling
+    /// back to each other. Their own switches start from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_to_other: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_to_vk: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_to_musixmatch: Option<bool>,
     /// LRCLIB, an open database with timed lyrics. On by default.
     #[serde(default = "genius_fallback_default")]
     pub fallback_to_lrclib: bool,
@@ -88,7 +98,9 @@ impl Default for Config {
         Self {
             source: Source::default(),
             fallback_to_genius: genius_fallback_default(),
-            fallback_to_other: genius_fallback_default(),
+            fallback_to_other: None,
+            fallback_to_vk: None,
+            fallback_to_musixmatch: None,
             fallback_to_lrclib: genius_fallback_default(),
             genius_retry_after: 0,
             lrclib_retry_after: 0,
@@ -112,42 +124,73 @@ impl Drop for Config {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
     pub source: Source,
-    pub fallback_to_genius: bool,
-    pub fallback_to_other: bool,
-    pub fallback_to_lrclib: bool,
+    /// Whether each source is asked when the chosen one has nothing, by
+    /// `Source::index`.
+    pub fallbacks: [bool; 4],
     pub token_ready: bool,
     pub token_rejected: bool,
     pub token_retry_after: u64,
     pub request_retry_after: u64,
 }
+/// What a new install has, shown until the saved settings are read.
+impl Default for Status {
+    fn default() -> Self {
+        Config::default().status()
+    }
+}
+impl Status {
+    pub fn fallback(&self, source: Source) -> bool {
+        self.fallbacks[source.index()]
+    }
+    pub fn set_fallback(&mut self, source: Source, enabled: bool) {
+        self.fallbacks[source.index()] = enabled;
+    }
+}
 impl Config {
     pub fn status(&self) -> Status {
         Status {
             source: self.source,
-            fallback_to_genius: self.fallback_to_genius,
-            fallback_to_other: self.fallback_to_other,
-            fallback_to_lrclib: self.fallback_to_lrclib,
+            fallbacks: Source::ALL.map(|source| self.fallback(source)),
             token_ready: self.has_current_token() && !self.token_rejected,
             token_rejected: self.token_rejected,
             token_retry_after: self.token_retry_after.max(self.anonymous_retry_after),
             request_retry_after: {
                 let mut retry = self.source_retry_after();
-                if self.fallback_to_other
-                    && let Some(other) = self.source.other()
-                {
-                    retry = retry.min(self.retry_after(other));
-                }
-                if self.fallback_to_lrclib && self.source != Source::Lrclib {
-                    retry = retry.min(self.lrclib_retry_after);
-                }
-                if self.fallback_to_genius && self.source != Source::Genius {
-                    retry = retry.min(self.genius_retry_after);
+                for source in Source::ALL {
+                    if source != self.source && self.fallback(source) {
+                        retry = retry.min(self.retry_after(source));
+                    }
                 }
                 retry
             },
+        }
+    }
+
+    /// Whether `source` is asked when the chosen one has nothing.
+    pub fn fallback(&self, source: Source) -> bool {
+        match source {
+            Source::Vk => self
+                .fallback_to_vk
+                .or(self.fallback_to_other)
+                .unwrap_or(true),
+            Source::Musixmatch => self
+                .fallback_to_musixmatch
+                .or(self.fallback_to_other)
+                .unwrap_or(true),
+            Source::Lrclib => self.fallback_to_lrclib,
+            Source::Genius => self.fallback_to_genius,
+        }
+    }
+
+    pub fn set_fallback(&mut self, source: Source, enabled: bool) {
+        match source {
+            Source::Vk => self.fallback_to_vk = Some(enabled),
+            Source::Musixmatch => self.fallback_to_musixmatch = Some(enabled),
+            Source::Lrclib => self.fallback_to_lrclib = enabled,
+            Source::Genius => self.fallback_to_genius = enabled,
         }
     }
 
@@ -362,6 +405,20 @@ mod tests {
         assert!(restored.has_current_token());
         assert_eq!(restored.source, Source::Vk);
         assert!(restored.fallback_to_genius);
+        // A file from before per-source switches: its VK/Musixmatch choice
+        // carries over to both, and a new switch for one keeps the other.
+        let mut older: Config = serde_json::from_str(
+            r#"{"source":"vk","fallback_to_other":false,"fallback_to_genius":true}"#,
+        )
+        .unwrap();
+        assert!(!older.fallback(Source::Vk) && !older.fallback(Source::Musixmatch));
+        assert!(older.fallback(Source::Lrclib), "LRCLIB on by default");
+        older.set_fallback(Source::Musixmatch, true);
+        let migrated = root.join("migrated.json");
+        save_at(&migrated, &older).unwrap();
+        let restored = load_at(&migrated).unwrap();
+        assert!(restored.fallback(Source::Musixmatch) && !restored.fallback(Source::Vk));
+        assert_eq!(Config::default().source, Source::Lrclib, "a new install");
         // An older file with a personal API key loads, and the key is erased.
         let saved = fs::read_to_string(&path).unwrap();
         let mut older: serde_json::Value = serde_json::from_str(&saved).unwrap();

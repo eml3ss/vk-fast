@@ -505,94 +505,61 @@ impl MusicApp {
         ui.add_space(4.0);
         let status = self.lyrics.status.unwrap_or_default();
         let mut source = status.source;
-        ui.add_enabled_ui(
-            !self.lyrics.settings_busy && self.lyrics.status.is_some(),
-            |ui| {
-                ui.label(t("Источник текстов", "Lyrics source"));
-                ui.label(
-                    RichText::new(t(
-                        "VK, Musixmatch и LRCLIB дают текст с таймкодами, если он есть. Genius — обычный текст.",
-                        "VK, Musixmatch and LRCLIB give timed lyrics when they have them. Genius provides plain lyrics.",
-                    ))
-                    .small()
-                    .color(theme::muted()),
-                );
-                egui::ComboBox::from_id_salt("lyrics-source")
-                    .selected_text(source.name())
-                    .show_ui(ui, |ui| {
-                        for item in [Source::Vk, Source::Musixmatch, Source::Lrclib, Source::Genius] {
-                            ui.selectable_value(&mut source, item, item.name());
-                        }
-                    });
-            },
+        // Changes show at once and save in the background: nothing greys
+        // out or spins while the service writes them.
+        ui.label(t("Источник текстов", "Lyrics source"));
+        ui.label(
+            RichText::new(t(
+                "VK, Musixmatch и LRCLIB дают текст с таймкодами, если он есть. Genius — обычный текст.",
+                "VK, Musixmatch and LRCLIB give timed lyrics when they have them. Genius provides plain lyrics.",
+            ))
+            .small()
+            .color(theme::muted()),
         );
+        egui::ComboBox::from_id_salt("lyrics-source")
+            .selected_text(source.name())
+            .show_ui(ui, |ui| {
+                for item in [
+                    Source::Lrclib,
+                    Source::Vk,
+                    Source::Musixmatch,
+                    Source::Genius,
+                ] {
+                    ui.selectable_value(&mut source, item, item.name());
+                }
+            });
         if source != status.source {
             self.lyrics.status = Some(Status { source, ..status });
             self.configure_lyrics(&ctx, ConfigAction::Source(source));
         }
-        if let Some(other) = source.other() {
-            let mut fallback_other = status.fallback_to_other;
+        ui.add_space(4.0);
+        // Every source but the chosen one can be asked when it has nothing.
+        for other in Source::ALL {
+            if other == source {
+                continue;
+            }
+            let mut enabled = status.fallback(other);
             let label = match other {
+                Source::Vk => t("Искать в VK, если текст недоступен", "Fallback to VK"),
                 Source::Musixmatch => t(
                     "Искать в Musixmatch, если текст недоступен",
                     "Fallback to Musixmatch",
                 ),
-                _ => t("Искать в VK, если текст недоступен", "Fallback to VK"),
+                Source::Lrclib => t(
+                    "Искать в LRCLIB, если текст недоступен",
+                    "Fallback to LRCLIB",
+                ),
+                Source::Genius => t(
+                    "Искать в Genius, если текст недоступен",
+                    "Fallback to Genius",
+                ),
             };
-            if ui
-                .add_enabled_ui(
-                    !self.lyrics.settings_busy && self.lyrics.status.is_some(),
-                    |ui| theme::check_row(ui, &mut fallback_other, label),
-                )
-                .inner
-                .changed()
-            {
-                self.configure_lyrics(&ctx, ConfigAction::FallbackOther(fallback_other));
+            if theme::check_row(ui, &mut enabled, label).changed() {
+                let mut changed = self.lyrics.status.unwrap_or(status);
+                changed.set_fallback(other, enabled);
+                self.lyrics.status = Some(changed);
+                self.configure_lyrics(&ctx, ConfigAction::Fallback(other, enabled));
             }
-        }
-        let mut fallback_lrclib = status.fallback_to_lrclib;
-        if ui
-            .add_enabled_ui(
-                !self.lyrics.settings_busy
-                    && self.lyrics.status.is_some()
-                    && source != Source::Lrclib,
-                |ui| {
-                    theme::check_row(
-                        ui,
-                        &mut fallback_lrclib,
-                        t(
-                            "Искать в LRCLIB, если текст недоступен",
-                            "Fallback to LRCLIB",
-                        ),
-                    )
-                },
-            )
-            .inner
-            .changed()
-        {
-            self.configure_lyrics(&ctx, ConfigAction::FallbackLrclib(fallback_lrclib));
-        }
-        let mut fallback = status.fallback_to_genius;
-        if ui
-            .add_enabled_ui(
-                !self.lyrics.settings_busy
-                    && self.lyrics.status.is_some()
-                    && source != Source::Genius,
-                |ui| {
-                    theme::check_row(
-                        ui,
-                        &mut fallback,
-                        t(
-                            "Искать в Genius, если текст недоступен",
-                            "Fallback to Genius",
-                        ),
-                    )
-                },
-            )
-            .inner
-            .changed()
-        {
-            self.configure_lyrics(&ctx, ConfigAction::Fallback(fallback));
         }
         ui.label(
             RichText::new(t(
@@ -643,9 +610,6 @@ impl MusicApp {
                     .color(theme::muted()),
                 );
             }
-        }
-        if self.lyrics.settings_busy {
-            ui.add(egui::Spinner::new().size(16.0));
         }
         if let Some(error) = self.lyrics.settings_error {
             ui.label(RichText::new(error.message(language)).color(theme::error()));

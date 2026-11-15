@@ -113,8 +113,14 @@ impl GapClock {
 /// How much the current lyric line grows.
 const ACTIVE_SCALE: f32 = 1.06;
 
+/// A line with no words: a pause the lyrics mark (LRCLIB writes a music
+/// note), drawn as the animated dots.
 fn gap_marker(text: &str) -> bool {
-    matches!(text.trim(), "" | "..." | "…" | "•••")
+    let text = text.trim();
+    matches!(text, "" | "..." | "…" | "•••")
+        || text
+            .chars()
+            .all(|c| c.is_whitespace() || matches!(c, '♪' | '♫' | '♬' | '♩' | '🎵' | '🎶'))
 }
 
 fn dot_radius(size: f32, dot: usize, phase: Option<f64>) -> f32 {
@@ -1571,10 +1577,12 @@ mod tests {
                 assert_eq!(state.gap_clock.elapsed, 0.0);
             }
         }
-        for text in ["", "...", "…", "•••", "  ...  "] {
-            assert!(gap_marker(text));
+        // LRCLIB marks a pause with a music note: the same dots.
+        for text in ["", "...", "…", "•••", "  ...  ", "♪", " ♪ ", "♫♪", "🎵"] {
+            assert!(gap_marker(text), "{text:?}");
         }
         assert!(!gap_marker("A line..."));
+        assert!(!gap_marker("♪ la la ♪"), "words stay words");
     }
 
     #[test]

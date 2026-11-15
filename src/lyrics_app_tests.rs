@@ -163,18 +163,25 @@ fn lyric_seek_uses_the_shared_player_position_and_musixmatch_offers_only_its_tok
     app.settings_open = true;
     app.settings_section = SettingsSection::Playback;
     app.settings_query = "musixmatch".into();
-    app.lyrics.status = Some(Status {
-        fallback_to_genius: true,
-        fallback_to_other: true,
-        fallback_to_lrclib: true,
-        ..Default::default()
-    });
     let mut frame = 0;
     let size = egui::vec2(1040.0, 720.0);
-    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
-    for _ in 0..3 {
-        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    // Musixmatch chosen as in Settings: the service answers with it (a new
+    // install starts on LRCLIB).
+    app.configure_lyrics(&ctx, ConfigAction::Source(lyrics::Source::Musixmatch));
+    for _ in 0..200 {
+        account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        if !app.lyrics.settings_busy
+            && app
+                .lyrics
+                .status
+                .is_some_and(|status| status.source == lyrics::Source::Musixmatch)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
     assert!(account_ui_text_rect(&output, "Renew Musixmatch token").is_some());
     for retired in [
         "Personal API key",
@@ -191,6 +198,8 @@ fn lyric_seek_uses_the_shared_player_position_and_musixmatch_offers_only_its_tok
     // The fallbacks are the app's own check boxes, not egui's or switches:
     // a rounded 22-point square next to each label.
     let shapes = account_ui_shapes(&output);
+    // Every source but the chosen one, none greyed out.
+    assert!(account_ui_text_rect(&output, "Fallback to Musixmatch").is_none());
     for label in ["Fallback to VK", "Fallback to LRCLIB", "Fallback to Genius"] {
         let text = account_ui_text_rect(&output, label).unwrap();
         assert!(

@@ -16,10 +16,8 @@ use zeroize::Zeroize;
 pub enum ConfigAction {
     Reload,
     Source(Source),
-    Fallback(bool),
-    /// Fall back between VK and Musixmatch.
-    FallbackOther(bool),
-    FallbackLrclib(bool),
+    /// Whether a source is asked when the chosen one has nothing.
+    Fallback(Source, bool),
     Generate,
 }
 pub enum Event {
@@ -170,11 +168,7 @@ impl Service {
                             (Ok(provider), Ok(config)) => {
                                 let result = resolve_sources(
                                     config.source,
-                                    Fallbacks {
-                                        other: config.fallback_to_other,
-                                        lrclib: config.fallback_to_lrclib,
-                                        genius: config.fallback_to_genius,
-                                    },
+                                    config.status().fallbacks,
                                     &stop,
                                     |source| {
                                         fetch_source(
@@ -292,37 +286,24 @@ impl Service {
     }
 }
 
-/// Which fallbacks are on.
-#[derive(Clone, Copy)]
-struct Fallbacks {
-    /// VK for Musixmatch and LRCLIB, Musixmatch for VK.
-    other: bool,
-    lrclib: bool,
-    genius: bool,
-}
-
 /// Timed lyrics first, plain ones only when no source has timing: the
-/// chosen source, then the other one (VK or Musixmatch) and LRCLIB, each
-/// asked once and kept if its lyrics are timed (or an instrumental). With
-/// none timed, the first plain lyrics in that order, and only then Genius,
-/// which never has timing. Each fallback runs only when enabled; with
-/// nothing found, the chosen source's error is kept.
+/// chosen source, then VK, Musixmatch and LRCLIB as enabled, each asked
+/// once and kept if its lyrics are timed (or an instrumental). With none
+/// timed, the first plain lyrics in that order, and only then Genius, which
+/// never has timing. With nothing found, the chosen source's error is kept.
 fn resolve_sources(
     source: Source,
-    fallbacks: Fallbacks,
+    fallbacks: [bool; 4],
     canceled: &impl Fn() -> bool,
     mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
 ) -> Result<Arc<Lyrics>, Error> {
-    let mut order = vec![source];
-    if fallbacks.other
-        && let Some(other) = source.other()
-    {
-        order.push(other);
-    }
-    if fallbacks.lrclib && !order.contains(&Source::Lrclib) {
-        order.push(Source::Lrclib);
-    }
-    let genius = fallbacks.genius && source != Source::Genius;
+    let enabled = |other: Source| other != source && fallbacks[other.index()];
+    // Genius, chosen or not, comes after every source that may have timing.
+    let order: Vec<Source> = std::iter::once(source)
+        .chain(Source::ALL.into_iter().filter(|other| enabled(*other)))
+        .filter(|asked| *asked != Source::Genius)
+        .collect();
+    let genius = source == Source::Genius || enabled(Source::Genius);
     let mut first = None;
     let mut plain = None;
     for source in order {
@@ -349,6 +330,8 @@ fn resolve_sources(
         }
         match fetch(Source::Genius) {
             Err(Error::Canceled) => return Err(Error::Canceled),
+            // The chosen source's own error is the one to show.
+            Err(error) if source == Source::Genius => return Err(error),
             Err(error) => {
                 first.get_or_insert(error);
             }
@@ -553,21 +536,9 @@ fn configure(
             store::save(&candidate)?;
             *config = candidate;
         }
-        ConfigAction::Fallback(enabled) => {
+        ConfigAction::Fallback(source, enabled) => {
             let mut candidate = config.clone();
-            candidate.fallback_to_genius = enabled;
-            store::save(&candidate)?;
-            *config = candidate;
-        }
-        ConfigAction::FallbackOther(enabled) => {
-            let mut candidate = config.clone();
-            candidate.fallback_to_other = enabled;
-            store::save(&candidate)?;
-            *config = candidate;
-        }
-        ConfigAction::FallbackLrclib(enabled) => {
-            let mut candidate = config.clone();
-            candidate.fallback_to_lrclib = enabled;
+            candidate.set_fallback(source, enabled);
             store::save(&candidate)?;
             *config = candidate;
         }
@@ -640,18 +611,11 @@ mod tests {
         assert_eq!((calls, result.unwrap_err()), (1, Error::Canceled));
     }
 
-    fn only(genius: bool) -> Fallbacks {
-        Fallbacks {
-            other: false,
-            lrclib: false,
-            genius,
-        }
+    /// Fallbacks by `Source::ALL`: VK, Musixmatch, LRCLIB, Genius.
+    fn only(genius: bool) -> [bool; 4] {
+        [false, false, false, genius]
     }
-    const ALL: Fallbacks = Fallbacks {
-        other: true,
-        lrclib: true,
-        genius: true,
-    };
+    const ALL: [bool; 4] = [true; 4];
 
     #[test]
     fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
@@ -699,7 +663,13 @@ mod tests {
             (Source::Lrclib, Source::Vk),
         ] {
             let lrclib = (source != Source::Lrclib).then_some(Source::Lrclib);
-            let synced_order: Vec<Source> = [source, other].into_iter().chain(lrclib).collect();
+            let synced_order: Vec<Source> = std::iter::once(source)
+                .chain(
+                    [Source::Vk, Source::Musixmatch, Source::Lrclib]
+                        .into_iter()
+                        .filter(|asked| *asked != source),
+                )
+                .collect();
             // Each timed source in turn: the ones before it are asked, the
             // ones after it are not.
             for (index, timed) in synced_order.iter().enumerate() {
@@ -729,7 +699,7 @@ mod tests {
                 }
             })
             .unwrap();
-            assert_eq!(found.lines.len(), 3, "{source:?}");
+            assert_eq!(found.lines.len(), 3, "{source:?}: the first plain in order");
             assert_eq!(calls, synced_order);
             // Nothing anywhere but Genius: Genius last; the chosen error kept.
             calls.clear();
@@ -756,18 +726,10 @@ mod tests {
         }
         // LRCLIB off: it is not asked.
         let mut calls = Vec::new();
-        let _ = resolve_sources(
-            Source::Vk,
-            Fallbacks {
-                lrclib: false,
-                ..ALL
-            },
-            &|| false,
-            |asked| {
-                calls.push(asked);
-                Err(Error::NotFound)
-            },
-        );
+        let _ = resolve_sources(Source::Vk, [true, true, false, true], &|| false, |asked| {
+            calls.push(asked);
+            Err(Error::NotFound)
+        });
         assert_eq!(calls, [Source::Vk, Source::Musixmatch, Source::Genius]);
     }
 
@@ -787,7 +749,7 @@ mod tests {
         configure(
             &provider,
             &mut config,
-            ConfigAction::Fallback(true),
+            ConfigAction::Fallback(Source::Genius, true),
             &|| false,
         )
         .unwrap();
