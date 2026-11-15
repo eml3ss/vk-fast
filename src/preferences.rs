@@ -102,9 +102,9 @@ struct Preferences {
     #[serde(deserialize_with = "deserialize_on")]
     popular_searches: bool,
     /// The buttons beside a track, as `track_buttons::Set` bits.
-    #[serde(deserialize_with = "deserialize_track_buttons")]
+    #[serde(deserialize_with = "deserialize_player_buttons")]
     track_buttons_player: u8,
-    #[serde(deserialize_with = "deserialize_track_buttons")]
+    #[serde(deserialize_with = "deserialize_list_buttons")]
     track_buttons_lists: u8,
     /// Where downloaded tracks go; empty for the system's Downloads folder.
     #[serde(
@@ -162,8 +162,8 @@ impl Default for Preferences {
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
             search_history: true,
             popular_searches: true,
-            track_buttons_player: crate::track_buttons::Set::default().bits(),
-            track_buttons_lists: crate::track_buttons::Set::default().bits(),
+            track_buttons_player: crate::track_buttons::Set::PLAYER.bits(),
+            track_buttons_lists: crate::track_buttons::Set::LISTS.bits(),
             download_dir: String::new(),
             ui_scale: DEFAULT_UI_SCALE,
             auto_ui_scale: false,
@@ -366,15 +366,25 @@ fn deserialize_ui_scale<'de, D: serde::Deserializer<'de>>(
 
 fn deserialize_track_buttons<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
+    default: crate::track_buttons::Set,
 ) -> Result<u8, D::Error> {
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_u64()
         .and_then(|bits| u8::try_from(bits).ok())
-        .map_or(
-            crate::track_buttons::Set::default(),
-            crate::track_buttons::Set::from_bits,
-        )
+        .map_or(default, crate::track_buttons::Set::from_bits)
         .bits())
+}
+
+fn deserialize_player_buttons<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    deserialize_track_buttons(deserializer, crate::track_buttons::Set::PLAYER)
+}
+
+fn deserialize_list_buttons<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    deserialize_track_buttons(deserializer, crate::track_buttons::Set::LISTS)
 }
 
 /// An absolute folder of reasonable length, or empty (the default).
@@ -1065,7 +1075,13 @@ pub fn load_track_buttons() -> (crate::track_buttons::Set, crate::track_buttons:
     preferences_path()
         .ok()
         .and_then(|path| load_preferences_at(&path).ok().flatten())
-        .map_or_else(Default::default, read)
+        .map_or(
+            (
+                crate::track_buttons::Set::PLAYER,
+                crate::track_buttons::Set::LISTS,
+            ),
+            read,
+        )
 }
 
 pub fn save_track_buttons(
@@ -1494,9 +1510,15 @@ mod tests {
             r#"{"track_buttons_player":"x","track_buttons_lists":300,"download_dir":"relative/dir"}"#,
         )
         .unwrap();
-        let default = crate::track_buttons::Set::default().bits();
-        assert_eq!(preferences.track_buttons_player, default);
-        assert_eq!(preferences.track_buttons_lists, default);
+        assert_eq!(
+            preferences.track_buttons_player,
+            crate::track_buttons::Set::PLAYER.bits()
+        );
+        assert_eq!(
+            preferences.track_buttons_lists,
+            crate::track_buttons::Set::LISTS.bits()
+        );
+        let default = crate::track_buttons::Set::PLAYER.bits();
         assert!(preferences.download_dir.is_empty());
         let directory = TestDirectory::new();
         let path = directory.0.join("preferences.json");

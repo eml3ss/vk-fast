@@ -1726,7 +1726,13 @@ impl MusicApp {
             preferences::load_search_lists()
         };
         let (track_buttons, download_dir) = if cfg!(test) {
-            (Default::default(), String::new())
+            (
+                (
+                    crate::track_buttons::Set::PLAYER,
+                    crate::track_buttons::Set::LISTS,
+                ),
+                String::new(),
+            )
         } else {
             (
                 preferences::load_track_buttons(),
@@ -13513,8 +13519,8 @@ mod tests {
             popular_searches: true,
             search_lists_save_failed: false,
             search_history_writer: Default::default(),
-            track_buttons_player: Default::default(),
-            track_buttons_lists: Default::default(),
+            track_buttons_player: crate::track_buttons::Set::PLAYER,
+            track_buttons_lists: crate::track_buttons::Set::LISTS,
             track_buttons_save_failed: false,
             download_dir: String::new(),
             download_dir_save_failed: false,

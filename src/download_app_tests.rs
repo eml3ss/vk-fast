@@ -78,12 +78,15 @@ fn a_rows_buttons_follow_the_setting_and_download_saves_into_the_folder() {
         Some(TrackAction::Menu(_, track_menu::Action::Download))
     ));
     // Only Download: it takes the heart's place, and the title gets the room.
-    let only = Button::ALL.into_iter().fold(Set::default(), |set, button| {
+    let only = Button::ALL.into_iter().fold(Set::LISTS, |set, button| {
         set.with(button, button == Button::Download)
     });
     app.track_buttons_lists = only;
+    let three = Set::LISTS
+        .with(Button::Dislike, true)
+        .with(Button::Mix, true);
     assert_eq!(
-        download_app::controls_width(Set::default()) - download_app::controls_width(only),
+        download_app::controls_width(three) - download_app::controls_width(only),
         2.0 * 28.0
     );
     let action = click_last_button(&ctx, &mut app, &track, &mut tick);

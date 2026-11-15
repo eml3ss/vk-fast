@@ -48,14 +48,12 @@ impl Button {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Set(u8);
 
-impl Default for Set {
-    /// The heart, Dislike and the track mix, as before the setting existed.
-    fn default() -> Self {
-        Self(1 | 2 | 4)
-    }
-}
-
 impl Set {
+    /// A new install's player: the heart and Dislike.
+    pub const PLAYER: Self = Self(1 | 2);
+    /// A new install's track lists: only the heart.
+    pub const LISTS: Self = Self(1);
+
     pub fn from_bits(bits: u8) -> Self {
         Self(bits & 0b1111)
     }
@@ -82,11 +80,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_is_the_three_old_buttons_and_bits_round_trip() {
-        let set = Set::default();
-        assert!(set.has(Button::Like) && set.has(Button::Dislike) && set.has(Button::Mix));
-        assert!(!set.has(Button::Download));
-        assert_eq!(set.count(), 3);
+    fn new_installs_show_the_heart_and_dislike_in_the_player_and_the_heart_in_lists() {
+        let player = Set::PLAYER;
+        assert!(player.has(Button::Like) && player.has(Button::Dislike));
+        assert!(!player.has(Button::Mix) && !player.has(Button::Download));
+        let lists = Set::LISTS;
+        assert!(lists.has(Button::Like) && lists.count() == 1);
+        let set = player.with(Button::Mix, true);
         let changed = set
             .with(Button::Download, true)
             .with(Button::Dislike, false);
