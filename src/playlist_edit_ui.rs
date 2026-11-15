@@ -10,7 +10,8 @@ pub struct View<'a> {
     pub description: &'a mut String,
     pub cover_url: Option<&'a str>,
     pub cover_preview: Option<&'a TextureHandle>,
-    /// Native discovery control; this is not a private/public playlist switch.
+    /// Whether other VK users see the playlist (VK's `no_discover`); the
+    /// dialog shows it as a "Private playlist" check box, the opposite.
     pub discoverable: Option<&'a mut bool>,
     pub can_change_cover: bool,
     pub can_edit: bool,
@@ -156,15 +157,26 @@ pub fn show(ctx: &egui::Context, covers: &mut CoverCache, mut view: View<'_>) ->
                         );
                     });
                     if let Some(discoverable) = view.discoverable.as_deref_mut() {
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         ui.add_enabled_ui(enabled, |ui| {
-                            theme::switch(
+                            let mut private = !*discoverable;
+                            if theme::check_row(
                                 ui,
-                                discoverable,
-                                language.text(
-                                    "Показывать в поиске и рекомендациях",
-                                    "Show in search and recommendations",
-                                ),
+                                &mut private,
+                                language.text("Приватный плейлист", "Private playlist"),
+                            )
+                            .clicked()
+                            {
+                                *discoverable = !private;
+                            }
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(language.text(
+                                    "Другие пользователи VK не увидят этот плейлист",
+                                    "Other VK users won't see this playlist",
+                                ))
+                                .size(12.0)
+                                .color(theme::muted()),
                             );
                         });
                     }
@@ -439,10 +451,7 @@ mod tests {
             h.click(
                 text_rect(
                     &output,
-                    language.text(
-                        "Показывать в поиске и рекомендациях",
-                        "Show in search and recommendations",
-                    ),
+                    language.text("Приватный плейлист", "Private playlist"),
                 )
                 .unwrap()
                 .center(),
@@ -493,7 +502,7 @@ mod tests {
         h.show_discovery = false;
         h.name = " ".into();
         let output = h.warm();
-        assert!(text_rect(&output, "Show in search and recommendations").is_none());
+        assert!(text_rect(&output, "Private playlist").is_none());
         h.click(text_rect(&output, "Save").unwrap().center());
         assert!(h.action.is_none());
     }

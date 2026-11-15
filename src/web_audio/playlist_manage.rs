@@ -15,7 +15,9 @@ pub struct PlaylistEditDetails {
     /// Includes removing a followed copy from the current account's library.
     pub can_delete: bool,
     pub is_following: bool,
-    /// Discovery/search visibility, not privacy or access control.
+    /// Whether other VK users see the playlist: VK's `no_discover`, which
+    /// its own site calls "Make private" ("hide from other users"). Absent
+    /// means visible, as on VK's site; `None` only when it can't be edited.
     pub discoverable: Option<bool>,
 }
 
@@ -128,13 +130,14 @@ impl WebAudioClient {
         // false. Never substitute the original creator's identity here.
         let own_followed_copy = playlist.owner_id == expected_owner
             && native_bool(source.get("is_following")) == Some(true);
+        let can_edit = playlist_can_add_tracks(source);
         let details = PlaylistEditDetails {
             playlist,
             description: playlist_description(source.get("description")).unwrap_or_default(),
-            can_edit: playlist_can_add_tracks(source),
+            can_edit,
             can_delete: permission("delete") || own_followed_copy,
             is_following: native_bool(source.get("is_following")) == Some(true),
-            discoverable: native_bool(source.get("no_discover")).map(|hidden| !hidden),
+            discoverable: can_edit.then(|| native_bool(source.get("no_discover")) != Some(true)),
         };
         Ok((generation, details))
     }
@@ -473,6 +476,23 @@ mod tests {
         assert!(details.can_edit && details.can_delete && !details.is_following);
         assert_eq!(details.discoverable, Some(true));
         assert_eq!(details.description, "First\nSecond & third");
+        // VK leaves out no_discover on a public playlist, and says true on a
+        // private one.
+        for (no_discover, discoverable) in [(None, true), (Some(true), false)] {
+            let mut value = metadata(42);
+            match no_discover {
+                Some(hidden) => value["no_discover"] = json!(hidden),
+                None => {
+                    value.as_object_mut().unwrap().remove("no_discover");
+                }
+            }
+            let (_, details) = client
+                .playlist_manage_metadata(42, &reference(42), &canceled, &mut |_, _, _| {
+                    Ok(value.clone())
+                })
+                .unwrap();
+            assert_eq!(details.discoverable, Some(discoverable));
+        }
         let mut saved = metadata(42);
         saved["is_following"] = json!(true);
         saved["permissions"] = json!({"edit":false,"delete":false});
