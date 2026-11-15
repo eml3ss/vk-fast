@@ -61,12 +61,15 @@ impl Provider {
 
     /// The exact record for the title, artists, album and length; without
     /// one, a search by title and main artist, checked like Musixmatch's.
+    /// Timed lines win: an exact record with plain text only is kept while
+    /// the search looks for a timed one.
     pub(super) fn lrclib(
         &self,
         query: &Query,
         canceled: &impl Fn() -> bool,
     ) -> Result<Arc<Lyrics>, Error> {
         let mut first = None;
+        let mut plain = None;
         for artist in [&query.artists, &query.artist] {
             let mut params = vec![
                 ("track_name", query.title.clone()),
@@ -80,7 +83,12 @@ impl Provider {
             }
             match self.lrclib_request("get", &params, canceled) {
                 Ok(record) => match parse(&record, query) {
-                    Ok(lyrics) => return Ok(Arc::new(lyrics)),
+                    Ok(lyrics) if lyrics.synced || lyrics.instrumental => {
+                        return Ok(Arc::new(lyrics));
+                    }
+                    Ok(lyrics) => {
+                        plain.get_or_insert(lyrics);
+                    }
                     Err(error) => {
                         first.get_or_insert(error);
                     }
@@ -92,25 +100,32 @@ impl Provider {
                 break;
             }
         }
-        let found = self.lrclib_request(
+        let found = match self.lrclib_request(
             "search",
             &[
                 ("track_name", query.title.clone()),
                 ("artist_name", query.artist.clone()),
             ],
             canceled,
-        )?;
-        best_searched(&found, query)
-            .map(Arc::new)
-            .ok_or(first.unwrap_or(Error::NotFound))
+        ) {
+            Ok(found) => found,
+            Err(error) => return plain.map(Arc::new).ok_or(error),
+        };
+        match best_searched(&found, query) {
+            Some(lyrics) if lyrics.synced || plain.is_none() => Ok(Arc::new(lyrics)),
+            _ => plain.map(Arc::new).ok_or(first.unwrap_or(Error::NotFound)),
+        }
     }
 }
 
 /// The search's best record: the same title and main artist, a length
-/// within 5 % (at least 8 s), with lyrics; timed ones first.
+/// within 5 % (at least 8 s), with lyrics; timed ones first, then the one
+/// closest in length (the search's own order puts other uploads first,
+/// such as lines with a romanisation glued on).
 fn best_searched(found: &Value, query: &Query) -> Option<Lyrics> {
     let records = found.as_array()?;
-    let mut matches: Vec<Lyrics> = records
+    let wanted = f64::from(query.duration);
+    let mut matches: Vec<(Lyrics, f64)> = records
         .iter()
         .take(50)
         .filter(|record| {
@@ -123,11 +138,20 @@ fn best_searched(found: &Value, query: &Query) -> Option<Lyrics> {
                     .and_then(Value::as_str)
                     .is_some_and(|artist| same_artist(artist, &query.artist))
         })
-        .filter_map(|record| parse(record, query).ok())
-        .filter(|lyrics| !lyrics.instrumental)
+        .filter_map(|record| {
+            let length = record.get("duration").and_then(Value::as_f64);
+            let off = match length {
+                Some(length) if length.is_finite() && query.duration > 0 => (length - wanted).abs(),
+                _ => f64::MAX,
+            };
+            parse(record, query).ok().map(|lyrics| (lyrics, off))
+        })
+        .filter(|(lyrics, _)| !lyrics.instrumental)
         .collect();
-    matches.sort_by_key(|lyrics| !lyrics.synced);
-    matches.into_iter().next()
+    // Stable: equally close records keep the search's order.
+    matches
+        .sort_by(|(a, a_off), (b, b_off)| (!a.synced).cmp(&!b.synced).then(a_off.total_cmp(b_off)));
+    matches.into_iter().next().map(|(lyrics, _)| lyrics)
 }
 
 /// A record's lyrics: its timed lines where they fit the track's length,
@@ -241,5 +265,26 @@ mod tests {
         assert!(best.synced);
         assert_eq!(best.lines[0].text, "timed words");
         assert!(best_searched(&json!([]), &query(200)).is_none());
+    }
+
+    #[test]
+    fn among_timed_records_the_one_closest_in_length_wins() {
+        // The search lists another upload first (lines with a
+        // romanisation glued on, a few seconds shorter), and one whose
+        // unsupported offset leaves only plain text.
+        let found = json!([
+            {"trackName": "Synthetic Song", "artistName": "Synthetic Artist", "duration": 199.0,
+             "plainLyrics": "plain from an offset record",
+             "syncedLyrics": "[offset:-64036]\n[00:01.00] offset words"},
+            {"trackName": "Synthetic Song", "artistName": "Synthetic Artist", "duration": 197.0,
+             "syncedLyrics": "[00:01.00] glued words"},
+            {"trackName": "Synthetic Song", "artistName": "Synthetic Artist", "duration": 200.0,
+             "syncedLyrics": "[00:01.00] closest words"},
+            {"trackName": "Synthetic Song", "artistName": "Synthetic Artist", "duration": 201.0,
+             "syncedLyrics": "[00:01.00] near words"}
+        ]);
+        let best = best_searched(&found, &query(200)).unwrap();
+        assert!(best.synced);
+        assert_eq!(best.lines[0].text, "closest words");
     }
 }
