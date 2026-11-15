@@ -10,7 +10,13 @@ mod tests;
 
 /// Library matches shown under a query.
 const LIBRARY_MATCHES: usize = 50;
-const ROW: f32 = 52.0;
+/// A track's row, and how far its highlight stays inside it vertically.
+const ROW: f32 = 58.0;
+const ROW_INSET: f32 = 5.0;
+/// Space around a section heading: above it (from the search field or the
+/// last track's highlight) and below it (to the first track's highlight).
+const HEADING_GAP: f32 = 14.0;
+const NOTE: f32 = 36.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Added {
@@ -388,6 +394,9 @@ impl MusicApp {
                     .selectable(false),
                 );
                 ui.add_space(12.0);
+                // The field's own item spacing would widen the gap under it,
+                // which the list's headings measure.
+                ui.spacing_mut().item_spacing.y = 0.0;
                 egui::Frame::new()
                     .fill(theme::background())
                     .corner_radius(8)
@@ -413,7 +422,8 @@ impl MusicApp {
                             }
                         });
                     });
-                ui.add_space(10.0);
+                // With the heading's own top room, the gap under the field.
+                ui.add_space(ROW_INSET);
                 theme::scroll_area(
                     ui,
                     egui::ScrollArea::vertical()
@@ -423,26 +433,37 @@ impl MusicApp {
                         .auto_shrink([false, false]),
                     |ui| {
                         let width = ui.available_width();
-                        let (whole, _) = ui.allocate_exact_size(
-                            egui::vec2(width, ROW * entries.len() as f32),
-                            Sense::hover(),
-                        );
+                        let heading_font = egui::FontId::new(15.0, theme::semibold());
+                        let heading_text = ui.fonts_mut(|fonts| fonts.row_height(&heading_font));
+                        // A track's highlight is ROW_INSET inside its row: the
+                        // heading's own room makes up the rest of the gap.
+                        let pad = HEADING_GAP - ROW_INSET;
+                        let height = |entry: &Entry| match entry {
+                            Entry::Heading(_) => pad + heading_text + pad,
+                            Entry::Note(_) => NOTE,
+                            Entry::Track(..) => ROW,
+                        };
+                        let total: f32 = entries.iter().map(height).sum();
+                        let (whole, _) =
+                            ui.allocate_exact_size(egui::vec2(width, total), Sense::hover());
                         let visible = ui.clip_rect();
+                        let mut top = whole.top();
                         for (index, entry) in entries.iter().enumerate() {
                             let rect = egui::Rect::from_min_size(
-                                whole.min + egui::vec2(0.0, ROW * index as f32),
-                                egui::vec2(width, ROW),
+                                egui::pos2(whole.left(), top),
+                                egui::vec2(width, height(entry)),
                             );
+                            top = rect.bottom();
                             if !visible.intersects(rect) {
                                 continue;
                             }
                             match entry {
                                 Entry::Heading(text) => {
                                     ui.painter().text(
-                                        rect.left_bottom() + egui::vec2(4.0, -12.0),
-                                        egui::Align2::LEFT_BOTTOM,
+                                        rect.left_top() + egui::vec2(4.0, pad),
+                                        egui::Align2::LEFT_TOP,
                                         *text,
-                                        egui::FontId::new(15.0, theme::semibold()),
+                                        heading_font.clone(),
                                         ui.visuals().text_color(),
                                     );
                                 }
@@ -528,20 +549,29 @@ impl MusicApp {
     ) -> RowClick {
         let language = self.language;
         let t = |ru, en| language.text(ru, en);
-        let inner = rect.shrink2(egui::vec2(4.0, 6.0));
+        let inner = rect.shrink2(egui::vec2(4.0, ROW_INSET));
         let row = ui.interact(
             inner,
             ui.id().with(("add-track-play", index, track.key())),
             Sense::click(),
         );
-        if row.hovered() {
+        // The pointer anywhere on the row, its buttons too: hovering the
+        // cover's play button must not hide it.
+        let over = ui.rect_contains_pointer(inner);
+        if over {
             ui.painter().rect_filled(inner, 8.0, theme::selected());
         }
         let playing = self
             .playing
             .as_ref()
             .is_some_and(|playing| playing.key() == track.key());
+        let play_state = crate::cover_play::PlayState::new(
+            playing && self.playback_pending.is_some(),
+            playing,
+            self.player.snapshot().state == PlaybackState::Playing,
+        );
         let mut clicked = false;
+        let mut cover_clicked = false;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt(("add-track-row", index, track.key()))
@@ -549,7 +579,25 @@ impl MusicApp {
                 .layout(Layout::left_to_right(Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
-                self.covers.show(ui, track.cover_url.as_deref(), 36.0);
+                let cover = self.covers.show(ui, track.cover_url.as_deref(), 36.0);
+                // Play or pause on the cover, as on Home: while the row is
+                // hovered, and always on the current track.
+                if over || playing {
+                    let label = if play_state == crate::cover_play::PlayState::Playing {
+                        t("Пауза", "Pause")
+                    } else {
+                        t("Слушать", "Play")
+                    };
+                    cover_clicked = crate::cover_play::button(
+                        ui,
+                        cover.rect.center(),
+                        13.0,
+                        ui.id().with(("add-track-cover-play", index, track.key())),
+                        play_state,
+                        label,
+                    )
+                    .clicked();
+                }
                 let text_width = (ui.available_width() - 90.0).max(40.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(text_width, 36.0),
@@ -637,6 +685,9 @@ impl MusicApp {
         );
         if clicked {
             return RowClick::Add;
+        }
+        if cover_clicked {
+            return RowClick::Play;
         }
         let play = if self.double_click_to_play {
             row.double_clicked()

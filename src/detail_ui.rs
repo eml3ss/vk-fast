@@ -36,6 +36,16 @@ pub struct AlbumView<'a> {
     pub playing: bool,
     pub can_edit_playlist: bool,
     pub follow: Option<FollowView>,
+    /// The album's or playlist's mix can start: a connected account.
+    pub mix: bool,
+}
+
+/// Whose mix the square radio button in the header starts.
+#[derive(Clone, Copy)]
+enum MixKind {
+    Artist,
+    Album,
+    Playlist,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +68,8 @@ pub enum Action {
     CopyLink,
     /// The open artist's mix.
     ArtistMix,
+    /// The open album's or playlist's mix.
+    CollectionMix,
     /// Add tracks to the account's own playlist.
     AddTracks,
     ReloadReleases,
@@ -253,7 +265,7 @@ pub fn artist_header(
         view.loading,
         view.playing,
         view.follow,
-        Some(view.mix),
+        Some((MixKind::Artist, view.mix)),
         false,
     )
 }
@@ -486,7 +498,14 @@ fn collection_header(
         } else {
             None
         },
-        None,
+        Some((
+            if playlist {
+                MixKind::Playlist
+            } else {
+                MixKind::Album
+            },
+            view.mix,
+        )),
         playlist && view.can_edit_playlist,
     )
     .or(action);
@@ -1140,7 +1159,7 @@ fn controls(
     loading: bool,
     playing: bool,
     follow: Option<FollowView>,
-    mix: Option<bool>,
+    mix: Option<(MixKind, bool)>,
     add_tracks: bool,
 ) -> Option<Action> {
     let mut action = None;
@@ -1273,10 +1292,23 @@ fn controls(
             }
         }
         // Between the heart and Copy link.
-        if let Some(enabled) = mix {
-            let label = language.text("Микс по исполнителю", "Go to artist mix");
+        if let Some((kind, enabled)) = mix {
+            let (label, mix) = match kind {
+                MixKind::Artist => (
+                    language.text("Микс по исполнителю", "Go to artist mix"),
+                    Action::ArtistMix,
+                ),
+                MixKind::Album => (
+                    language.text("Микс по альбому", "Go to album mix"),
+                    Action::CollectionMix,
+                ),
+                MixKind::Playlist => (
+                    language.text("Микс по плейлисту", "Go to playlist mix"),
+                    Action::CollectionMix,
+                ),
+            };
             if square_button(ui, Icon::Radio, label, enabled).clicked() {
-                action = Some(Action::ArtistMix);
+                action = Some(mix);
             }
         }
         if add_tracks {
@@ -1324,62 +1356,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_own_playlist_has_an_add_tracks_plus_before_copy_link() {
-        let ctx = egui::Context::default();
-        theme::install(&ctx);
-        let mut action = None;
-        let mut squares = Vec::new();
-        for tick in 0..4 {
-            let target = squares.first().map(egui::Rect::center);
-            let events = match (target, tick) {
-                (Some(pos), 2 | 3) => vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: tick == 2,
-                        modifiers: egui::Modifiers::NONE,
+    fn an_own_playlist_has_its_mix_and_an_add_tracks_plus_before_copy_link() {
+        // Clicks the square button at `which` (left to right); returns the
+        // action and how many square buttons there are.
+        let click = |which: usize| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut action = None;
+            let mut squares: Vec<egui::Rect> = Vec::new();
+            for tick in 0..4 {
+                let target = squares.get(which).map(egui::Rect::center);
+                let events = match (target, tick) {
+                    (Some(pos), 2 | 3) => vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: tick == 2,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    _ => Vec::new(),
+                };
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(700.0, 100.0),
+                        )),
+                        time: Some(f64::from(tick) * 0.1),
+                        events,
+                        ..Default::default()
                     },
-                ],
-                _ => Vec::new(),
-            };
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(700.0, 100.0),
-                    )),
-                    time: Some(f64::from(tick) * 0.1),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    let chosen = controls(ui, Language::English, 3, false, false, None, None, true);
-                    action = action.take().or(chosen);
-                },
-            );
-            if squares.is_empty() {
-                squares = output
-                    .shapes
-                    .iter()
-                    .filter_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(36.0, 36.0) => {
-                            Some(rect.rect)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                squares.sort_by(|a, b| a.left().total_cmp(&b.left()));
-                assert_eq!(squares.len(), 2, "the plus and Copy link");
+                    |ui| {
+                        let mix = Some((MixKind::Playlist, true));
+                        let chosen =
+                            controls(ui, Language::English, 3, false, false, None, mix, true);
+                        action = action.take().or(chosen);
+                    },
+                );
+                if squares.is_empty() {
+                    squares = output
+                        .shapes
+                        .iter()
+                        .filter_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.rect.size() == egui::vec2(36.0, 36.0) =>
+                            {
+                                Some(rect.rect)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    squares.sort_by(|a, b| a.left().total_cmp(&b.left()));
+                }
+                output.textures_delta.clear();
             }
-            output.textures_delta.clear();
-        }
-        assert_eq!(action, Some(Action::AddTracks));
+            (action, squares.len())
+        };
+        // The mix, the plus, then Copy link.
+        assert_eq!(click(0), (Some(Action::CollectionMix), 3));
+        assert_eq!(click(1), (Some(Action::AddTracks), 3));
+        assert_eq!(click(2), (Some(Action::CopyLink), 3));
     }
 
     #[test]
     fn an_artists_page_has_a_mix_button_between_the_heart_and_copy_link() {
         let squares = |mix: Option<bool>, click: Option<egui::Pos2>| {
+            let mix = mix.map(|enabled| (MixKind::Artist, enabled));
             let ctx = egui::Context::default();
             theme::install(&ctx);
             let mut action = None;
@@ -1634,6 +1678,7 @@ mod tests {
                                     playing: false,
                                     can_edit_playlist: false,
                                     follow: None,
+                                    mix: false,
                                 },
                             );
                         },
@@ -1772,6 +1817,7 @@ mod tests {
                     playing: false,
                     can_edit_playlist: false,
                     follow: None,
+                    mix: false,
                 },
             );
         });
@@ -1821,6 +1867,7 @@ mod tests {
                             playing: false,
                             can_edit_playlist: false,
                             follow: None,
+                            mix: false,
                         };
                         match kind {
                             "playlist" => {
@@ -1930,6 +1977,7 @@ mod tests {
                             playing: false,
                             can_edit_playlist: false,
                             follow: None,
+                            mix: false,
                         },
                     );
                 },
@@ -1994,6 +2042,7 @@ mod tests {
                             playing: false,
                             can_edit_playlist: false,
                             follow: None,
+                            mix: false,
                         },
                     );
                 },
@@ -2023,7 +2072,7 @@ mod tests {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 380.0))),
                         time: Some(f64::from(tick) * 0.1), events, ..Default::default()
                     }, |ui| {
-                        let view = AlbumView { language: Language::English, title: "A long playlist title that still must not cover its edit control", artists: &[], creator: None, image_url: None, subtitle: "", track_count: 2, loading: false, playing: false, can_edit_playlist: can_edit, follow: None };
+                        let view = AlbumView { language: Language::English, title: "A long playlist title that still must not cover its edit control", artists: &[], creator: None, image_url: None, subtitle: "", track_count: 2, loading: false, playing: false, can_edit_playlist: can_edit, follow: None, mix: false };
                         action = if playlist { playlist_header(ui, &mut covers, view) } else { album_header(ui, &mut covers, view) };
                     });
                     output.textures_delta.clear();
@@ -2119,6 +2168,7 @@ mod tests {
                                     playing: false,
                                     can_edit_playlist: false,
                                     follow: None,
+                                    mix: false,
                                 },
                             );
                         }
@@ -2435,6 +2485,7 @@ mod tests {
                                 playing: false,
                                 can_edit_playlist: false,
                                 follow: None,
+                                mix: false,
                             },
                         );
                     },

@@ -7823,6 +7823,7 @@ impl MusicApp {
                             playing,
                             can_edit_playlist,
                             follow,
+                            mix: connected && album.owner_id != 0 && album.id > 0,
                         },
                     );
                 }
@@ -8026,6 +8027,23 @@ impl MusicApp {
                         crate::web_audio::CatalogMix::Artist {
                             entity_id: artist.id.clone(),
                         },
+                    );
+                }
+            }
+            Some(detail_ui::Action::CollectionMix) => {
+                if let MusicPage::Album(reference) | MusicPage::Playlist(reference) = page
+                    && !self.demo
+                    && self.search_ready()
+                    && reference.owner_id != 0
+                    && reference.id > 0
+                {
+                    // The same playlist mix the sidebar starts for albums.
+                    self.mix_request = None;
+                    self.track_menu_error = None;
+                    self.load_mix_from(
+                        &ctx,
+                        true,
+                        Some(MixSeed::Playlist((reference.owner_id, reference.id))),
                     );
                 }
             }
