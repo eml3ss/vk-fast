@@ -286,32 +286,88 @@ impl MusicApp {
         );
         ui.add_space(6.0);
         let (mut player, mut lists) = (self.track_buttons_player, self.track_buttons_lists);
-        egui::Grid::new("track-buttons")
-            .num_columns(3)
-            .spacing(egui::vec2(18.0, 8.0))
-            .show(ui, |ui| {
-                ui.label("");
-                ui.label(RichText::new(language.text("В плеере", "In the player")).small());
-                ui.label(RichText::new(language.text("В списках", "In lists")).small());
-                ui.end_row();
-                for button in Button::ALL {
-                    ui.horizontal(|ui| {
-                        crate::icons::show(ui, button.icon(), theme::muted(), 16.0);
-                        ui.label(button.label(language));
-                    });
-                    for set in [&mut player, &mut lists] {
-                        let mut shown = set.has(button);
-                        if ui
-                            .add(egui::Checkbox::without_text(&mut shown))
-                            .on_hover_text(button.label(language))
-                            .changed()
-                        {
-                            *set = set.with(button, shown);
-                        }
-                    }
-                    ui.end_row();
+        // Laid out by hand: each place is a fixed column, its heading and
+        // its boxes centred on the same line.
+        const PLACE: f32 = 100.0;
+        const ROW: f32 = 32.0;
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        let names = ui.fonts_mut(|fonts| {
+            Button::ALL
+                .iter()
+                .map(|button| {
+                    fonts
+                        .layout_no_wrap(button.label(language).into(), body.clone(), Color32::WHITE)
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
+        });
+        let names = 16.0 + 10.0 + names + 20.0;
+        let places = [
+            (
+                language.text("В плеере", "In the player"),
+                language.text("в плеере", "in the player"),
+            ),
+            (
+                language.text("В списках", "In lists"),
+                language.text("в списках", "in lists"),
+            ),
+        ];
+        let (header, _) =
+            ui.allocate_exact_size(egui::vec2(names + PLACE * 2.0, 18.0), egui::Sense::hover());
+        for (index, (heading, _)) in places.iter().enumerate() {
+            ui.painter().text(
+                egui::pos2(
+                    header.left() + names + PLACE * (index as f32 + 0.5),
+                    header.center().y,
+                ),
+                egui::Align2::CENTER_CENTER,
+                *heading,
+                small.clone(),
+                theme::muted(),
+            );
+        }
+        for button in Button::ALL {
+            let (row, _) =
+                ui.allocate_exact_size(egui::vec2(names + PLACE * 2.0, ROW), egui::Sense::hover());
+            crate::icons::paint(
+                ui.painter(),
+                egui::Rect::from_center_size(
+                    row.left_center() + egui::vec2(8.0, 0.0),
+                    egui::vec2(16.0, 16.0),
+                ),
+                button.icon(),
+                theme::muted(),
+            );
+            ui.painter().text(
+                row.left_center() + egui::vec2(26.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                button.label(language),
+                body.clone(),
+                ui.visuals().text_color(),
+            );
+            for (index, (_, place)) in places.iter().enumerate() {
+                let set = if index == 0 { &mut player } else { &mut lists };
+                let mut shown = set.has(button);
+                let label = format!("{} {place}", button.label(language));
+                let cell = egui::Rect::from_center_size(
+                    egui::pos2(
+                        row.left() + names + PLACE * (index as f32 + 0.5),
+                        row.center().y,
+                    ),
+                    egui::vec2(22.0, 22.0),
+                );
+                let changed = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                        theme::check(ui, &mut shown, &label).changed()
+                    })
+                    .inner;
+                if changed {
+                    *set = set.with(button, shown);
                 }
-            });
+            }
+        }
         if (player, lists) != (self.track_buttons_player, self.track_buttons_lists) {
             self.track_buttons_player = player;
             self.track_buttons_lists = lists;

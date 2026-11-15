@@ -408,6 +408,18 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
         action = Some(Action::Album);
     }
     separator(ui);
+    if row(
+        ui,
+        Icon::Save,
+        language.text("Скачать", "Download"),
+        view.connected && view.track.unavailable != Some(true) && !view.downloading,
+        false,
+        view.downloading,
+    )
+    .clicked()
+    {
+        action = Some(Action::Download);
+    }
     let response = row(
         ui,
         Icon::Copy,
@@ -450,18 +462,6 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     .clicked()
     {
         action = Some(Action::CopyLink);
-    }
-    if row(
-        ui,
-        Icon::Save,
-        language.text("Скачать", "Download"),
-        view.connected && view.track.unavailable != Some(true) && !view.downloading,
-        false,
-        view.downloading,
-    )
-    .clicked()
-    {
-        action = Some(Action::Download);
     }
     if action.is_some() {
         ui.close();

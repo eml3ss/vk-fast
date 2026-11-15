@@ -146,8 +146,8 @@ fn the_player_and_lists_choose_their_buttons_separately_in_settings() {
     };
     let download = text("Download").expect("the Download row");
     let lists = text("In lists").expect("the lists column");
-    // The checkbox in the Download row under "In lists".
-    let at = egui::pos2(lists.left() + 9.0, download.center().y);
+    // The check box in the Download row, centred under "In lists".
+    let at = egui::pos2(lists.center().x, download.center().y);
     for pressed in [true, false] {
         frame(
             &mut app,
@@ -167,4 +167,16 @@ fn the_player_and_lists_choose_their_buttons_separately_in_settings() {
         !app.track_buttons_player.has(Button::Download),
         "only lists"
     );
+    // A check box is the app's own: a rounded square, accent when on.
+    let output = frame(&mut app, Vec::new());
+    let boxes: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(22.0, 22.0) => Some(rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boxes.len(), 8, "four buttons, two places");
+    assert!(boxes.iter().all(|rect| rect.corner_radius == 7.0.into()));
 }

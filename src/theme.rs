@@ -389,6 +389,65 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A check box in the switches' style: a rounded square, grey when off and
+/// filled with the accent when on, where a rounded check draws itself in.
+/// `label` is for screen readers and the tooltip; nothing is written beside it.
+pub fn check(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    const SIZE: f32 = 22.0;
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
+    });
+    let progress = ui.ctx().animate_bool_responsive(response.id, *value);
+    let hovered = response.hovered() || response.has_focus();
+    let off = tone(if hovered {
+        Color32::from_rgb(62, 70, 83)
+    } else {
+        Color32::from_rgb(49, 56, 67)
+    });
+    let on = if hovered { accent() } else { primary() };
+    let fill = lerp_color(off, on, progress);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 7.0, fill);
+    if progress > 0.0 {
+        // The check is drawn along its path as the box turns on.
+        let point = |x: f32, y: f32| rect.min + egui::vec2(x, y) * SIZE;
+        let path = [point(0.27, 0.52), point(0.43, 0.67), point(0.74, 0.35)];
+        let first = path[0].distance(path[1]);
+        let second = path[1].distance(path[2]);
+        let drawn = (first + second) * progress;
+        let mut points = vec![path[0]];
+        if drawn <= first {
+            points.push(path[0] + (path[1] - path[0]) * (drawn / first));
+        } else {
+            points.push(path[1]);
+            points.push(path[1] + (path[2] - path[1]) * ((drawn - first) / second));
+        }
+        let color = on_fill(on, Color32::WHITE);
+        let stroke = egui::Stroke::new(2.2, color);
+        painter.add(egui::Shape::line(points.clone(), stroke));
+        // Round ends and joint: the line's own caps are square.
+        for point in points {
+            painter.circle_filled(point, 1.1, color);
+        }
+    }
+    let label = label.to_owned();
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
+fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {
+    let (a, b) = (from.to_array(), to.to_array());
+    let [r, g, bl, al] =
+        std::array::from_fn(|i| egui::lerp(f32::from(a[i])..=f32::from(b[i]), t).round() as u8);
+    Color32::from_rgba_premultiplied(r, g, bl, al)
+}
+
 /// egui's slider for settings, with its upright rounded handle in white and
 /// the passed part of the rail filled with the accent blue, ending under the
 /// handle.
