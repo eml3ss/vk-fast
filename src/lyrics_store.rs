@@ -18,18 +18,26 @@ pub enum Source {
     /// A new install starts here: open, with timed lyrics, no account.
     #[default]
     Lrclib,
+    NetEase,
 }
 impl Source {
     /// Every source, in the order fallbacks are asked (Genius, which never
     /// has timing, last).
-    pub const ALL: [Self; 4] = [Self::Vk, Self::Musixmatch, Self::Lrclib, Self::Genius];
+    pub const ALL: [Self; 5] = [
+        Self::Vk,
+        Self::Musixmatch,
+        Self::Lrclib,
+        Self::NetEase,
+        Self::Genius,
+    ];
 
     pub(super) fn index(self) -> usize {
         match self {
             Self::Vk => 0,
             Self::Musixmatch => 1,
             Self::Lrclib => 2,
-            Self::Genius => 3,
+            Self::NetEase => 3,
+            Self::Genius => 4,
         }
     }
 
@@ -39,6 +47,7 @@ impl Source {
             Self::Vk => "VK",
             Self::Genius => "Genius",
             Self::Lrclib => "LRCLIB",
+            Self::NetEase => "NetEase",
         }
     }
 }
@@ -66,6 +75,11 @@ pub(super) struct Config {
     pub genius_retry_after: u64,
     #[serde(default)]
     pub lrclib_retry_after: u64,
+    /// NetEase Cloud Music. On by default.
+    #[serde(default = "genius_fallback_default")]
+    pub fallback_to_netease: bool,
+    #[serde(default)]
+    pub netease_retry_after: u64,
     #[serde(default)]
     pub vk_retry_after: u64,
     /// The retired personal API key option: read so older files still load,
@@ -104,6 +118,8 @@ impl Default for Config {
             fallback_to_lrclib: genius_fallback_default(),
             genius_retry_after: 0,
             lrclib_retry_after: 0,
+            fallback_to_netease: genius_fallback_default(),
+            netease_retry_after: 0,
             vk_retry_after: 0,
             retired_mode: None,
             retired_key: None,
@@ -129,7 +145,7 @@ pub struct Status {
     pub source: Source,
     /// Whether each source is asked when the chosen one has nothing, by
     /// `Source::index`.
-    pub fallbacks: [bool; 4],
+    pub fallbacks: [bool; 5],
     pub token_ready: bool,
     pub token_rejected: bool,
     pub token_retry_after: u64,
@@ -181,6 +197,7 @@ impl Config {
                 .or(self.fallback_to_other)
                 .unwrap_or(true),
             Source::Lrclib => self.fallback_to_lrclib,
+            Source::NetEase => self.fallback_to_netease,
             Source::Genius => self.fallback_to_genius,
         }
     }
@@ -190,6 +207,7 @@ impl Config {
             Source::Vk => self.fallback_to_vk = Some(enabled),
             Source::Musixmatch => self.fallback_to_musixmatch = Some(enabled),
             Source::Lrclib => self.fallback_to_lrclib = enabled,
+            Source::NetEase => self.fallback_to_netease = enabled,
             Source::Genius => self.fallback_to_genius = enabled,
         }
     }
@@ -203,6 +221,7 @@ impl Config {
             Source::Vk => self.vk_retry_after,
             Source::Genius => self.genius_retry_after,
             Source::Lrclib => self.lrclib_retry_after,
+            Source::NetEase => self.netease_retry_after,
             Source::Musixmatch => self.anonymous_retry_after,
         }
     }

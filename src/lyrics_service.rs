@@ -287,13 +287,13 @@ impl Service {
 }
 
 /// Timed lyrics first, plain ones only when no source has timing: the
-/// chosen source, then VK, Musixmatch and LRCLIB as enabled, each asked
+/// chosen source, then VK, Musixmatch, LRCLIB and NetEase as enabled, each asked
 /// once and kept if its lyrics are timed (or an instrumental). With none
 /// timed, the first plain lyrics in that order, and only then Genius, which
 /// never has timing. With nothing found, the chosen source's error is kept.
 fn resolve_sources(
     source: Source,
-    fallbacks: [bool; 4],
+    fallbacks: [bool; 5],
     canceled: &impl Fn() -> bool,
     mut fetch: impl FnMut(Source) -> Result<Arc<Lyrics>, Error>,
 ) -> Result<Arc<Lyrics>, Error> {
@@ -384,6 +384,7 @@ fn fetch_source_now(
     let retry = match source {
         Source::Genius => config.genius_retry_after,
         Source::Lrclib => config.lrclib_retry_after,
+        Source::NetEase => config.netease_retry_after,
         Source::Vk => config.vk_retry_after,
         Source::Musixmatch => config.anonymous_retry_after,
     };
@@ -403,6 +404,7 @@ fn fetch_source_now(
         }),
         Source::Genius => provider.genius(&request.query, canceled),
         Source::Lrclib => provider.lrclib(&request.query, canceled),
+        Source::NetEase => provider.netease(&request.query, canceled),
         Source::Vk => request.vk.as_ref().ok_or(Error::NoSession).and_then(|vk| {
             if cfg!(test) {
                 return Err(Error::NotFound);
@@ -427,6 +429,7 @@ fn fetch_source_now(
             let slot = match source {
                 Source::Genius => &mut config.genius_retry_after,
                 Source::Lrclib => &mut config.lrclib_retry_after,
+                Source::NetEase => &mut config.netease_retry_after,
                 Source::Vk => &mut config.vk_retry_after,
                 Source::Musixmatch => &mut config.anonymous_retry_after,
             };
@@ -611,11 +614,11 @@ mod tests {
         assert_eq!((calls, result.unwrap_err()), (1, Error::Canceled));
     }
 
-    /// Fallbacks by `Source::ALL`: VK, Musixmatch, LRCLIB, Genius.
-    fn only(genius: bool) -> [bool; 4] {
-        [false, false, false, genius]
+    /// Fallbacks by `Source::ALL`: VK, Musixmatch, LRCLIB, NetEase, Genius.
+    fn only(genius: bool) -> [bool; 5] {
+        [false, false, false, false, genius]
     }
-    const ALL: [bool; 4] = [true; 4];
+    const ALL: [bool; 5] = [true; 5];
 
     #[test]
     fn genius_fallback_is_opt_in_runs_once_and_respects_cancellation() {
@@ -665,9 +668,14 @@ mod tests {
             let lrclib = (source != Source::Lrclib).then_some(Source::Lrclib);
             let synced_order: Vec<Source> = std::iter::once(source)
                 .chain(
-                    [Source::Vk, Source::Musixmatch, Source::Lrclib]
-                        .into_iter()
-                        .filter(|asked| *asked != source),
+                    [
+                        Source::Vk,
+                        Source::Musixmatch,
+                        Source::Lrclib,
+                        Source::NetEase,
+                    ]
+                    .into_iter()
+                    .filter(|asked| *asked != source),
                 )
                 .collect();
             // Each timed source in turn: the ones before it are asked, the
@@ -726,11 +734,24 @@ mod tests {
         }
         // LRCLIB off: it is not asked.
         let mut calls = Vec::new();
-        let _ = resolve_sources(Source::Vk, [true, true, false, true], &|| false, |asked| {
-            calls.push(asked);
-            Err(Error::NotFound)
-        });
-        assert_eq!(calls, [Source::Vk, Source::Musixmatch, Source::Genius]);
+        let _ = resolve_sources(
+            Source::Vk,
+            [true, true, false, true, true],
+            &|| false,
+            |asked| {
+                calls.push(asked);
+                Err(Error::NotFound)
+            },
+        );
+        assert_eq!(
+            calls,
+            [
+                Source::Vk,
+                Source::Musixmatch,
+                Source::NetEase,
+                Source::Genius
+            ]
+        );
     }
 
     #[test]

@@ -510,8 +510,8 @@ impl MusicApp {
         ui.label(t("Источник текстов", "Lyrics source"));
         ui.label(
             RichText::new(t(
-                "VK, Musixmatch и LRCLIB дают текст с таймкодами, если он есть. Genius — обычный текст.",
-                "VK, Musixmatch and LRCLIB give timed lyrics when they have them. Genius provides plain lyrics.",
+                "VK, Musixmatch, LRCLIB и NetEase дают текст с таймкодами, если он есть. Genius — обычный текст.",
+                "VK, Musixmatch, LRCLIB and NetEase give timed lyrics when they have them. Genius provides plain lyrics.",
             ))
             .small()
             .color(theme::muted()),
@@ -521,6 +521,7 @@ impl MusicApp {
             .show_ui(ui, |ui| {
                 for item in [
                     Source::Lrclib,
+                    Source::NetEase,
                     Source::Vk,
                     Source::Musixmatch,
                     Source::Genius,
@@ -548,6 +549,10 @@ impl MusicApp {
                 Source::Lrclib => t(
                     "Искать в LRCLIB, если текст недоступен",
                     "Fallback to LRCLIB",
+                ),
+                Source::NetEase => t(
+                    "Искать в NetEase, если текст недоступен",
+                    "Fallback to NetEase",
                 ),
                 Source::Genius => t(
                     "Искать в Genius, если текст недоступен",

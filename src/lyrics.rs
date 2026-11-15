@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 mod genius;
 #[path = "lyrics_lrclib.rs"]
 mod lrclib;
+#[path = "lyrics_netease.rs"]
+mod netease;
 #[path = "lyrics_service.rs"]
 mod service;
 #[path = "lyrics_store.rs"]
