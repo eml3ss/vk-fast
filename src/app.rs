@@ -957,6 +957,17 @@ struct ResolvedTrack {
     cache_key: CacheKey,
 }
 
+/// How long the seek bar waits on the network before its loading glow
+/// shows: the cache check before a link request, and a start from stored
+/// chunks, take less.
+const LOADING_GLOW_DELAY: f64 = 0.2;
+
+/// Whether the player waits on VK: a link being found, or a track that
+/// streams from VK buffering. A track the cache keeps whole never does.
+fn waits_on_network(playing: bool, resolving: bool, state: &PlaybackState, offline: bool) -> bool {
+    playing && (resolving || (*state == PlaybackState::Loading && !offline))
+}
+
 /// Where a background resolve hands over its track's audio.
 type ResolveReceiver = Receiver<Result<ResolvedTrack, UiError>>;
 
@@ -1378,6 +1389,13 @@ pub struct MusicApp {
     updater: update_app::State,
     playing: Option<Track>,
     playback_pending: Option<Receiver<Result<ResolvedTrack, UiError>>>,
+    /// The current track plays from the audio cache, without a link: its
+    /// loading needs no network, so the seek bar shows no loading glow.
+    playing_offline: bool,
+    /// Since when the seek bar has been waiting on the network; the glow
+    /// shows only after `LOADING_GLOW_DELAY`, so a quick start never
+    /// flashes it.
+    loading_since: Option<f64>,
     playback_cancel: Option<Arc<AtomicBool>>,
     playback_error: Option<UiError>,
     logged_playback_failure: Option<PlaybackError>,
@@ -1859,6 +1877,8 @@ impl MusicApp {
             },
             playing: None,
             playback_pending: None,
+            playing_offline: false,
+            loading_since: None,
             playback_cancel: None,
             playback_error: None,
             logged_playback_failure: None,
@@ -3338,6 +3358,7 @@ impl MusicApp {
                         if self.broadcast {
                             self.send_broadcast(Some(resolved.track.key()));
                         }
+                        self.playing_offline = resolved.url.is_none();
                         let position = self.resume_position.take().unwrap_or(0.0);
                         if position == 0.0 && self.crossfading() {
                             crate::diagnostics::event(
@@ -10274,9 +10295,28 @@ impl MusicApp {
                             | PlaybackState::Loading
                             | PlaybackState::Ended
                     );
-                // Fetching the link, or buffering before the first sound.
-                let loading = self.playing.is_some()
-                    && (resolving || snapshot.state == PlaybackState::Loading);
+                // Fetching the link, or buffering from VK before the first
+                // sound; a track the cache keeps whole loads from disk.
+                let waiting = waits_on_network(
+                    self.playing.is_some(),
+                    resolving,
+                    &snapshot.state,
+                    self.playing_offline,
+                );
+                let now = ui.input(|input| input.time);
+                let since = if waiting {
+                    *self.loading_since.get_or_insert(now)
+                } else {
+                    self.loading_since = None;
+                    now
+                };
+                let loading = waiting && now - since >= LOADING_GLOW_DELAY;
+                if waiting && !loading {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs_f64(
+                            (LOADING_GLOW_DELAY - (now - since)).max(0.0),
+                        ));
+                }
                 let gap = PLAYER_TIME_GAP;
                 let elapsed_rect = egui::Rect::from_min_size(
                     seek_row.min,
@@ -13429,6 +13469,8 @@ mod tests {
             updater: update_app::State::default(),
             playing: None,
             playback_pending: None,
+            playing_offline: false,
+            loading_since: None,
             playback_cancel: None,
             playback_error: None,
             logged_playback_failure: None,
@@ -14731,6 +14773,65 @@ mod tests {
                 "Returning to a window size must restore the same layout"
             );
         }
+    }
+
+    #[test]
+    fn the_seek_bar_glows_only_while_waiting_on_vk_and_not_at_once() {
+        // Buffering from VK waits on the network; from the cache it doesn't.
+        assert!(waits_on_network(
+            true,
+            false,
+            &PlaybackState::Loading,
+            false
+        ));
+        assert!(!waits_on_network(
+            true,
+            false,
+            &PlaybackState::Loading,
+            true
+        ));
+        assert!(waits_on_network(true, true, &PlaybackState::Stopped, true));
+        assert!(!waits_on_network(
+            true,
+            false,
+            &PlaybackState::Playing,
+            false
+        ));
+        assert!(!waits_on_network(
+            false,
+            true,
+            &PlaybackState::Loading,
+            false
+        ));
+
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        let mut track = page(1, &[1]).items.remove(0);
+        track.duration = 263;
+        app.playing = Some(track);
+        // A link being found, with no answer yet.
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        app.playback_pending = Some(receiver);
+        let size = egui::vec2(1040.0, 720.0);
+        let glows = |output: &egui::FullOutput| {
+            let seek = seek_track_in_player(output, size.y);
+            account_ui_shapes(output).into_iter().any(|shape| {
+                matches!(shape, egui::Shape::Mesh(mesh)
+                    if !mesh.vertices.is_empty()
+                        && seek.expand(0.01).contains_rect(mesh.calc_bounds()))
+            })
+        };
+        let mut frame = 0;
+        // 0.1 s in: a quick start (a cached track) would be playing by now.
+        let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        let output2 = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        assert!(!glows(&output) && !glows(&output2));
+        let mut output = output2;
+        for _ in 0..4 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert!(glows(&output), "still waiting: the glow shows");
     }
 
     #[test]
