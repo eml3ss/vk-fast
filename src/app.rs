@@ -968,6 +968,10 @@ fn waits_on_network(playing: bool, resolving: bool, state: &PlaybackState, offli
     playing && (resolving || (*state == PlaybackState::Loading && !offline))
 }
 
+/// The gap between the settings list (and its scrollbar) and the search
+/// field above it, and the window's bottom below it.
+const SETTINGS_EDGE: f32 = 18.0;
+
 /// Where a background resolve hands over its track's audio.
 type ResolveReceiver = Receiver<Result<ResolvedTrack, UiError>>;
 
@@ -11051,6 +11055,9 @@ impl MusicApp {
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.set_max_width(ui.available_width().min(640.0));
         settings_search::input(ui, &mut self.settings_query, language);
+        // The list, and its scrollbar, start as far under the search field
+        // as they end above the window's bottom.
+        ui.add_space(SETTINGS_EDGE);
         let query = SettingsQuery::new(&self.settings_query);
         let searching = !query.is_empty();
         let scroll_key = self.settings_query.trim().to_lowercase();
@@ -11068,8 +11075,12 @@ impl MusicApp {
                     {
                         continue;
                     }
+                    // The list's own gap from the field is enough above the
+                    // first heading.
+                    if found {
+                        ui.add_space(18.0);
+                    }
                     found = true;
-                    ui.add_space(18.0);
                     let title = section.title(language);
                     let color = ui.visuals().text_color();
                     let galley = ui.painter().layout_no_wrap(
@@ -12442,7 +12453,11 @@ impl MusicApp {
                         } else {
                             16
                         },
-                        bottom: if self.settings_open { 24 } else { 0 },
+                        bottom: if self.settings_open {
+                            SETTINGS_EDGE as i8
+                        } else {
+                            0
+                        },
                     }),
             )
             .show(ui, |ui| {
@@ -14890,6 +14905,52 @@ mod tests {
                 assert!(account_ui_text_rect(&output, "4:23").is_some());
             }
         }
+    }
+
+    #[test]
+    fn the_settings_scrollbar_keeps_the_same_gap_above_and_below() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::English);
+        app.settings_open = true;
+        app.settings_section = SettingsSection::Interface;
+        let size = egui::vec2(1040.0, 720.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..4 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let rects: Vec<egui::Rect> = account_ui_shapes(&output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Rect(rect) => Some(rect.rect),
+                _ => None,
+            })
+            .collect();
+        // The page under the header, the search field, and the scrollbar's
+        // track at the right of the list.
+        let page = rects
+            .iter()
+            .find(|rect| rect.width() > 600.0 && rect.height() > 400.0)
+            .unwrap();
+        let field = rects
+            .iter()
+            .find(|rect| {
+                (rect.height() - 38.0).abs() < 0.5
+                    && rect.width() > 300.0
+                    && rect.top() > page.top()
+            })
+            .unwrap();
+        let bar = rects
+            .iter()
+            .filter(|rect| {
+                rect.width() <= 10.0 && rect.height() > 100.0 && rect.left() > field.left()
+            })
+            .max_by(|a, b| a.height().total_cmp(&b.height()))
+            .expect("a scrollbar: the section is longer than the window");
+        let above = bar.top() - field.bottom();
+        let below = page.bottom() - bar.bottom();
+        assert!((above - below).abs() < 0.5, "{above} above, {below} below");
+        assert!((above - SETTINGS_EDGE).abs() < 0.5, "{above}");
     }
 
     #[test]
