@@ -5375,7 +5375,8 @@ impl MusicApp {
                     }
                     if self.popular_searches {
                         if history {
-                            ui.add_space(14.0);
+                            // As far below the recent searches as they are below the search field.
+                            ui.add_space(10.0);
                         }
                         let error = self
                             .search
@@ -11771,6 +11772,14 @@ impl MusicApp {
                         t("Популярные запросы", "Popular searches"),
                     )
                     .changed();
+                    ui.label(
+                        RichText::new(t(
+                            "Что сейчас ищут в VK — на пустой странице поиска, под недавними запросами.",
+                            "What people search for on VK now, on the empty search page under recent searches.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
                     if history_changed || popular_changed {
                         self.set_search_lists(history, popular);
                     }
@@ -18245,6 +18254,60 @@ mod tests {
         assert_eq!(app.search.input, "Second popular query");
         assert!(matches!(&app.page, MusicPage::Search(query) if query == "Second popular query"));
         assert!(app.playing.is_none());
+    }
+
+    #[test]
+    fn popular_searches_sit_as_far_below_recent_ones_as_recent_ones_below_search() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        app.demo = false;
+        app.open_search(&ctx, None);
+        app.search.popular = vec!["Popular query".into()];
+        app.search.popular_requested = true;
+        app.search.history_owner = Some(42);
+        app.search.history = vec!["Older search".into(), "Oldest search".into()];
+        let size = egui::vec2(1040.0, 720.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let shapes = account_ui_shapes(&output);
+        let text = |label: &str| {
+            shapes
+                .iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        // The search field and the last recent search: rounded boxes
+        // around their texts.
+        let around = |inner: egui::Rect| {
+            shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect)
+                        if rect.rect.contains_rect(inner) && rect.rect.height() >= 30.0 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .min_by(|a, b| a.area().total_cmp(&b.area()))
+                .unwrap()
+        };
+        let field = around(text("Tracks, artists, albums, playlists"));
+        let last = around(text("Oldest search"));
+        let above_recent = text("Recent searches").top() - field.bottom();
+        let above_popular = text("Popular searches").top() - last.bottom();
+        assert!(
+            (above_recent - above_popular).abs() < 0.5,
+            "{above_recent} above recent, {above_popular} above popular"
+        );
     }
 
     #[test]
