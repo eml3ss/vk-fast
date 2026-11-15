@@ -90,15 +90,15 @@ impl MusicApp {
                     .map_err(|_| ())?;
                     let mut file = tempfile::NamedTempFile::new_in(&dir).map_err(|_| ())?;
                     let source = audio.as_file_mut();
-                    source.seek(std::io::SeekFrom::Start(0)).map_err(|_| ())?;
-                    let mut head = [0; 3];
-                    let tagged = source.read_exact(&mut head).is_ok() && &head == b"ID3";
-                    source.seek(std::io::SeekFrom::Start(0)).map_err(|_| ())?;
-                    if extension == "mp3" && !tagged {
-                        let cover = cover_url.as_deref().and_then(|url| {
-                            crate::cover_art::stored(&disk, url)
-                                .or_else(|| crate::cover_art::original(&disk, url).ok())
-                        });
+                    // MP3 and AAC get our tag in place of VK's (which names
+                    // only the encoder); an M4A keeps its own atoms.
+                    let (start, end) = if matches!(extension, "mp3" | "aac") {
+                        let range = crate::downloads::audio_range(source).map_err(|_| ())?;
+                        // The full-size cover from VK, else the largest kept.
+                        let cover = cover_url
+                            .as_deref()
+                            .and_then(|url| crate::cover_art::original(&disk, url).ok())
+                            .and_then(crate::downloads::tag_cover);
                         let tag = crate::downloads::id3(&crate::downloads::Tags {
                             title: &title,
                             artist: &artist,
@@ -106,8 +106,15 @@ impl MusicApp {
                             cover: cover.as_deref(),
                         });
                         file.write_all(&tag).map_err(|_| ())?;
-                    }
-                    std::io::copy(source, file.as_file_mut()).map_err(|_| ())?;
+                        range
+                    } else {
+                        (0, source.seek(std::io::SeekFrom::End(0)).map_err(|_| ())?)
+                    };
+                    source
+                        .seek(std::io::SeekFrom::Start(start))
+                        .map_err(|_| ())?;
+                    std::io::copy(&mut (&mut *source).take(end - start), file.as_file_mut())
+                        .map_err(|_| ())?;
                     file.as_file_mut().sync_all().map_err(|_| ())?;
                     let name = crate::downloads::file_name(&artist, &title, extension);
                     crate::downloads::place(file, &dir, &name).map_err(|_| ())

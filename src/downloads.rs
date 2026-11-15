@@ -1,8 +1,9 @@
 //! Saving tracks to the user's folder: the system's Downloads folder unless
-//! the user picks another, a file name from the track, and an ID3 tag with
-//! the title, artists, album and cover for MP3 files that have none.
+//! the user picks another, a file name from the track, and our own ID3 tag
+//! with the title, artists, album and cover in place of whatever tag VK's
+//! file came with (often only its encoder's name).
 use std::{
-    io,
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -197,6 +198,61 @@ pub fn id3(tags: &Tags<'_>) -> Vec<u8> {
     tag
 }
 
+/// Where the audio of an MP3 or AAC file lies: after any ID3v2 tags at
+/// its start and before an ID3v1 tag at its end. VK's files carry a tag
+/// naming only the encoder, which players show as an unknown artist.
+pub fn audio_range<R: Read + Seek>(source: &mut R) -> io::Result<(u64, u64)> {
+    let length = source.seek(SeekFrom::End(0))?;
+    let mut start = 0;
+    // Each ID3v2 tag: "ID3", version, flags, then a size in seven-bit bytes.
+    loop {
+        source.seek(SeekFrom::Start(start))?;
+        let mut header = [0; 10];
+        if source.read_exact(&mut header).is_err()
+            || &header[..3] != b"ID3"
+            || header[6..10].iter().any(|byte| byte & 0x80 != 0)
+        {
+            break;
+        }
+        let size = header[6..10]
+            .iter()
+            .fold(0u64, |size, byte| (size << 7) | u64::from(*byte));
+        // A footer repeats the header after the frames.
+        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+        let next = start + 10 + size + footer;
+        if next >= length {
+            break;
+        }
+        start = next;
+    }
+    let mut end = length;
+    if length >= start + 128 {
+        source.seek(SeekFrom::Start(length - 128))?;
+        let mut tag = [0; 3];
+        if source.read_exact(&mut tag).is_ok() && &tag == b"TAG" {
+            end = length - 128;
+        }
+    }
+    source.seek(SeekFrom::Start(start))?;
+    Ok((start, end))
+}
+
+/// A cover every player shows: JPEG and PNG as they are, anything else
+/// (VK also serves WebP) turned into a JPEG. `None` if it is no picture.
+pub fn tag_cover(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    match image::guess_format(&bytes).ok()? {
+        image::ImageFormat::Jpeg | image::ImageFormat::Png => Some(bytes),
+        _ => {
+            let picture = image::load_from_memory(&bytes).ok()?.into_rgb8();
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 92)
+                .encode_image(&picture)
+                .ok()?;
+            Some(jpeg)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +291,47 @@ mod tests {
         assert_eq!(a.file_name().unwrap(), "x.mp3");
         assert_eq!(b.file_name().unwrap(), "x (2).mp3");
         assert_eq!(std::fs::read(a).unwrap(), b"one");
+    }
+
+    #[test]
+    fn vks_own_tags_are_left_out_and_only_the_audio_is_kept() {
+        // An ID3v2.4 tag naming only the encoder, the audio, an ID3v1 tag.
+        let mut file = b"ID3\x04\x00\x00\x00\x00\x00\x0aTSSE..Lavf".to_vec();
+        file.extend_from_slice(b"\xff\xfbAUDIO-FRAMES");
+        let mut v1 = b"TAG".to_vec();
+        v1.resize(128, 0);
+        file.extend_from_slice(&v1);
+        let (start, end) = audio_range(&mut io::Cursor::new(&file)).unwrap();
+        assert_eq!(&file[start as usize..end as usize], b"\xff\xfbAUDIO-FRAMES");
+        // Untagged audio stays whole.
+        let plain = b"\xff\xfbONLY-AUDIO".to_vec();
+        assert_eq!(
+            audio_range(&mut io::Cursor::new(&plain)).unwrap(),
+            (0, plain.len() as u64)
+        );
+        // Two tags in a row, the first with a footer.
+        let mut two = b"ID3\x04\x00\x10\x00\x00\x00\x02ab3DI\x04\x00\x10\x00\x00\x00\x02".to_vec();
+        two.extend_from_slice(b"ID3\x03\x00\x00\x00\x00\x00\x01x");
+        two.extend_from_slice(b"\xff\xfbREST");
+        let (start, end) = audio_range(&mut io::Cursor::new(&two)).unwrap();
+        assert_eq!(&two[start as usize..end as usize], b"\xff\xfbREST");
+    }
+
+    #[test]
+    fn a_webp_cover_becomes_a_jpeg_and_jpeg_and_png_stay_as_they_are() {
+        let picture = image::RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 90]));
+        let mut webp = Vec::new();
+        image::DynamicImage::ImageRgb8(picture)
+            .write_to(&mut io::Cursor::new(&mut webp), image::ImageFormat::WebP)
+            .unwrap();
+        let cover = tag_cover(webp).unwrap();
+        assert_eq!(
+            image::guess_format(&cover).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let jpeg = b"\xff\xd8\xff\xe0 synthetic".to_vec();
+        assert_eq!(tag_cover(jpeg.clone()), Some(jpeg));
+        assert_eq!(tag_cover(b"not a picture".to_vec()), None);
     }
 
     #[test]
