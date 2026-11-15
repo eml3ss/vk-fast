@@ -697,30 +697,107 @@ const MIX_COLORS: [Color32; 4] = [
 ];
 
 /// VK Mix's colors with the left shade laid over them, sampled finely
-/// enough (on every original stop too) to keep both gradients' shape.
+/// enough to keep both gradients' shape. The straight blend between stops
+/// turned sharply at each of them and showed as bands; it is now mixed in
+/// OKLab (no dull middles) and softened by a Gaussian a third of a segment
+/// wide, which rounds every turn without stalling at a stop (a curve forced
+/// through the stops lingered at the cyan between two similar purples). The
+/// shade fades out along an S-curve for the same reason.
 fn shaded_mix_colors() -> Vec<Color32> {
-    const SAMPLES: usize = 16 * (MIX_COLORS.len() - 1) + 1;
+    const PER_STOP: usize = 32;
+    const SAMPLES: usize = PER_STOP * (MIX_COLORS.len() - 1) + 1;
     let shade = crate::detail_ui::fade_color(Some(MIX_COLORS[0])).to_array();
-    let lerp = |a: [u8; 4], b: [u8; 4], t: f32| -> [f32; 4] {
-        std::array::from_fn(|i| egui::lerp(f32::from(a[i])..=f32::from(b[i]), t))
-    };
+    let stops = MIX_COLORS.map(|color| oklab(color.to_array()));
+    let straight: Vec<[f32; 3]> = (0..SAMPLES)
+        .map(|sample| {
+            let position = sample as f32 / PER_STOP as f32;
+            let index = (position.floor() as usize).min(MIX_COLORS.len() - 2);
+            let t = position - index as f32;
+            std::array::from_fn(|i| egui::lerp(stops[index][i]..=stops[index + 1][i], t))
+        })
+        .collect();
+    let sigma = PER_STOP as f32 / 3.0;
+    let reach = (sigma * 3.0) as isize;
+    let weights: Vec<f32> = (-reach..=reach)
+        .map(|offset| (-(offset as f32).powi(2) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let total: f32 = weights.iter().sum();
     (0..SAMPLES)
         .map(|sample| {
+            // Past an end the line continues mirrored through it, so the
+            // ends keep their own colors exactly.
+            let last = SAMPLES as isize - 1;
+            let lab: [f32; 3] = std::array::from_fn(|i| {
+                (-reach..=reach)
+                    .zip(&weights)
+                    .map(|(offset, weight)| {
+                        let at = sample as isize + offset;
+                        let value = if at < 0 {
+                            2.0 * straight[0][i] - straight[(-at) as usize][i]
+                        } else if at > last {
+                            2.0 * straight[last as usize][i] - straight[(2 * last - at) as usize][i]
+                        } else {
+                            straight[at as usize][i]
+                        };
+                        value * weight
+                    })
+                    .sum::<f32>()
+                    / total
+            });
+            let base = srgb(lab);
             let x = sample as f32 / (SAMPLES - 1) as f32;
-            let position = x * (MIX_COLORS.len() - 1) as f32;
-            let index = (position.floor() as usize).min(MIX_COLORS.len() - 2);
-            let base = lerp(
-                MIX_COLORS[index].to_array(),
-                MIX_COLORS[index + 1].to_array(),
-                position - index as f32,
-            );
             // Premultiplied "over", as the shade drawn on top would blend.
-            let over = lerp(shade, [0; 4], x);
+            let fade = x * x * (3.0 - 2.0 * x);
+            let over: [f32; 4] = std::array::from_fn(|i| f32::from(shade[i]) * (1.0 - fade));
             let keep = 1.0 - over[3] / 255.0;
-            let [r, g, b, a] = std::array::from_fn(|i| (over[i] + base[i] * keep).round() as u8);
-            Color32::from_rgba_premultiplied(r, g, b, a)
+            let [r, g, b] = std::array::from_fn(|i| (over[i] + base[i] * keep).round() as u8);
+            Color32::from_rgba_premultiplied(r, g, b, 255)
         })
         .collect()
+}
+
+fn linear(channel: u8) -> f32 {
+    let c = f32::from(channel) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn gamma(channel: f32) -> f32 {
+    let c = channel.clamp(0.0, 1.0);
+    255.0
+        * if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+}
+
+/// An opaque sRGB color in OKLab (Björn Ottosson's matrices).
+fn oklab([r, g, b, _]: [u8; 4]) -> [f32; 3] {
+    let (r, g, b) = (linear(r), linear(g), linear(b));
+    let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+/// Back to sRGB channels (0–255, unrounded), clamped into range.
+fn srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
+    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    [
+        gamma(4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_),
+        gamma(-1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_),
+        gamma(-0.004_196_086_3 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_),
+    ]
 }
 
 fn hero(ui: &mut egui::Ui, view: &HomeView<'_>) -> Option<Action> {
@@ -1303,6 +1380,29 @@ mod tests {
             "the shade thins out"
         );
         assert!(brightness(colors[2 * step]) > brightness(colors[step]) / 2);
+        // The color conversion is exact enough to keep the stops' colors.
+        for stop in MIX_COLORS {
+            let back = srgb(oklab(stop.to_array()));
+            for (channel, expected) in back.iter().zip(stop.to_array()) {
+                assert!((channel - f32::from(expected)).abs() < 1.0);
+            }
+        }
+        // No sharp turn anywhere: over every four samples (past rounding)
+        // the color moves about as far as over the next four, where straight
+        // segments jumped at every stop.
+        let distance = |a: Color32, b: Color32| {
+            let (a, b) = (a.to_array(), b.to_array());
+            (0..3)
+                .map(|i| (f32::from(b[i]) - f32::from(a[i])).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        };
+        let spans: Vec<f32> = (0..colors.len() - 4)
+            .map(|i| distance(colors[i], colors[i + 4]))
+            .collect();
+        for pair in spans.windows(2) {
+            assert!((pair[1] - pair[0]).abs() < 3.0, "a turn: {pair:?}");
+        }
     }
 
     #[derive(Clone, Copy)]
