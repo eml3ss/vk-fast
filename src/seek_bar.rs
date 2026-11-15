@@ -28,6 +28,17 @@ pub fn show(ui: &mut egui::Ui, position: &mut f64, progress: Progress<'_>) -> Re
     };
     let id = ui.id().with("seek-loading");
     let loading = ui.ctx().animate_bool_with_time(id, progress.loading, 0.25);
+    // Each wait sweeps from the left edge: the sweep's clock starts when
+    // loading does, not where the last one stopped.
+    let now = ui.input(|input| input.time);
+    let started = ui.ctx().data_mut(|data| {
+        let state = data.get_temp_mut_or(id.with("start"), (false, now));
+        if progress.loading && !state.0 {
+            state.1 = now;
+        }
+        state.0 = progress.loading;
+        state.1
+    });
     if loading > 0.0 {
         ui.ctx().request_repaint();
     }
@@ -38,7 +49,7 @@ pub fn show(ui: &mut egui::Ui, position: &mut f64, progress: Progress<'_>) -> Re
         5.0,
         progress.width,
         progress.label,
-        loading,
+        (loading, now - started),
     )
 }
 
@@ -47,7 +58,7 @@ const WHEEL_POINTS_PER_STEP: f32 = 40.0;
 
 pub fn volume(ui: &mut egui::Ui, value: &mut f32, width: f32, label: &str) -> Response {
     let mut precise = f64::from(*value);
-    let mut response = control(ui, &mut precise, 1.0, 0.05, width, label, 0.0);
+    let mut response = control(ui, &mut precise, 1.0, 0.05, width, label, (0.0, 0.0));
     if response.changed() {
         *value = precise as f32;
     }
@@ -119,7 +130,8 @@ fn control(
     step: f64,
     width: f32,
     label: &str,
-    loading: f32,
+    // The loading glow's strength and how long this wait has lasted.
+    (loading, elapsed): (f32, f64),
 ) -> Response {
     let width = if width.is_finite() {
         width.max(KNOB_RADIUS * 2.0 + 1.0)
@@ -264,8 +276,7 @@ fn control(
             );
         }
         if loading > 0.0 {
-            let time = ui.input(|input| input.time);
-            painter.add(loading_glow(track, time, loading));
+            painter.add(loading_glow(track, elapsed, loading));
         }
         let show_knob = ui.is_enabled()
             && (pointer_over_control
@@ -299,7 +310,7 @@ fn control(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The loading glow at `time`: an accent band with soft edges that sweeps
+/// The loading glow `time` seconds into a wait: an accent band with soft edges that sweeps
 /// left to right across the bar, eased so it slows at both ends, drawn as
 /// a mesh following the bar's capsule so its rounded ends stay round.
 /// `strength` fades it in and out.
@@ -518,11 +529,12 @@ mod tests {
         };
         let quiet = run(false, 0.0);
         assert!(glow(&quiet).is_none());
-        // Fade in, then look at it mid-sweep.
+        // Fade in, then look at it mid-sweep: the sweep's clock starts with
+        // the wait, at 0.1 s.
         for step in 1..6 {
             run(true, f64::from(step) * 0.1);
         }
-        let output = run(true, 0.65);
+        let output = run(true, 0.75);
         let mesh = glow(&output).expect("a glow while loading");
         let painted = |output: &egui::FullOutput| {
             output
@@ -572,6 +584,34 @@ mod tests {
         }
         let done = run(false, 1.4);
         assert!(glow(&done).is_none());
+
+        // The next wait starts its sweep from the left again, whatever the
+        // clock: 0.65 s into it the band is back in the middle.
+        for step in 0..6 {
+            run(true, 2.0 + f64::from(step) * 0.1);
+        }
+        let again = glow(&run(true, 2.65)).unwrap();
+        let alpha_at = |x: f32| {
+            again
+                .vertices
+                .iter()
+                .min_by(|a, b| (a.pos.x - x).abs().total_cmp(&(b.pos.x - x).abs()))
+                .unwrap()
+                .color
+                .a()
+        };
+        assert!(alpha_at(track.center().x) > 150);
+        assert_eq!(alpha_at(track.left() + 2.0), 0);
+        // And right at its start the band sits off the left edge.
+        run(false, 3.0);
+        for step in 0..4 {
+            run(false, 3.1 + f64::from(step) * 0.1);
+        }
+        run(true, 4.0);
+        let start = glow(&run(true, 4.05));
+        assert!(start.is_none_or(|mesh| mesh.vertices.iter().all(|vertex| {
+            vertex.color.a() == 0 || vertex.pos.x < track.left() + track.width() * 0.2
+        })));
     }
 
     #[test]
