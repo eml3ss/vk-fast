@@ -59,6 +59,81 @@ pub struct State {
     /// at that moment: dragging a panel edge or the queue divider grows the
     /// lines under a press that began outside them.
     press_on_lines: bool,
+    selection: Selection,
+}
+
+/// Text selected by dragging over the lines: copied when the button is
+/// let go, then fading away.
+#[derive(Default)]
+struct Selection {
+    /// Where the press began and where the pointer is: (line, character).
+    anchor: Option<(usize, usize)>,
+    focus: (usize, usize),
+    /// The press moved far enough to select rather than click.
+    dragging: bool,
+    /// When the selection was copied and began to fade.
+    copied_at: Option<f64>,
+    /// Whether the view followed the current line when the press began:
+    /// it holds still while text is selected and follows again after.
+    follow: bool,
+}
+
+/// How long a copied selection stays, then fades.
+const SELECTION_HOLD: f64 = 0.2;
+const SELECTION_FADE: f64 = 0.5;
+
+impl Selection {
+    /// The selected span, start first, while there is one.
+    fn span(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        (self.dragging || self.copied_at.is_some()).then(|| {
+            if anchor <= self.focus {
+                (anchor, self.focus)
+            } else {
+                (self.focus, anchor)
+            }
+        })
+    }
+
+    /// How strongly the selection shows: fully while held, fading after it
+    /// is copied.
+    fn strength(&self, now: f64) -> f32 {
+        match self.copied_at {
+            None => 1.0,
+            Some(at) => {
+                let t = ((now - at - SELECTION_HOLD) / SELECTION_FADE).clamp(0.0, 1.0) as f32;
+                1.0 - t * t * (3.0 - 2.0 * t)
+            }
+        }
+    }
+}
+
+/// The selected text of `lines` between `start` and `end` (line, character),
+/// lines joined by newlines; lines without words are left out.
+fn selected_text(
+    lines: &[crate::lyrics::Line],
+    start: (usize, usize),
+    end: (usize, usize),
+) -> String {
+    let mut parts = Vec::new();
+    let count = (end.0 + 1).saturating_sub(start.0);
+    for (index, line) in lines.iter().enumerate().skip(start.0).take(count) {
+        let text = &line.text;
+        if gap_marker(text) {
+            continue;
+        }
+        let from = if index == start.0 { start.1 } else { 0 };
+        let to = if index == end.0 { end.1 } else { usize::MAX };
+        let part: String = text
+            .chars()
+            .skip(from)
+            .take(to.saturating_sub(from))
+            .collect();
+        if !part.trim().is_empty() {
+            parts.push(part);
+        }
+    }
+    parts.join("\n")
 }
 impl Default for State {
     fn default() -> Self {
@@ -73,6 +148,7 @@ impl Default for State {
             last_position: None,
             gap_clock: GapClock::default(),
             press_on_lines: false,
+            selection: Selection::default(),
         }
     }
 }
@@ -637,8 +713,14 @@ fn lines(
         // and kinetic scrolling, which setting only the offset would retain.
         let shown = theme::scroll_viewport(
             ui,
+            // Dragging the lines selects their text; the wheel and the bar
+            // scroll them.
             egui::ScrollArea::vertical()
                 .id_salt(("lyric-lines", fullscreen, state.scroll_epoch))
+                .scroll_source(
+                    egui::scroll_area::ScrollSource::SCROLL_BAR
+                        | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+                )
                 .auto_shrink([false, false]),
             |ui, viewport| {
                 let width = ui.available_width().max(1.0);
@@ -649,6 +731,7 @@ fn lines(
                 );
                 let changed = state.stamp != Some(stamp);
                 if changed {
+                    state.selection = Selection::default();
                     state.rows.clear();
                     state.height = 12.0;
                     let font = FontId::proportional(size);
@@ -680,6 +763,7 @@ fn lines(
                     egui::vec2(width, state.height.max(rect.height())),
                     Sense::hover(),
                 );
+                select_text(ui, state, data, rect, whole);
                 if should_follow || (changed && state.follow) {
                     match active {
                         Some(index) => {
@@ -739,6 +823,7 @@ fn lines(
                     };
                     let color = resting.lerp_to_gamma(theme::accent(), current);
                     let scale = 1.0 + (ACTIVE_SCALE - 1.0) * current;
+                    paint_selection(ui, state, index, line, scale);
                     if row.gap {
                         let animated = data.synced && active == Some(index);
                         let center = line.min
@@ -779,7 +864,8 @@ fn lines(
                     }
                     if data.synced {
                         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if response.clicked() {
+                        // A drag that selected text is not a click to seek.
+                        if response.clicked() && !state.selection.dragging {
                             action = data.lines[index].at;
                             state.follow = true;
                             state.followed = None;
@@ -797,6 +883,141 @@ fn lines(
         }
     });
     action
+}
+
+/// Follows a drag over the lines: the press marks where the selection
+/// starts, moving past a few points selects up to the pointer, and letting
+/// go copies the selected text, which then fades away.
+fn select_text(ui: &egui::Ui, state: &mut State, data: &Lyrics, rect: Rect, whole: Rect) {
+    let (pressed, down, released, origin, pointer, now) = ui.input(|input| {
+        (
+            input.pointer.primary_pressed(),
+            input.pointer.primary_down(),
+            input.pointer.primary_released(),
+            input.pointer.press_origin(),
+            input.pointer.interact_pos(),
+            input.time,
+        )
+    });
+    let rows = &state.rows;
+    let hit = |point: egui::Pos2| -> (usize, usize) {
+        let Some(last) = rows.len().checked_sub(1) else {
+            return (0, 0);
+        };
+        let y = point.y - whole.top();
+        let index = rows
+            .partition_point(|row| row.top + row.height <= y)
+            .min(last);
+        let row = &rows[index];
+        if row.gap {
+            return (index, 0);
+        }
+        let local = point - (whole.min + egui::vec2(4.0, row.top + 2.0));
+        (index, row.galley.cursor_from_pos(local).index.0)
+    };
+    // The bar on the right edge scrolls; it does not select.
+    let on_text = |point: egui::Pos2| rect.contains(point) && point.x < rect.right() - 16.0;
+    let selection = &mut state.selection;
+    if pressed && let Some(origin) = origin.filter(|origin| on_text(*origin)) {
+        let start = hit(origin);
+        let follow = if selection.copied_at.is_some() {
+            selection.follow
+        } else {
+            state.follow
+        };
+        *selection = Selection {
+            anchor: Some(start),
+            focus: start,
+            follow,
+            ..Selection::default()
+        };
+    }
+    if selection.anchor.is_some()
+        && selection.copied_at.is_none()
+        && let Some(point) = pointer
+    {
+        if down && !selection.dragging && origin.is_some_and(|origin| origin.distance(point) > 6.0)
+        {
+            selection.dragging = true;
+        }
+        if selection.dragging && (down || released) {
+            selection.focus = hit(point);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+    }
+    if released && selection.copied_at.is_none() {
+        match selection.span() {
+            Some((start, end)) if start != end => {
+                let text = selected_text(&data.lines, start, end);
+                if !text.is_empty() {
+                    ui.ctx().copy_text(text);
+                }
+                selection.copied_at = Some(now);
+            }
+            // A click: no selection; the line under it seeks.
+            _ => {
+                let dragging = selection.dragging;
+                *selection = Selection::default();
+                selection.dragging = dragging;
+            }
+        }
+    } else if !down && selection.copied_at.is_none() && selection.anchor.is_none() {
+        selection.dragging = false;
+    }
+    if let Some(at) = selection.copied_at {
+        if now - at >= SELECTION_HOLD + SELECTION_FADE {
+            let follow = selection.follow;
+            *selection = Selection::default();
+            if follow {
+                state.follow = true;
+                state.followed = None;
+            }
+        } else {
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// The selection's highlight behind line `index`, drawn at `line`, grown by
+/// `scale` like the current line's text.
+fn paint_selection(ui: &egui::Ui, state: &State, index: usize, line: Rect, scale: f32) {
+    let Some(((first, from), (last, to))) = state.selection.span() else {
+        return;
+    };
+    let Some(row) = state.rows.get(index) else {
+        return;
+    };
+    if index < first || index > last || row.gap {
+        return;
+    }
+    let from = if index == first { from } else { 0 };
+    let to = if index == last { to } else { usize::MAX };
+    let strength = state.selection.strength(ui.input(|input| input.time));
+    if from >= to || strength <= 0.0 {
+        return;
+    }
+    let origin = line.min + egui::vec2(4.0, 2.0);
+    let anchor = origin + egui::vec2(0.0, row.galley.size().y * 0.5);
+    let grow = |point: egui::Pos2| anchor + (point - anchor) * scale;
+    let color = theme::accent().gamma_multiply(0.38 * strength);
+    let mut start = 0;
+    for placed in &row.galley.rows {
+        let count = placed.glyphs.len();
+        let (low, high) = (from.max(start), to.min(start + count));
+        if low < high {
+            let first = &placed.glyphs[low - start];
+            let last = &placed.glyphs[high - 1 - start];
+            let left = origin.x + placed.pos.x + first.pos.x;
+            let right = origin.x + placed.pos.x + last.pos.x + last.advance_width;
+            let top = origin.y + placed.min_y();
+            let bottom = origin.y + placed.max_y();
+            let area =
+                Rect::from_min_max(grow(egui::pos2(left, top)), grow(egui::pos2(right, bottom)));
+            ui.painter()
+                .rect_filled(area.expand2(egui::vec2(1.5, 0.0)), 4.0, color);
+        }
+        start += placed.char_count_including_newline().0;
+    }
 }
 
 fn background(painter: &egui::Painter, rect: Rect, color: Option<Color32>) {
@@ -857,6 +1078,152 @@ mod tests {
         );
         output.textures_delta.clear();
         output
+    }
+
+    /// One frame of the lines with pointer `events`; returns the frame and
+    /// the line time a click asked to seek to.
+    fn frame_with(
+        ctx: &egui::Context,
+        state: &mut State,
+        data: &Lyrics,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<f64>) {
+        let mut seek = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 260.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                seek = lines(
+                    ui,
+                    state,
+                    ui.available_rect_before_wrap(),
+                    data,
+                    1.0,
+                    18.0,
+                    false,
+                    false,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        (output, seek)
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn highlights(output: &egui::FullOutput) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, egui::Shape::Rect(rect)
+                    if rect.fill.a() > 0 && rect.corner_radius == 4.0.into())
+            })
+            .count()
+    }
+
+    #[test]
+    fn dragging_over_lines_copies_the_text_and_the_highlight_fades() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(4, true);
+        let (output, _) = frame_with(&ctx, &mut state, &data, 1.0, Vec::new());
+        let line = |label: &str| {
+            texts(&output)
+                .into_iter()
+                .find(|(text, ..)| text == label)
+                .unwrap()
+                .1
+        };
+        let first = line("Synthetic lyric line 0");
+        let second = line("Synthetic lyric line 1");
+        // From just before "lyric" on the first line to the end of the second.
+        let start = egui::pos2(first.left() + 82.0, first.center().y);
+        let end = egui::pos2(second.right() + 2.0, second.center().y);
+        let mut time = 1.1;
+        frame_with(&ctx, &mut state, &data, time, button(start, true));
+        let mut copied = None;
+        for step in 1..=5 {
+            time += 0.05;
+            let point = start + (end - start) * (step as f32 / 5.0);
+            let (output, _) = frame_with(
+                &ctx,
+                &mut state,
+                &data,
+                time,
+                vec![egui::Event::PointerMoved(point)],
+            );
+            if step == 5 {
+                assert!(highlights(&output) >= 2, "both lines highlighted");
+            }
+        }
+        time += 0.05;
+        let (output, seek) = frame_with(&ctx, &mut state, &data, time, button(end, false));
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                copied = Some(text.clone());
+            }
+        }
+        let copied = copied.expect("letting go copies the selection");
+        assert!(
+            copied.ends_with("line 0\nSynthetic lyric line 1"),
+            "{copied:?}"
+        );
+        assert!(
+            !copied.starts_with("Synthetic"),
+            "only from where the drag began"
+        );
+        assert_eq!(seek, None, "a drag does not seek");
+        // Still shown a moment, then faded away.
+        let (output, _) = frame_with(&ctx, &mut state, &data, time + 0.1, Vec::new());
+        assert!(highlights(&output) >= 2);
+        let (output, _) = frame_with(
+            &ctx,
+            &mut state,
+            &data,
+            time + SELECTION_HOLD + SELECTION_FADE + 0.05,
+            Vec::new(),
+        );
+        assert_eq!(highlights(&output), 0);
+        assert!(state.selection.anchor.is_none());
+
+        // A click on a timed line still seeks to it.
+        let mut time = time + 2.0;
+        let mut seek = None;
+        for pressed in [true, false] {
+            time += 0.05;
+            seek = seek.or(frame_with(
+                &ctx,
+                &mut state,
+                &data,
+                time,
+                button(second.center(), pressed),
+            )
+            .1);
+        }
+        assert_eq!(seek, data.lines[1].at);
+        assert_eq!(
+            selected_text(&data.lines, (0, 16), (1, 9)),
+            "line 0\nSynthetic"
+        );
     }
 
     fn texts(output: &egui::FullOutput) -> Vec<(String, Rect, Color32, f32)> {
