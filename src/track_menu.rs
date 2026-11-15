@@ -36,7 +36,10 @@ pub struct View<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// To the end of the queue, after the source's last track.
     AddToQueue,
+    /// Right after the current track.
+    PlayNext,
     ToggleLike,
     AddToPlaylist(AlbumRef),
     RemoveFromPlaylist(AlbumRef),
@@ -195,11 +198,24 @@ pub fn show(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.style_mut().interaction.selectable_labels = false;
 
+    let queueable = view.connected && view.track.unavailable != Some(true);
+    if row(
+        ui,
+        Icon::PlayNext,
+        language.text("Воспроизвести следующим", "Play next"),
+        queueable,
+        false,
+        false,
+    )
+    .clicked()
+    {
+        action = Some(Action::PlayNext);
+    }
     if row(
         ui,
         Icon::QueueAdd,
         language.text("Добавить в очередь", "Add to queue"),
-        view.connected && view.track.unavailable != Some(true),
+        queueable,
         false,
         false,
     )

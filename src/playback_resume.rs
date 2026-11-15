@@ -35,6 +35,8 @@ pub struct Queue {
     pub origin: String,
     pub tracks: Vec<Track>,
     pub added: Vec<Track>,
+    /// Added to the end of the queue, after the source.
+    pub at_end: Vec<Track>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -53,6 +55,8 @@ struct StoredQueue {
     origin: String,
     tracks: serde_json::Value,
     added: serde_json::Value,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    at_end: serde_json::Value,
 }
 
 fn valid_origin(origin: &str) -> bool {
@@ -135,6 +139,7 @@ fn encode(account_id: i64, snapshot: &Snapshot) -> io::Result<Vec<u8>> {
         if !valid_origin(&queue.origin)
             || queue.tracks.len() > MAX_QUEUE
             || queue.added.len() > MAX_ADDED
+            || queue.at_end.len() > MAX_ADDED
         {
             return None;
         }
@@ -142,6 +147,11 @@ fn encode(account_id: i64, snapshot: &Snapshot) -> io::Result<Vec<u8>> {
             origin: queue.origin.clone(),
             tracks: encode_tracks(account_id, &queue.tracks, MAX_QUEUE).ok()?,
             added: encode_tracks(account_id, &queue.added, MAX_ADDED).ok()?,
+            at_end: if queue.at_end.is_empty() {
+                serde_json::Value::Null
+            } else {
+                encode_tracks(account_id, &queue.at_end, MAX_ADDED).ok()?
+            },
         })
     });
     let bytes = serde_json::to_vec(&StoredResume {
@@ -183,6 +193,12 @@ fn decode(account_id: i64, bytes: &[u8]) -> io::Result<Snapshot> {
             origin: queue.origin,
             tracks: decode_tracks(account_id, &queue.tracks, MAX_QUEUE).ok()?,
             added: decode_tracks(account_id, &queue.added, MAX_ADDED).ok()?,
+            // Saved before tracks could be added to the end: none.
+            at_end: if queue.at_end.is_null() {
+                Vec::new()
+            } else {
+                decode_tracks(account_id, &queue.at_end, MAX_ADDED).ok()?
+            },
         })
     });
     Ok(Snapshot {
@@ -321,6 +337,7 @@ mod tests {
                 snapshot(9, 0.0).track,
             ],
             added: vec![snapshot(30, 0.0).track],
+            at_end: vec![snapshot(31, 0.0).track],
         });
         save_at(&path, 42, &saved).unwrap();
         let raw = fs::read_to_string(&path).unwrap();
@@ -337,6 +354,7 @@ mod tests {
         let keys: Vec<_> = queue.tracks.iter().map(Track::key).collect();
         assert_eq!(keys, [(-7, 7), (-7, 8), (-7, 9)]);
         assert_eq!(queue.added[0].key(), (-7, 30));
+        assert_eq!(queue.at_end[0].key(), (-7, 31));
         assert!(queue.tracks.iter().all(|track| track.url.is_none()));
         // A file from before queues were saved still restores its track.
         let mut old: serde_json::Value = serde_json::from_str(&raw).unwrap();

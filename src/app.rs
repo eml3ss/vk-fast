@@ -2468,6 +2468,12 @@ impl MusicApp {
                 self.queued_tracks.insert(track.key(), track);
             }
         }
+        for mut track in queue.at_end {
+            track.url = None;
+            if self.play_order.append(track.key()) {
+                self.queued_tracks.insert(track.key(), track);
+            }
+        }
     }
 
     fn playback_snapshot(&self) -> crate::playback::Snapshot {
@@ -2555,6 +2561,13 @@ impl MusicApp {
             .filter_map(|entry| self.queued_tracks.get(&entry.key).cloned())
             .take(playback_resume::MAX_ADDED)
             .collect();
+        let at_end = self
+            .play_order
+            .tail()
+            .iter()
+            .filter_map(|entry| self.queued_tracks.get(&entry.key).cloned())
+            .take(playback_resume::MAX_ADDED)
+            .collect();
         playback_resume::Queue {
             origin: self
                 .queue_origin
@@ -2562,6 +2575,7 @@ impl MusicApp {
                 .unwrap_or_else(|| "library".into()),
             tracks,
             added,
+            at_end,
         }
     }
 
@@ -3071,7 +3085,7 @@ impl MusicApp {
         if self.playback_pending.is_some() {
             return;
         }
-        if self.playing.is_none() && !self.play_order.queued().is_empty() {
+        if self.playing.is_none() && self.play_order.has_added() {
             self.synchronize_order();
             if let Some(key) = self.play_order.start_queued(None) {
                 self.play_track(ctx, key);
@@ -3125,7 +3139,12 @@ impl MusicApp {
 
     fn adjacent_track(&self, next: bool) -> Option<(i64, i64)> {
         if next && self.playing.is_none() && self.selected.is_none() {
-            return self.play_order.queued().front().map(|entry| entry.key);
+            return self
+                .play_order
+                .queued()
+                .front()
+                .or_else(|| self.play_order.tail().front())
+                .map(|entry| entry.key);
         }
         let key = self.playing.as_ref().map(Track::key).or(self.selected)?;
         let ordered = if next {
@@ -3226,7 +3245,7 @@ impl MusicApp {
         self.cancel_mix_start();
         self.mix_advance = false;
         self.home_autoplay = None;
-        if self.playing.is_none() && !self.play_order.queued().is_empty() {
+        if self.playing.is_none() && self.play_order.has_added() {
             self.synchronize_order();
             if let Some(key) = self.play_order.start_queued(None) {
                 self.play_track(ctx, key);
@@ -9232,7 +9251,8 @@ impl MusicApp {
         self.track_menu_notice = None;
         self.like_error = None;
         match action {
-            track_menu::Action::AddToQueue => self.add_to_queue(ctx, track.clone()),
+            track_menu::Action::AddToQueue => self.add_to_queue(ctx, track.clone(), true),
+            track_menu::Action::PlayNext => self.add_to_queue(ctx, track.clone(), false),
             track_menu::Action::ToggleLike => self.toggle_like(ctx, track.clone()),
             track_menu::Action::ToggleDislike => self.toggle_dislike(ctx, track),
             track_menu::Action::AddToPlaylist(playlist) => {
@@ -9760,7 +9780,7 @@ impl MusicApp {
             && self.session.is_some()
             && (self.playing.is_some()
                 || !self.view_tracks().is_empty()
-                || !self.play_order.queued().is_empty());
+                || self.play_order.has_added());
         let track = self.playing.as_ref().or_else(|| {
             self.library
                 .tracks

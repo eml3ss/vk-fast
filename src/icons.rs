@@ -42,6 +42,8 @@ pub enum Icon {
     /// Three upright faders set at different heights: the equalizer.
     Equalizer,
     QueueAdd,
+    /// "Add to queue" turned over: the plus by the first, shortest bar.
+    PlayNext,
     Queue,
     Lyrics,
     Expand,
@@ -731,6 +733,13 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(17.0, 12.0), (17.0, 21.0)]);
             line(&[(12.5, 16.5), (21.5, 16.5)]);
         }
+        Icon::PlayNext => {
+            line(&[(3.0, 8.0), (10.0, 8.0)]);
+            line(&[(3.0, 13.0), (13.0, 13.0)]);
+            line(&[(3.0, 18.0), (16.0, 18.0)]);
+            line(&[(17.0, 3.0), (17.0, 12.0)]);
+            line(&[(12.5, 7.5), (21.5, 7.5)]);
+        }
         Icon::PlaylistAdd | Icon::PlaylistRemove => {
             let pixels = painter.ctx().pixels_per_point();
             let width = (stroke.width * pixels).round().max(1.0);
@@ -1255,6 +1264,7 @@ mod tests {
             Icon::Dislike,
             Icon::DislikeFilled,
             Icon::QueueAdd,
+            Icon::PlayNext,
             Icon::Queue,
             Icon::Lyrics,
             Icon::Expand,

@@ -28,6 +28,43 @@ fn external() -> Track {
 }
 
 #[test]
+fn add_to_queue_goes_after_the_source_and_play_next_before_it() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx);
+    let source: Vec<_> = app.library.tracks.iter().map(Track::key).collect();
+    let mut at_end = external();
+    at_end.id = 70;
+    let mut next = external();
+    next.id = 71;
+    app.handle_track_menu_action(&ctx, &at_end, track_menu::Action::AddToQueue);
+    assert_eq!(
+        app.track_menu_notice.as_ref().unwrap().0,
+        "Added to the end of the queue"
+    );
+    app.handle_track_menu_action(&ctx, &next, track_menu::Action::PlayNext);
+    assert_eq!(app.track_menu_notice.as_ref().unwrap().0, "Playing next");
+    assert_eq!(app.play_order.queued().len(), 1);
+    assert_eq!(app.play_order.tail().len(), 1);
+    let upcoming = app
+        .play_order
+        .upcoming(Some(source[0]), app.allow_queue_wrap());
+    assert_eq!(upcoming.first().map(|entry| entry.key), Some(next.key()));
+    assert_eq!(
+        upcoming.last().map(|entry| (entry.key, entry.at_end)),
+        Some((at_end.key(), true))
+    );
+    // Media Next walks: the track to play next, the source, then the end.
+    let mut played = vec![app.playing.as_ref().unwrap().key()];
+    for _ in 0..source.len() + 1 {
+        app.handle_system_media_command(&ctx, Command::Next);
+        played.push(app.playing.as_ref().unwrap().key());
+    }
+    assert_eq!(played[1], next.key());
+    assert_eq!(&played[2..played.len() - 1], &source[1..]);
+    assert_eq!(played.last(), Some(&at_end.key()));
+}
+
+#[test]
 fn queue_actions_and_media_navigation_work_without_ui_frames_or_changing_the_source() {
     let ctx = egui::Context::default();
     let mut app = prepared(&ctx);
@@ -36,7 +73,7 @@ fn queue_actions_and_media_navigation_work_without_ui_frames_or_changing_the_sou
     let queued = external();
     let key = queued.key();
     for _ in 0..2 {
-        app.handle_track_menu_action(&ctx, &queued, track_menu::Action::AddToQueue);
+        app.handle_track_menu_action(&ctx, &queued, track_menu::Action::PlayNext);
     }
     assert_eq!(app.playing.as_ref().unwrap().key(), source);
     assert_eq!(app.play_order.queued().len(), 2);
@@ -54,7 +91,7 @@ fn queue_actions_and_media_navigation_work_without_ui_frames_or_changing_the_sou
     app.stop_playback();
     assert!(app.play_order.queued().is_empty() && app.queued_tracks.is_empty());
     app.selected = None;
-    app.add_to_queue(&ctx, external());
+    app.add_to_queue(&ctx, external(), false);
     app.handle_system_media_command(&ctx, Command::Next);
     assert_eq!(app.playing.as_ref().unwrap().key(), key);
     assert!(app.play_order.queued().is_empty());
@@ -67,8 +104,8 @@ fn natural_end_uses_the_manual_queue_and_a_restricted_queued_track_is_skipped() 
     let mut app = prepared(&ctx);
     let queued = external();
     let key = queued.key();
-    app.add_to_queue(&ctx, queued.clone());
-    app.add_to_queue(&ctx, queued);
+    app.add_to_queue(&ctx, queued.clone(), false);
+    app.add_to_queue(&ctx, queued, false);
     app.advance_track(&ctx, true);
     assert_eq!(app.playing.as_ref().unwrap().key(), key);
     assert_eq!(app.play_order.queued().len(), 1);
@@ -89,7 +126,7 @@ fn known_restrictions_in_a_long_manual_queue_skip_without_exhausting_network_rec
     for index in 0..40 {
         let mut track = external();
         track.id += index;
-        app.add_to_queue(&ctx, track);
+        app.add_to_queue(&ctx, track, false);
     }
     for track in app.queued_tracks.values_mut() {
         track.unavailable = Some(true);
@@ -111,16 +148,16 @@ fn queued_track_can_start_without_a_current_track_and_selecting_a_row_skips_with
     let mut app = prepared(&ctx);
     app.stop_playback();
     app.selected = None;
-    app.add_to_queue(&ctx, external());
+    app.add_to_queue(&ctx, external(), false);
     app.toggle_playback(&ctx);
     assert_eq!(app.playing.as_ref().unwrap().key(), external().key());
     assert!(app.play_order.queued().is_empty());
     let mut later = external();
     later.id = 8;
-    app.add_to_queue(&ctx, later.clone());
+    app.add_to_queue(&ctx, later.clone(), false);
     let mut last = later.clone();
     last.id = 9;
-    app.add_to_queue(&ctx, last.clone());
+    app.add_to_queue(&ctx, last.clone(), false);
     app.play_queue_position(&ctx, 1);
     assert_eq!(app.playing.as_ref().unwrap().key(), last.key());
     assert!(app.play_order.queued().is_empty());
@@ -576,7 +613,7 @@ fn no_two_rows_share_a_place_after_stepping_back_over_a_queued_playlist_track() 
     // A track of the playlist is also added to the queue, played, and left
     // with Previous: it is listed once, and no rows share a place.
     let queued = app.library.tracks[3].clone();
-    app.add_to_queue(&ctx, queued);
+    app.add_to_queue(&ctx, queued, false);
     app.page = MusicPage::Library;
     app.queue_ui.open = true;
     let size = egui::vec2(1280.0, 900.0);

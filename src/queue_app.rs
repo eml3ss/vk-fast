@@ -61,7 +61,9 @@ enum Action {
 }
 
 impl MusicApp {
-    pub(super) fn add_to_queue(&mut self, ctx: &egui::Context, track: Track) {
+    /// Adds `track` to the end of the queue (`at_end`, after the source's
+    /// last track) or to play next, right after the current track.
+    pub(super) fn add_to_queue(&mut self, ctx: &egui::Context, track: Track, at_end: bool) {
         if self.session.is_none() || self.demo {
             return;
         }
@@ -70,7 +72,11 @@ impl MusicApp {
             return;
         }
         self.synchronize_order();
-        let added = self.play_order.enqueue(track.key());
+        let added = if at_end {
+            self.play_order.append(track.key())
+        } else {
+            self.play_order.enqueue(track.key())
+        };
         if added {
             self.queued_tracks.insert(track.key(), track);
             self.prune_queued_tracks();
@@ -78,15 +84,15 @@ impl MusicApp {
         self.track_menu_notice = Some((
             self.language
                 .text(
-                    if added {
-                        "Трек добавлен в очередь"
-                    } else {
-                        "Очередь заполнена"
+                    match (added, at_end) {
+                        (false, _) => "Очередь заполнена",
+                        (true, true) => "Трек добавлен в конец очереди",
+                        (true, false) => "Трек сыграет следующим",
                     },
-                    if added {
-                        "Added to queue"
-                    } else {
-                        "Queue is full"
+                    match (added, at_end) {
+                        (false, _) => "Queue is full",
+                        (true, true) => "Added to the end of the queue",
+                        (true, false) => "Playing next",
                     },
                 )
                 .into(),
@@ -186,7 +192,7 @@ impl MusicApp {
             } else if target == crate::track_drag::Target::Dropped {
                 // Refused: say why, as the menu does.
                 crate::track_drag::clear(ui.ctx());
-                self.add_to_queue(ui.ctx(), carried.track);
+                self.add_to_queue(ui.ctx(), carried.track, false);
             } else {
                 crate::track_drag::paint_target(ui.ctx(), area, 10.0);
             }
@@ -210,7 +216,7 @@ impl MusicApp {
         let current = self.playing.as_ref().map(Track::key).or(self.selected);
         let stamp = (self.play_order.revision(), current, self.allow_queue_wrap());
         if panel.open && panel.stamp != Some(stamp) {
-            panel.upcoming = if current.is_none() && self.play_order.queued().is_empty() {
+            panel.upcoming = if current.is_none() && !self.play_order.has_added() {
                 Vec::new()
             } else {
                 self.play_order.upcoming(current, stamp.2)
@@ -279,7 +285,7 @@ impl MusicApp {
                                 .color(theme::muted()),
                         );
                     }
-                    if !self.play_order.queued().is_empty() {
+                    if self.play_order.has_added() {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui
                                 .add(
@@ -341,11 +347,19 @@ impl MusicApp {
                             let queued_start = self.play_order.history_ahead(current).min(len);
                             let added = panel.upcoming[queued_start..]
                                 .iter()
-                                .take_while(|entry| entry.queued_id.is_some())
+                                .take_while(|entry| entry.queued_id.is_some() && !entry.at_end)
                                 .count();
                             let source_start = queued_start + added;
+                            // The tracks added to the end stay apart from the
+                            // source: they are not moved with it.
+                            let source_end = (source_start
+                                + panel.upcoming[source_start..]
+                                    .iter()
+                                    .filter(|entry| !entry.at_end)
+                                    .count())
+                            .min(len);
                             let source_movable = self.play_order.source_reorderable(current)
-                                && len > source_start + 1;
+                                && source_end > source_start + 1;
                             let group = |index: usize| {
                                 if index >= len {
                                     // The mix after the queue, among itself.
@@ -353,8 +367,10 @@ impl MusicApp {
                                 } else if (queued_start..source_start).contains(&index) && added > 1
                                 {
                                     Some(queued_start..=source_start - 1)
-                                } else if index >= source_start && source_movable {
-                                    Some(source_start..=len - 1)
+                                } else if (source_start..source_end).contains(&index)
+                                    && source_movable
+                                {
+                                    Some(source_start..=source_end - 1)
                                 } else {
                                     None
                                 }

@@ -17,6 +17,8 @@ pub struct Upcoming {
     pub key: TrackKey,
     /// Only unplayed, explicitly added entries can be removed from the queue.
     pub queued_id: Option<u64>,
+    /// Added to the end of the queue: listed and played after the source.
+    pub at_end: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -49,7 +51,11 @@ pub struct PlaybackOrder {
     cursor: usize,
     wrap: Vec<TrackKey>,
     random: u64,
+    /// Added to play next: right after the current track.
     queued: VecDeque<Queued>,
+    /// Added to the end of the queue: after the source has run out (or
+    /// before repeat all starts it over).
+    tail: VecDeque<Queued>,
     next_id: u64,
     revision: u64,
 }
@@ -75,28 +81,55 @@ impl PlaybackOrder {
     pub fn queued(&self) -> &VecDeque<Queued> {
         &self.queued
     }
+    /// The tracks added to the end of the queue.
+    pub fn tail(&self) -> &VecDeque<Queued> {
+        &self.tail
+    }
+    /// Whether any track was added, to play next or at the end.
+    pub fn has_added(&self) -> bool {
+        !self.queued.is_empty() || !self.tail.is_empty()
+    }
 
-    pub fn enqueue(&mut self, key: TrackKey) -> bool {
+    fn new_entry(&mut self, key: TrackKey) -> Option<Queued> {
         if key.0 == 0
             || key.0.checked_abs().is_none()
             || key.1 <= 0
-            || self.queued.len() >= QUEUE_LIMIT
+            || self.queued.len() + self.tail.len() >= QUEUE_LIMIT
         {
-            return false;
+            return None;
         }
         self.next_id = self.next_id.wrapping_add(1);
-        self.queued.push_back(Queued {
+        self.revision = self.revision.wrapping_add(1);
+        Some(Queued {
             id: self.next_id,
             key,
-        });
-        self.revision = self.revision.wrapping_add(1);
+        })
+    }
+
+    /// Plays `key` next: after the current track and the tracks already
+    /// added to play next.
+    pub fn enqueue(&mut self, key: TrackKey) -> bool {
+        let Some(entry) = self.new_entry(key) else {
+            return false;
+        };
+        self.queued.push_back(entry);
+        true
+    }
+
+    /// Adds `key` to the end of the queue: after the source's last track.
+    pub fn append(&mut self, key: TrackKey) -> bool {
+        let Some(entry) = self.new_entry(key) else {
+            return false;
+        };
+        self.tail.push_back(entry);
         true
     }
 
     pub fn remove_queued(&mut self, id: u64) {
-        let before = self.queued.len();
+        let before = self.queued.len() + self.tail.len();
         self.queued.retain(|entry| entry.id != id);
-        if before != self.queued.len() {
+        self.tail.retain(|entry| entry.id != id);
+        if before != self.queued.len() + self.tail.len() {
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -167,21 +200,29 @@ impl PlaybackOrder {
         true
     }
 
+    /// Clears the tracks added to play next and to the end.
     pub fn clear_queued(&mut self) {
-        if !self.queued.is_empty() {
+        if self.has_added() {
             self.queued.clear();
+            self.tail.clear();
             self.revision = self.revision.wrapping_add(1);
         }
     }
 
     pub fn queued_keys_to_keep(&self) -> impl Iterator<Item = TrackKey> + '_ {
-        self.queued.iter().map(|entry| entry.key).chain(
-            self.history
-                .iter()
-                .copied()
-                .zip(&self.visits)
-                .filter_map(|(key, visit)| matches!(visit, Visit::Queued { .. }).then_some(key)),
-        )
+        self.queued
+            .iter()
+            .chain(&self.tail)
+            .map(|entry| entry.key)
+            .chain(
+                self.history
+                    .iter()
+                    .copied()
+                    .zip(&self.visits)
+                    .filter_map(|(key, visit)| {
+                        matches!(visit, Visit::Queued { .. }).then_some(key)
+                    }),
+            )
     }
 
     pub fn is_queued_current(&self, current: TrackKey) -> bool {
@@ -207,8 +248,10 @@ impl PlaybackOrder {
         }
     }
 
+    /// Starts the next added track: one to play next, else one added to
+    /// the end.
     pub fn start_queued(&mut self, current: Option<TrackKey>) -> Option<TrackKey> {
-        let entry = self.queued.pop_front()?;
+        let entry = self.queued.pop_front().or_else(|| self.tail.pop_front())?;
         let anchor = current
             .and_then(|key| self.anchor(key))
             .filter(|key| self.keys.contains(key));
@@ -239,6 +282,16 @@ impl PlaybackOrder {
             if !self.is_queued_current(target.key) {
                 self.mark_visited(target.key);
             }
+            return Some(target.key);
+        }
+        if let Some(id) = target.queued_id.filter(|_| target.at_end) {
+            // A track added to the end, played now: those before it at the
+            // end go with it; the source carries on after it.
+            let index = self.tail.iter().position(|entry| entry.id == id)?;
+            let anchor = current.and_then(|key| self.anchor(key));
+            self.queued.clear();
+            self.tail.drain(..=index);
+            self.push_history(target.key, Visit::Queued { anchor });
             return Some(target.key);
         }
         if let Some(id) = target.queued_id {
@@ -287,6 +340,7 @@ impl PlaybackOrder {
             return vec![Upcoming {
                 key,
                 queued_id: None,
+                at_end: false,
             }];
         }
         self.upcoming_after(current, allow_wrap)
@@ -304,6 +358,7 @@ impl PlaybackOrder {
                 result.push(Upcoming {
                     key,
                     queued_id: None,
+                    at_end: false,
                 });
                 anchor = match visit {
                     Visit::Source => Some(key),
@@ -321,7 +376,15 @@ impl PlaybackOrder {
         result.extend(self.queued.iter().map(|entry| Upcoming {
             key: entry.key,
             queued_id: Some(entry.id),
+            at_end: false,
         }));
+        // The tracks added to the end: after the source's last track, before
+        // repeat all starts it over.
+        let tail = self.tail.iter().map(|entry| Upcoming {
+            key: entry.key,
+            queued_id: Some(entry.id),
+            at_end: true,
+        });
         if self.shuffle {
             let remaining: Vec<_> = self
                 .remaining
@@ -330,6 +393,7 @@ impl PlaybackOrder {
                 .filter(|key| Some(*key) != anchor)
                 .collect();
             if remaining.is_empty() && allow_wrap && self.repeat == RepeatMode::All {
+                result.extend(tail);
                 result.extend(
                     self.wrap
                         .iter()
@@ -339,24 +403,27 @@ impl PlaybackOrder {
                         .map(|key| Upcoming {
                             key,
                             queued_id: None,
+                            at_end: false,
                         }),
                 );
             } else {
                 result.extend(remaining.into_iter().map(|key| Upcoming {
                     key,
                     queued_id: None,
+                    at_end: false,
                 }));
+                result.extend(tail);
             }
         } else {
             let start = anchor
                 .and_then(|key| self.keys.iter().position(|candidate| *candidate == key))
                 .map_or(0, |index| index + 1);
-            let start = if start == self.keys.len() && allow_wrap && self.repeat == RepeatMode::All
-            {
-                0
-            } else {
-                start
-            };
+            let wraps = start == self.keys.len() && allow_wrap && self.repeat == RepeatMode::All;
+            let start = if wraps { 0 } else { start };
+            let tail: Vec<Upcoming> = tail.collect();
+            if wraps {
+                result.extend(tail.iter().copied());
+            }
             result.extend(
                 self.keys[start..]
                     .iter()
@@ -365,15 +432,20 @@ impl PlaybackOrder {
                     .map(|key| Upcoming {
                         key,
                         queued_id: None,
+                        at_end: false,
                     }),
             );
+            if !wraps {
+                result.extend(tail);
+            }
         }
         result
     }
 
     pub fn exclude_queued(&mut self, rejected: &HashSet<TrackKey>) {
-        let before = self.queued.len();
+        let before = self.queued.len() + self.tail.len();
         self.queued.retain(|entry| !rejected.contains(&entry.key));
+        self.tail.retain(|entry| !rejected.contains(&entry.key));
         if !self
             .history
             .iter()
@@ -385,7 +457,7 @@ impl PlaybackOrder {
                     && rejected.contains(key)
             })
         {
-            if before != self.queued.len() {
+            if before != self.queued.len() + self.tail.len() {
                 self.revision = self.revision.wrapping_add(1);
             }
             return;
@@ -412,7 +484,7 @@ impl PlaybackOrder {
             history.push(key);
             visits.push(visit);
         }
-        if before != self.queued.len() || history.len() != self.history.len() {
+        if before != self.queued.len() + self.tail.len() || history.len() != self.history.len() {
             self.revision = self.revision.wrapping_add(1);
         }
         self.history = history;
@@ -437,6 +509,7 @@ impl PlaybackOrder {
         if !self.shuffle {
             return future
                 + self.queued.len()
+                + self.tail.len()
                 + self
                     .keys
                     .iter()
@@ -448,6 +521,7 @@ impl PlaybackOrder {
         }
         future
             + self.queued.len()
+            + self.tail.len()
             + self
                 .remaining
                 .iter()
@@ -620,6 +694,19 @@ impl PlaybackOrder {
         if let Some(entry) = self.queued.front() {
             return Some(entry.key);
         }
+        if self.tail_due(current, allow_wrap) {
+            return self.tail.front().map(|entry| entry.key);
+        }
+        self.source_next(current, allow_wrap)
+    }
+
+    /// Whether the tracks added to the end come now: the source has run out
+    /// (and no page of it is still to load, which `allow_wrap` tells).
+    fn tail_due(&self, current: TrackKey, allow_wrap: bool) -> bool {
+        !self.tail.is_empty() && allow_wrap && self.source_next(current, false).is_none()
+    }
+
+    fn source_next(&self, current: TrackKey, allow_wrap: bool) -> Option<TrackKey> {
         let anchor = self.anchor(current);
         if !self.shuffle {
             let Some(anchor) = anchor else {
@@ -703,7 +790,7 @@ impl PlaybackOrder {
             }
             return Some(key);
         }
-        if !self.queued.is_empty() {
+        if !self.queued.is_empty() || self.tail_due(current, allow_wrap) {
             return self.start_queued(Some(current));
         }
         let key = self.next(current, allow_wrap)?;
@@ -970,6 +1057,95 @@ mod tests {
         assert_eq!(order.repeat(), RepeatMode::All);
         assert!(order.next(keys[1], true).is_none());
         assert!(order.history.is_empty() && order.remaining.is_empty());
+    }
+
+    fn ordered(keys: &[TrackKey], current: TrackKey) -> PlaybackOrder {
+        let mut order = PlaybackOrder::default();
+        order.sync(keys, Some(current));
+        order
+    }
+
+    fn up(order: &PlaybackOrder, current: TrackKey, allow_wrap: bool) -> Vec<(TrackKey, bool)> {
+        order
+            .upcoming(Some(current), allow_wrap)
+            .into_iter()
+            .map(|entry| (entry.key, entry.at_end))
+            .collect()
+    }
+
+    #[test]
+    fn play_next_comes_right_after_and_add_to_queue_after_the_source() {
+        let keys = keys(3);
+        let (next, end) = ((90, 1), (91, 1));
+        let mut order = ordered(&keys, keys[0]);
+        assert!(order.append(end) && order.enqueue(next));
+        assert!(order.has_added());
+        assert_eq!(
+            up(&order, keys[0], true),
+            [
+                (next, false),
+                (keys[1], false),
+                (keys[2], false),
+                (end, true)
+            ]
+        );
+        let mut played = vec![keys[0]];
+        while let Some(key) = order.advance_next(*played.last().unwrap(), true, false) {
+            played.push(key);
+        }
+        assert_eq!(played, [keys[0], next, keys[1], keys[2], end]);
+        assert!(!order.has_added());
+
+        // More of the source still to load: the end waits for it.
+        let mut order = ordered(&keys, keys[2]);
+        order.append(end);
+        assert_eq!(order.next(keys[2], false), None);
+        assert_eq!(order.advance_next(keys[2], false, false), None);
+        assert_eq!(order.next(keys[2], true), Some(end));
+
+        // Repeat all: the end plays before the source starts over.
+        let mut order = ordered(&keys, keys[2]);
+        order.cycle_repeat();
+        order.append(end);
+        assert_eq!(up(&order, keys[2], true)[0], (end, true));
+        assert_eq!(order.advance_next(keys[2], true, false), Some(end));
+        assert_eq!(order.advance_next(end, true, false), Some(keys[0]));
+    }
+
+    #[test]
+    fn tracks_added_to_the_end_can_be_removed_jumped_to_and_follow_a_shuffle() {
+        let keys = keys(4);
+        let end = (91, 1);
+        let mut order = shuffled(&keys, Some(keys[0]));
+        let id = {
+            order.append(end);
+            order.tail().back().unwrap().id
+        };
+        let listed = up(&order, keys[0], false);
+        assert_eq!(
+            listed.last(),
+            Some(&(end, true)),
+            "after every shuffled pick"
+        );
+        assert_eq!(listed.iter().filter(|(_, at_end)| *at_end).count(), 1);
+        order.remove_queued(id);
+        assert!(order.tail().is_empty());
+
+        // Jumping to it plays it at once; the source carries on after it.
+        let mut order = ordered(&keys, keys[0]);
+        order.append(end);
+        let position = up(&order, keys[0], true)
+            .iter()
+            .position(|(_, at_end)| *at_end)
+            .unwrap();
+        assert_eq!(order.jump_to(position, Some(keys[0]), true), Some(end));
+        assert!(order.tail().is_empty());
+        assert_eq!(order.advance_next(end, true, false), Some(keys[1]));
+        // Clearing the added tracks clears both kinds.
+        order.enqueue((92, 1));
+        order.append((93, 1));
+        order.clear_queued();
+        assert!(!order.has_added());
     }
 
     #[test]

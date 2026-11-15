@@ -417,8 +417,8 @@ mod drag_tests {
         };
 
         // Two tracks already added; a third is carried in above them.
-        app.add_to_queue(&ctx, app.library.tracks[3].clone());
-        app.add_to_queue(&ctx, app.library.tracks[2].clone());
+        app.add_to_queue(&ctx, app.library.tracks[3].clone(), false);
+        app.add_to_queue(&ctx, app.library.tracks[2].clone(), false);
         for _ in 0..3 {
             output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         }
