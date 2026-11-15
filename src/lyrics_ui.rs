@@ -1013,8 +1013,9 @@ fn paint_selection(ui: &egui::Ui, state: &State, index: usize, line: Rect, scale
             let bottom = origin.y + placed.max_y();
             let area =
                 Rect::from_min_max(grow(egui::pos2(left, top)), grow(egui::pos2(right, bottom)));
+            // A little room on each side, so letters do not touch its edges.
             ui.painter()
-                .rect_filled(area.expand2(egui::vec2(1.5, 0.0)), 4.0, color);
+                .rect_filled(area.expand2(egui::vec2(4.0, 0.0)), 4.0, color);
         }
         start += placed.char_count_including_newline().0;
     }

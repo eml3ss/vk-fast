@@ -518,6 +518,8 @@ impl MusicApp {
         );
         egui::ComboBox::from_id_salt("lyrics-source")
             .selected_text(source.name())
+            // Tall enough for every source, without a scrollbar.
+            .height(400.0)
             .show_ui(ui, |ui| {
                 for item in [
                     Source::Lrclib,
