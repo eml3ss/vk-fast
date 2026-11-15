@@ -15,7 +15,9 @@ const ROW: f32 = 58.0;
 const ROW_INSET: f32 = 5.0;
 /// Space around a section heading: above it (from the search field or the
 /// last track's highlight) and below it (to the first track's highlight).
-const HEADING_GAP: f32 = 14.0;
+/// The list itself starts this far under the field, where its scrollbar
+/// always began, so the first heading needs no room of its own above.
+const HEADING_GAP: f32 = 18.0;
 const NOTE: f32 = 36.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -422,8 +424,9 @@ impl MusicApp {
                             }
                         });
                     });
-                // With the heading's own top room, the gap under the field.
-                ui.add_space(ROW_INSET);
+                // The list, and its scrollbar, start a heading's gap under the
+                // field.
+                ui.add_space(HEADING_GAP);
                 theme::scroll_area(
                     ui,
                     egui::ScrollArea::vertical()
@@ -438,12 +441,19 @@ impl MusicApp {
                         // A track's highlight is ROW_INSET inside its row: the
                         // heading's own room makes up the rest of the gap.
                         let pad = HEADING_GAP - ROW_INSET;
-                        let height = |entry: &Entry| match entry {
-                            Entry::Heading(_) => pad + heading_text + pad,
+                        // The first heading is at the list's top: the gap above
+                        // it is the one under the field.
+                        let above = |index: usize| if index == 0 { 0.0 } else { pad };
+                        let height = |index: usize, entry: &Entry| match entry {
+                            Entry::Heading(_) => above(index) + heading_text + pad,
                             Entry::Note(_) => NOTE,
                             Entry::Track(..) => ROW,
                         };
-                        let total: f32 = entries.iter().map(height).sum();
+                        let total: f32 = entries
+                            .iter()
+                            .enumerate()
+                            .map(|(index, entry)| height(index, entry))
+                            .sum();
                         let (whole, _) =
                             ui.allocate_exact_size(egui::vec2(width, total), Sense::hover());
                         let visible = ui.clip_rect();
@@ -451,7 +461,7 @@ impl MusicApp {
                         for (index, entry) in entries.iter().enumerate() {
                             let rect = egui::Rect::from_min_size(
                                 egui::pos2(whole.left(), top),
-                                egui::vec2(width, height(entry)),
+                                egui::vec2(width, height(index, entry)),
                             );
                             top = rect.bottom();
                             if !visible.intersects(rect) {
@@ -460,7 +470,7 @@ impl MusicApp {
                             match entry {
                                 Entry::Heading(text) => {
                                     ui.painter().text(
-                                        rect.left_top() + egui::vec2(4.0, pad),
+                                        rect.left_top() + egui::vec2(4.0, above(index)),
                                         egui::Align2::LEFT_TOP,
                                         *text,
                                         heading_font.clone(),

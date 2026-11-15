@@ -268,6 +268,9 @@ fn headings_keep_even_gaps_and_a_hovered_cover_offers_play() {
     for gap in gaps {
         assert!((gap - gaps[0]).abs() < 1.0, "uneven gaps {gaps:?}");
     }
+    // The list, and so its scrollbar, starts where it always did: 18 points
+    // under the field.
+    assert!((gaps[0] - 18.0).abs() < 1.0, "{gaps:?}");
 
     // Hovering a row puts the round play button on its cover.
     let row = text(&output, "Beta song").unwrap().center();
