@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libclang-dev libxkbcommon-dev libx11-dev \
+            build-essential cmake pkg-config libclang-dev libxkbcommon-dev libx11-dev \
             libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev \
             libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev \
             libfontconfig1-dev python3 binutils

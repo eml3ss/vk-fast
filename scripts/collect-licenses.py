@@ -31,6 +31,9 @@ for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version
         if path.is_file() and any(path.name.upper().startswith(prefix) for prefix in
                                  ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE", "COPYRIGHT")):
             files.add(path)
+    # btls-sys builds the BoringSSL it carries into the program.
+    if package["name"] == "btls-sys":
+        files.add(directory / "deps" / "boringssl" / "LICENSE")
     for path in sorted(files):
         if path.is_file() and path.stat().st_size < 1024 * 1024:
             content = path.read_text(errors="replace")

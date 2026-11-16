@@ -17,6 +17,7 @@ mod autoscroll;
 mod avatar_cache;
 mod backdrop;
 mod carousel;
+mod chrome_http;
 mod client_platform;
 mod cover_art;
 mod cover_cache;

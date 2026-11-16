@@ -45,7 +45,7 @@ Portable-архив содержит только `vk-fast.exe` в корне. �
 
 ## Сборка на Windows
 
-Нужны официальный Rust 1.95+ с целью `x86_64-pc-windows-msvc`, компоненты Visual Studio **Разработка классических приложений на C++** (MSVC x64/x86 и Windows SDK), Python 3.11+ и Git Bash. Cargo устанавливает Rust-зависимости из `Cargo.lock`; LLVM, cargo-xwin и Wine для нативной сборки не нужны.
+Нужны официальный Rust 1.98+ с целью `x86_64-pc-windows-msvc`, компоненты Visual Studio **Разработка классических приложений на C++** (MSVC x64/x86 и Windows SDK), CMake, LLVM (libclang: из него генерируются привязки BoringSSL, через который клиент говорит с VK как Chrome), Git, Python 3.11+ и Git Bash. Cargo устанавливает Rust-зависимости из `Cargo.lock`; cargo-xwin и Wine для нативной сборки не нужны. BoringSSL под MSVC собирается без ассемблера, NASM не нужен.
 
 Запустите из Git Bash:
 
@@ -59,7 +59,7 @@ Rust и кэш Cargo можно установить на другой диск:
 
 ## Сборка на Linux
 
-Для основного приложения нужны официальный Rust 1.95+ с целью `x86_64-pc-windows-msvc`, Cargo, LLVM (`clang-cl`, `lld-link`, `llvm-lib`, `llvm-rc`), Python 3.11+ и [cargo-xwin](https://github.com/rust-cross/cargo-xwin) для загрузки MSVC CRT/Windows SDK. Используйте компилятор и стандартную библиотеку из одного официального toolchain.
+Для основного приложения нужны официальный Rust 1.98+ с целью `x86_64-pc-windows-msvc`, Cargo, LLVM (`clang-cl`, `lld-link`, `llvm-lib`, `llvm-rc`), Python 3.11+ и [cargo-xwin](https://github.com/rust-cross/cargo-xwin) для загрузки MSVC CRT/Windows SDK. Используйте компилятор и стандартную библиотеку из одного официального toolchain. Кросс-сборка BoringSSL (CMake с clang-cl) с Linux не проверялась: выпуски собираются нативно на Windows в GitHub Actions.
 
 
 Для NSIS на Linux нужен Wine. `scripts/windows_installer.py` скачивает NSIS 3.13 из официального выпуска и проверяет закреплённые SHA-256. Компилятор хранится в `~/.cache/vk-fast-build-tools`, запускается в собственном Wine-префиксе и не использует обычный профиль Wine. Пути можно переопределить через `VK_FAST_BUILD_TOOLS` и `VK_FAST_NSIS_WINEPREFIX`.

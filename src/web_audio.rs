@@ -12,11 +12,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::{
-    blocking::{Client, Response},
-    header::{CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE},
-    redirect::Policy,
-};
+use crate::chrome_http::{Client, Response};
+use reqwest::header::{CONTENT_TYPE, COOKIE, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -60,11 +57,23 @@ pub(crate) const USER_AGENT: &str = crate::client_platform::USER_AGENT;
 
 /// Sends a request to VK in its turn (`vk_pace`) and logs it.
 trait SendVk {
-    fn send_vk(self, what: &str) -> reqwest::Result<reqwest::blocking::Response>;
+    type Answer;
+    fn send_vk(self, what: &str) -> Self::Answer;
 }
 
+impl SendVk for crate::chrome_http::RequestBuilder {
+    type Answer = crate::chrome_http::Result<Response>;
+    fn send_vk(self, what: &str) -> Self::Answer {
+        crate::vk_pace::wait();
+        self.send_logged("vk-http", what)
+    }
+}
+
+/// Uploads of the user's own MP3s stream from the file with progress, on
+/// their own client.
 impl SendVk for reqwest::blocking::RequestBuilder {
-    fn send_vk(self, what: &str) -> reqwest::Result<reqwest::blocking::Response> {
+    type Answer = reqwest::Result<reqwest::blocking::Response>;
+    fn send_vk(self, what: &str) -> Self::Answer {
         crate::vk_pace::wait();
         self.send_logged("vk-http", what)
     }
@@ -716,7 +725,7 @@ fn act_of(params: &[(&'static str, String)]) -> String {
     format!("al_audio {act}")
 }
 
-fn network(error: reqwest::Error) -> WebAudioError {
+fn network(error: crate::chrome_http::Error) -> WebAudioError {
     if error.is_timeout() {
         WebAudioError::Timeout
     } else {
@@ -810,8 +819,6 @@ impl WebAudioClient {
         let http = Client::builder()
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(8))
-            .redirect(Policy::none())
-            .user_agent(USER_AGENT)
             .build()
             .map_err(|_| WebAudioError::Network)?;
         Ok(Self {
@@ -1443,6 +1450,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner_id))
             .form(&params)
+            .fetch(crate::chrome_http::FetchSite::SameOrigin)
             .send_vk(&act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
@@ -1786,6 +1794,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("mix_id", mix_id), ("access_token", session.token.as_str())])
+            .fetch(crate::chrome_http::FetchSite::SameSite)
             .send_vk("audio.getStreamMixSettings")
             .map_err(network)?;
         if response.status().is_redirection() {
@@ -1897,6 +1906,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&form)
+            .fetch(crate::chrome_http::FetchSite::SameSite)
             .send_vk("audio.getStreamMixAudios")
             .map_err(network)?;
         if response.status().is_redirection() {
@@ -3230,6 +3240,7 @@ impl WebAudioClient {
                     .header(ORIGIN, format!("https://{}", self.host))
                     .header(REFERER, format!("https://{}/", self.host))
                     .form(&form)
+                    .fetch(crate::chrome_http::FetchSite::SameSite)
                     .send_vk(&format!("api {method}"))
                     .map_err(network)?;
                 detail_response(&token_body(response)?)
@@ -3383,6 +3394,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("app_id", "6287487"), ("version", "1")])
+            .fetch(crate::chrome_http::FetchSite::SameSite)
             .send_vk("web_token")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
@@ -3493,6 +3505,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner))
             .form(&params)
+            .fetch(crate::chrome_http::FetchSite::SameOrigin)
             .send_vk(&act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
@@ -3637,6 +3650,7 @@ impl WebAudioClient {
                 ("al", "1"),
                 ("audio_ids", id.as_str()),
             ])
+            .fetch(crate::chrome_http::FetchSite::SameOrigin)
             .send_vk("al_audio reload_audios")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
@@ -3696,6 +3710,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, viewer))
             .form(&[("act", "reload_audio"), ("al", "1"), ("ids", ids.as_str())])
+            .fetch(crate::chrome_http::FetchSite::SameOrigin)
             .send_vk("al_audio reload_audio")
             .map_err(network)?;
         self.absorb_set_cookies(&response);

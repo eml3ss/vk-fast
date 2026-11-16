@@ -2,7 +2,7 @@
 //! Protocol: public qrAuth-web entry.b9595b4b.js and
 //! static.vk.ru/vkid/1.1.1427/185.js, checked 2026-10-29.
 
-use crate::diagnostics::SendLogged;
+use crate::chrome_http::{Client, Redirects, Response};
 use crate::{
     i18n::Language,
     model::{Profile, profile_avatar_from_object},
@@ -11,10 +11,8 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{
     Url,
-    blocking::{Client, Response},
     cookie::{CookieStore, Jar},
     header::{ORIGIN, REFERER},
-    redirect::Policy,
 };
 use serde_json::Value;
 use std::{
@@ -35,7 +33,6 @@ const API: &str = "https://api.vk.ru/method/";
 const RETURN_URI: &str = "https://vk.ru/feed";
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 const MAX_LIFETIME: u64 = 300;
-const USER_AGENT: &str = crate::client_platform::USER_AGENT;
 
 #[derive(Clone, Default)]
 pub struct Control {
@@ -212,7 +209,7 @@ fn valid_qr_url(value: &str) -> bool {
                 })
         })
 }
-fn network(error: reqwest::Error) -> Error {
+fn network(error: crate::chrome_http::Error) -> Error {
     if error.is_timeout() {
         Error::Timeout
     } else {
@@ -262,6 +259,7 @@ fn call(
         .header(ORIGIN, "https://id.vk.ru")
         .header(REFERER, "https://id.vk.ru/")
         .form(parameters)
+        .fetch(crate::chrome_http::FetchSite::SameSite)
         .send_logged("qr-login", &format!("api {method}"))
         .map_err(network)?;
     decode_api(&read(response)?)
@@ -346,18 +344,12 @@ pub fn start(control: Control, events: SyncSender<Event>) -> Result<SignedIn, Er
     control.check()?;
     let _ = events.try_send(Event::Status(Stage::Creating));
     let jar = Arc::new(Jar::default());
+    // The same Chrome as every later request of this session.
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
-        .cookie_provider(jar.clone())
-        .user_agent(USER_AGENT)
-        .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 || !allowed_url(attempt.url()) {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
+        .cookie_jar(jar.clone())
+        .redirects(Redirects::Follow(allowed_url))
         .build()
         .map_err(|_| Error::Network)?;
     let init = bootstrap(&client)?;
@@ -531,6 +523,7 @@ fn finish(
         .header(ORIGIN, "https://id.vk.ru")
         .header(REFERER, "https://id.vk.ru/")
         .form(&parameters)
+        .fetch(crate::chrome_http::FetchSite::SameSite)
         .send_logged("qr-login", "connect code")
         .map_err(network);
     for (key, value) in &mut parameters {

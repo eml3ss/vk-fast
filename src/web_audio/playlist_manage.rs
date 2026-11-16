@@ -338,6 +338,7 @@ impl WebAudioClient {
                 format!("multipart/form-data; boundary={boundary}"),
             )
             .body(data)
+            .fetch(crate::chrome_http::FetchSite::CrossSite)
             .send_vk("playlist cover upload")
             .map_err(network)?;
         let text = body(response)?;

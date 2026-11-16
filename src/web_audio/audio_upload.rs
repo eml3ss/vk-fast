@@ -3,6 +3,24 @@ use super::*;
 use crate::audio_upload::{self, Error, Source};
 use std::io::{self, Cursor};
 
+/// The upload server's answer as text, at most `MAX_RESPONSE` long.
+fn upload_body_text(response: reqwest::blocking::Response) -> Result<Zeroizing<String>, Error> {
+    if !response.status().is_success() {
+        return Err(Error::Web(WebAudioError::Http(response.status().as_u16())));
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    response
+        .take(MAX_RESPONSE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Web(WebAudioError::Network))?;
+    if bytes.len() as u64 > MAX_RESPONSE {
+        return Err(Error::Web(WebAudioError::TooLarge));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map(Zeroizing::new)
+        .map_err(|_| Error::Web(WebAudioError::Format))
+}
+
 impl WebAudioClient {
     pub fn upload_audio(
         &self,
@@ -27,10 +45,17 @@ impl WebAudioClient {
                 let reader=ProgressReader { file:source.reader()?.take(source.size),
                     canceled: canceled.clone(), done:0,total:source.size,progress, last:0 };
                 let upload_body=Cursor::new(header).chain(reader).chain(Cursor::new(footer));
-                let response=self.http.post(url).timeout(Duration::from_secs(600))
+                let client=reqwest::blocking::Client::builder()
+                    .connect_timeout(Duration::from_secs(8))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .user_agent(USER_AGENT)
+                    .build()
+                    .map_err(|_| Error::Web(WebAudioError::Network))?;
+                let response=client.post(url).timeout(Duration::from_secs(600))
                     .header(CONTENT_TYPE,format!("multipart/form-data; boundary={boundary}"))
-                    .body(reqwest::blocking::Body::sized(upload_body,length)).send_vk("audio upload").map_err(network)?;
-                let text=body(response)?;
+                    .body(reqwest::blocking::Body::sized(upload_body,length)).send_vk("audio upload")
+                    .map_err(|error| Error::Web(if error.is_timeout() { WebAudioError::Timeout } else { WebAudioError::Network }))?;
+                let text=upload_body_text(response)?;
                 self.commit_home_streams(owner,generation,HashMap::new(),canceled)?;
                 source.unchanged()?;
                 serde_json::from_str(&text).map_err(|_| Error::Web(WebAudioError::Format))

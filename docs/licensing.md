@@ -6,6 +6,7 @@
 | --- | --- |
 | Symphonia | MPL-2.0 |
 | Rubato | MIT / Apache-2.0 |
+| wreq, BoringSSL (через btls-sys) — связь с VK как у Chrome | Apache-2.0; BoringSSL — Apache-2.0/ISC/OpenSSL, текст в уведомлениях |
 | Остальные Rust-зависимости | Условия, закреплённые в Cargo.lock и исходных уведомлениях |
 | NSIS, инструмент Windows-установщика | [COPYING](third-party/windows/NSIS.txt) |
 

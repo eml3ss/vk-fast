@@ -29,19 +29,19 @@
 
 ## Сборка
 
-Rust 1.95+ и Cargo; зависимости закреплены в Cargo.lock.
+Rust 1.98+, Cargo и CMake (из него собирается BoringSSL, через который клиент говорит с VK как Chrome); зависимости закреплены в Cargo.lock.
 
 ```sh
 cargo build --release --locked
 cargo run --release --locked
 ```
 
-Для Linux нужны pkg-config, Clang/libclang, X11/Wayland, OpenGL/EGL и PipeWire. Пакеты для сборки:
+Для Linux нужны pkg-config, CMake, Clang/libclang, X11/Wayland, OpenGL/EGL и PipeWire. Пакеты для сборки:
 
 | Система | Пакеты |
 | --- | --- |
-| Arch Linux | `base-devel rust pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire` |
-| Debian / Ubuntu | `build-essential pkg-config libclang-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
+| Arch Linux | `base-devel rust cmake pkgconf clang libx11 libxcursor libxi libxrandr libxkbcommon wayland mesa libpipewire` |
+| Debian / Ubuntu | `build-essential cmake pkg-config libclang-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libpipewire-0.3-dev libspa-0.2-dev` |
 
 Для запуска Linux-пакетов используются библиотеки дистрибутива. [Linux: запуск и упаковка](docs/linux.md). Пакеты выпусков собирает GitHub Actions: [выпуск](docs/release.md).
 

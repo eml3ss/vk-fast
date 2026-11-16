@@ -9,12 +9,12 @@ struct ClientIdentity {
 const fn identity_for_windows(windows: bool) -> ClientIdentity {
     if windows {
         ClientIdentity {
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             device_name: "VK Fast on Windows",
         }
     } else {
         ClientIdentity {
-            user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             device_name: "VK Fast on Linux",
         }
     }
@@ -41,7 +41,7 @@ mod tests {
         let identity = identity_for_windows(false);
         assert_eq!(
             identity.user_agent,
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         );
         assert_eq!(identity.device_name, "VK Fast on Linux");
     }
