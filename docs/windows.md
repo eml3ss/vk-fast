@@ -45,7 +45,7 @@ Portable-архив содержит только `vk-fast.exe` в корне. �
 
 ## Сборка на Windows
 
-Нужны официальный Rust 1.98+ с целью `x86_64-pc-windows-msvc`, компоненты Visual Studio **Разработка классических приложений на C++** (MSVC x64/x86 и Windows SDK), CMake, LLVM (libclang: из него генерируются привязки BoringSSL, через который клиент говорит с VK как Chrome), Git, Python 3.11+ и Git Bash. Cargo устанавливает Rust-зависимости из `Cargo.lock`; cargo-xwin и Wine для нативной сборки не нужны. BoringSSL под MSVC собирается без ассемблера, NASM не нужен.
+Нужны официальный Rust 1.98+ с целью `x86_64-pc-windows-msvc`, компоненты Visual Studio **Разработка классических приложений на C++** (MSVC x64/x86 и Windows SDK), CMake, NASM, LLVM (libclang: из него генерируются привязки BoringSSL, через который клиент говорит с VK как Chrome), Git, Python 3.11+ и Git Bash. Cargo устанавливает Rust-зависимости из `Cargo.lock`; cargo-xwin и Wine для нативной сборки не нужны. Для ассемблерной части BoringSSL нужен [NASM](https://www.nasm.us/) в `PATH`.
 
 Запустите из Git Bash:
 

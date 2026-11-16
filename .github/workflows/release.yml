@@ -72,6 +72,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # BoringSSL (Chrome's TLS for VK, src/chrome_http.rs) assembles its
+      # Windows code with NASM.
+      - name: Install NASM
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-release
