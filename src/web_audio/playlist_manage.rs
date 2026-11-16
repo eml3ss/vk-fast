@@ -1,5 +1,4 @@
 //! Native playlist editing and removal, including VK's own cover upload flow.
-use crate::diagnostics::SendLogged;
 use std::io::Cursor as ImageCursor;
 
 use super::*;
@@ -339,7 +338,7 @@ impl WebAudioClient {
                 format!("multipart/form-data; boundary={boundary}"),
             )
             .body(data)
-            .send_logged("vk-http", "playlist cover upload")
+            .send_vk("playlist cover upload")
             .map_err(network)?;
         let text = body(response)?;
         self.commit_home_streams(owner, generation, HashMap::new(), canceled)?;

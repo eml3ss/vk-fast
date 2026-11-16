@@ -58,6 +58,18 @@ pub const PLAYLIST_TITLE_MAX_CHARS: usize = 100;
 const LOOKUP_BUDGET: Duration = Duration::from_secs(60);
 pub(crate) const USER_AGENT: &str = crate::client_platform::USER_AGENT;
 
+/// Sends a request to VK in its turn (`vk_pace`) and logs it.
+trait SendVk {
+    fn send_vk(self, what: &str) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+impl SendVk for reqwest::blocking::RequestBuilder {
+    fn send_vk(self, what: &str) -> reqwest::Result<reqwest::blocking::Response> {
+        crate::vk_pace::wait();
+        self.send_logged("vk-http", what)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebAudioError {
     NoSession,
@@ -413,6 +425,9 @@ struct State {
     mix: Option<MixSession>,
     followed_playlists: playlist_follow::FollowState,
     followed_artists: artist_follow::FollowState,
+    /// Tracks VK was already asked for a cover and gave none: not asked
+    /// again on every page load (it looks like a bot and changes nothing).
+    no_cover: HashSet<(i64, i64)>,
 }
 
 // Per-track URL hashes are credentials for the private reload endpoint.
@@ -1066,7 +1081,7 @@ impl WebAudioClient {
                 .http
                 .get(url.clone())
                 .header(COOKIE, cookie)
-                .send_logged("vk-http", "viewer page")
+                .send_vk("viewer page")
                 .map_err(network)?;
             let set_cookies = response
                 .headers()
@@ -1297,10 +1312,15 @@ impl WebAudioClient {
         if cfg!(test) {
             return;
         }
+        let asked = self
+            .state
+            .lock()
+            .map(|state| state.no_cover.clone())
+            .unwrap_or_default();
         let missing: Vec<usize> = tracks
             .iter()
             .enumerate()
-            .filter(|(_, track)| track.cover_url.is_none())
+            .filter(|(_, track)| track.cover_url.is_none() && !asked.contains(&track.key()))
             .map(|(index, _)| index)
             .collect();
         if missing.is_empty() {
@@ -1325,6 +1345,14 @@ impl WebAudioClient {
                 return;
             };
             apply_api_covers(&value, tracks, chunk);
+            if let Ok(mut state) = self.state.lock() {
+                state.no_cover.extend(
+                    chunk
+                        .iter()
+                        .filter(|index| tracks[**index].cover_url.is_none())
+                        .map(|index| tracks[*index].key()),
+                );
+            }
         }
     }
 
@@ -1415,7 +1443,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner_id))
             .form(&params)
-            .send_logged("vk-http", &act_of(&params))
+            .send_vk(&act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -1758,7 +1786,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("mix_id", mix_id), ("access_token", session.token.as_str())])
-            .send_logged("vk-http", "audio.getStreamMixSettings")
+            .send_vk("audio.getStreamMixSettings")
             .map_err(network)?;
         if response.status().is_redirection() {
             self.forget_mix_session(expected_owner, generation, &session);
@@ -1869,7 +1897,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&form)
-            .send_logged("vk-http", "audio.getStreamMixAudios")
+            .send_vk("audio.getStreamMixAudios")
             .map_err(network)?;
         if response.status().is_redirection() {
             return Err(WebAudioError::TokenExpired);
@@ -3202,7 +3230,7 @@ impl WebAudioClient {
                     .header(ORIGIN, format!("https://{}", self.host))
                     .header(REFERER, format!("https://{}/", self.host))
                     .form(&form)
-                    .send_logged("vk-http", &format!("api {method}"))
+                    .send_vk(&format!("api {method}"))
                     .map_err(network)?;
                 detail_response(&token_body(response)?)
             },
@@ -3355,7 +3383,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/", self.host))
             .form(&[("app_id", "6287487"), ("version", "1")])
-            .send_logged("vk-http", "web_token")
+            .send_vk("web_token")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3465,7 +3493,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, owner))
             .form(&params)
-            .send_logged("vk-http", &act_of(&params))
+            .send_vk(&act_of(&params))
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3609,7 +3637,7 @@ impl WebAudioClient {
                 ("al", "1"),
                 ("audio_ids", id.as_str()),
             ])
-            .send_logged("vk-http", "al_audio reload_audios")
+            .send_vk("al_audio reload_audios")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3668,7 +3696,7 @@ impl WebAudioClient {
             .header(ORIGIN, format!("https://{}", self.host))
             .header(REFERER, format!("https://{}/audios{}", self.host, viewer))
             .form(&[("act", "reload_audio"), ("al", "1"), ("ids", ids.as_str())])
-            .send_logged("vk-http", "al_audio reload_audio")
+            .send_vk("al_audio reload_audio")
             .map_err(network)?;
         self.absorb_set_cookies(&response);
         if response.status().is_redirection() {
@@ -3939,9 +3967,27 @@ fn detail_method_is_readonly(method: &str) -> bool {
     )
 }
 
+/// Logs the code of an error VK answered with (inside a 200 response, so
+/// the HTTP status alone shows nothing): 6, 9 and 29 are VK asking to slow
+/// down, 14 a captcha, 17 a check of the account.
+fn log_api_error(error: &Value) {
+    let code = error.get("error_code").and_then(number).unwrap_or(-1);
+    let meaning = match code {
+        6 => "too many requests per second",
+        9 => "flood control",
+        14 => "captcha",
+        17 => "validation required",
+        29 => "rate limit reached",
+        5 | 27 | 28 => "token",
+        _ => "other",
+    };
+    crate::diagnostics::event("vk-http", &format!("api error code={code} ({meaning})"));
+}
+
 fn detail_response(text: &str) -> Result<Value, WebAudioError> {
     let mut value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
+        log_api_error(error);
         return Err(match error.get("error_code").and_then(number) {
             Some(5 | 27 | 28) => WebAudioError::TokenExpired,
             // "Too many requests per second": a pause, not a refusal.
@@ -4642,6 +4688,7 @@ fn apply_api_covers(value: &Value, tracks: &mut [Track], indices: &[usize]) {
 fn parse_mix_settings(text: &str) -> Result<MixSettings, WebAudioError> {
     let value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
+        log_api_error(error);
         return Err(match error.get("error_code").and_then(number) {
             Some(5 | 27 | 28) => WebAudioError::TokenExpired,
             _ => WebAudioError::Rejected,
@@ -4711,6 +4758,7 @@ fn parse_mix_settings(text: &str) -> Result<MixSettings, WebAudioError> {
 fn parse_mix_page(text: &str) -> Result<HomeTracks, WebAudioError> {
     let value: Value = serde_json::from_str(text).map_err(|_| WebAudioError::Format)?;
     if let Some(error) = value.get("error") {
+        log_api_error(error);
         return Err(match error.get("error_code").and_then(number) {
             Some(5 | 27 | 28) => WebAudioError::TokenExpired,
             _ => WebAudioError::Rejected,

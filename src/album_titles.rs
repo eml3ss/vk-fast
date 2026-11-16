@@ -161,9 +161,28 @@ impl MusicApp {
         self.fill_own_playlist_albums();
         self.request_release_titles(ctx);
         self.save_album_names(false);
-        let wanted = std::mem::take(&mut self.album_titles.wanted);
+        let mut wanted = std::mem::take(&mut self.album_titles.wanted);
         if self.demo || self.album_titles.request.is_some() || wanted.is_empty() {
             return;
+        }
+        // One request names up to 100 tracks: fill it with the list's other
+        // unnamed rows, not only the dozen on screen, so scrolling a long
+        // list asks VK a few times instead of once a screen.
+        if wanted.len() < 100 {
+            let state = &self.album_titles;
+            let more: Vec<_> = self
+                .view_tracks()
+                .iter()
+                .filter(|track| {
+                    track.album.as_ref().is_some_and(|album| {
+                        album.title.trim().is_empty()
+                            && !state.names.contains_key(&(album.owner_id, album.id))
+                    }) && !state.attempted.contains(&track.key())
+                })
+                .map(Track::key)
+                .take(200)
+                .collect();
+            wanted.extend(more);
         }
         let Some(session) = &self.session else { return };
         let Some(client) = session.music.clone() else {
@@ -193,7 +212,10 @@ impl MusicApp {
         if let Ok(worker) = thread::Builder::new()
             .name("vk-album-titles".into())
             .spawn(move || {
-                let _ = sender.send(client.tracks_metadata(owner, &keys, &worker_cancel));
+                let names = crate::vk_pace::background(|| {
+                    client.tracks_metadata(owner, &keys, &worker_cancel)
+                });
+                let _ = sender.send(names);
                 repaint.request_repaint();
             })
         {
@@ -328,16 +350,18 @@ impl MusicApp {
             .name("vk-album-names".into())
             .spawn(move || {
                 let mut titles = Vec::with_capacity(albums.len());
-                for album in &albums {
-                    if worker_cancel.load(Ordering::Acquire) {
-                        break;
+                crate::vk_pace::background(|| {
+                    for album in &albums {
+                        if worker_cancel.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let title = client
+                            .collection_title(owner, album, &worker_cancel)
+                            .ok()
+                            .flatten();
+                        titles.push(((album.owner_id, album.id), title));
                     }
-                    let title = client
-                        .collection_title(owner, album, &worker_cancel)
-                        .ok()
-                        .flatten();
-                    titles.push(((album.owner_id, album.id), title));
-                }
+                });
                 let _ = sender.send(titles);
                 repaint.request_repaint();
             })

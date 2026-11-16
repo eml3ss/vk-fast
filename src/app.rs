@@ -972,6 +972,9 @@ fn waits_on_network(playing: bool, resolving: bool, state: &PlaybackState, offli
 /// field above it, and the window's bottom below it.
 const SETTINGS_EDGE: f32 = 18.0;
 
+/// The same broadcast status is not sent again within this time.
+const BROADCAST_REPEAT: Duration = Duration::from_secs(20 * 60);
+
 /// Where a background resolve hands over its track's audio.
 type ResolveReceiver = Receiver<Result<ResolvedTrack, UiError>>;
 
@@ -1510,6 +1513,9 @@ pub struct MusicApp {
     row_number_offset: usize,
     broadcast: bool,
     broadcast_save_failed: bool,
+    /// The status last sent and when: a track that starts again (a retry,
+    /// a reload after an error, a replay) is not sent again soon after.
+    broadcast_sent: Option<(Option<(i64, i64)>, Instant)>,
     window_reopen: bool,
     /// Outer widths of the navigation and the lyrics/queue panels, as the
     /// user last dragged them. Saved with the window geometry.
@@ -1970,6 +1976,7 @@ impl MusicApp {
             row_number_offset: 0,
             broadcast: preferences::load_broadcast(),
             broadcast_save_failed: false,
+            broadcast_sent: None,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
@@ -3229,7 +3236,7 @@ impl MusicApp {
     /// Set or clear the account's "now playing" status. Fire and forget: a
     /// failure leaves the status as it was and never stops playback.
     fn send_broadcast(&mut self, key: Option<(i64, i64)>) {
-        if self.demo || cfg!(test) {
+        if !self.broadcast_due(key, Instant::now()) || self.demo || cfg!(test) {
             return;
         }
         let Some(session) = &self.session else { return };
@@ -3253,6 +3260,19 @@ impl MusicApp {
         {
             self.workers.push(worker);
         }
+    }
+
+    /// Whether the page's status should be set to `key` now: not when the
+    /// same status went out less than `BROADCAST_REPEAT` ago. Counts it.
+    fn broadcast_due(&mut self, key: Option<(i64, i64)>, now: Instant) -> bool {
+        if self
+            .broadcast_sent
+            .is_some_and(|(sent, at)| sent == key && now.duration_since(at) < BROADCAST_REPEAT)
+        {
+            return false;
+        }
+        self.broadcast_sent = Some((key, now));
+        true
     }
 
     /// With repeat one, Next plays the current track again from the start.
@@ -7197,7 +7217,9 @@ impl MusicApp {
         Some(key)
     }
 
-    fn hydrate_metadata(&mut self, ctx: &egui::Context, keys: Vec<(i64, i64)>) {
+    /// `background`: a fill for rows on screen or dates, paced behind what
+    /// the user is waiting for (`vk_pace`); the playing track's own is not.
+    fn hydrate_metadata(&mut self, ctx: &egui::Context, keys: Vec<(i64, i64)>, background: bool) {
         if self.demo || self.metadata_request.is_some() {
             return;
         }
@@ -7223,7 +7245,12 @@ impl MusicApp {
         if let Ok(worker) = thread::Builder::new()
             .name("vk-track-metadata".into())
             .spawn(move || {
-                let result = client.tracks_metadata(owner, &keys, &worker_cancel);
+                let fetch = || client.tracks_metadata(owner, &keys, &worker_cancel);
+                let result = if background {
+                    crate::vk_pace::background(fetch)
+                } else {
+                    fetch()
+                };
                 let _ = sender.send(result);
                 ctx.request_repaint();
             })
@@ -7266,7 +7293,7 @@ impl MusicApp {
             .take(100)
             .collect();
         if !keys.is_empty() {
-            self.hydrate_metadata(ctx, keys);
+            self.hydrate_metadata(ctx, keys, true);
         }
     }
 
@@ -9149,7 +9176,7 @@ impl MusicApp {
                 )
             })
             .inner;
-        self.hydrate_metadata(&ctx, metadata_keys);
+        self.hydrate_metadata(&ctx, metadata_keys, true);
         if let Some(action) = track_action {
             self.handle_track_action(&ctx, action);
             if self.page != rendered_page {
@@ -12771,7 +12798,7 @@ impl MusicApp {
             self.load_page(ctx, true);
         }
         if let Some(key) = self.fullscreen_metadata_key() {
-            self.hydrate_metadata(ctx, vec![key]);
+            self.hydrate_metadata(ctx, vec![key], false);
             // Only once it really went out: another request may be under way.
             if self.metadata_attempted.contains(&key) {
                 self.fullscreen_metadata = Some(key);
@@ -12783,7 +12810,7 @@ impl MusicApp {
                     || track.library_liked.is_none()
             })
         {
-            self.hydrate_metadata(ctx, vec![track.key()]);
+            self.hydrate_metadata(ctx, vec![track.key()], false);
         }
         self.poll_mix(ctx);
         self.prepare_queue_end_mix(ctx);
@@ -13585,6 +13612,7 @@ mod tests {
             row_number_offset: 0,
             broadcast: false,
             broadcast_save_failed: false,
+            broadcast_sent: None,
             window_reopen: false,
             panel_widths: DEFAULT_PANEL_WIDTHS,
             ui_context: ctx.clone(),
@@ -14802,6 +14830,26 @@ mod tests {
                 "Returning to a window size must restore the same layout"
             );
         }
+    }
+
+    #[test]
+    fn the_page_status_is_set_once_per_track_not_on_every_start() {
+        let ctx = egui::Context::default();
+        let mut app = search_test_app(&ctx);
+        let now = Instant::now();
+        assert!(app.broadcast_due(Some((1, 7)), now));
+        // A retry, a reload after an error, a replay: not again soon after.
+        assert!(!app.broadcast_due(Some((1, 7)), now + Duration::from_secs(5)));
+        assert!(!app.broadcast_due(Some((1, 7)), now + Duration::from_secs(600)));
+        // Another track, or clearing the status, goes at once.
+        assert!(app.broadcast_due(Some((1, 8)), now + Duration::from_secs(601)));
+        assert!(app.broadcast_due(None, now + Duration::from_secs(602)));
+        assert!(app.broadcast_due(Some((1, 8)), now + Duration::from_secs(603)));
+        // The same track long after is set again.
+        assert!(app.broadcast_due(
+            Some((1, 8)),
+            now + BROADCAST_REPEAT + Duration::from_secs(700)
+        ));
     }
 
     #[test]
