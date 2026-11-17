@@ -448,6 +448,19 @@ impl RequestBuilder {
     }
 }
 
+/// Connects to a well-known HTTPS site through this client and returns the
+/// status: proof that its TLS and root certificates work on this system.
+pub fn check_tls() -> Result<u16> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .build()?;
+    client
+        .get("https://github.com/")
+        .send()
+        .map(|response| response.status().as_u16())
+}
+
 /// A script's request headers as Chrome sends them, in its order; the
 /// caller's own (origin, referer, content type, cookies) take their places.
 fn fetch_headers(own: &HeaderMap, site: FetchSite) -> (HeaderMap, wreq::header::OrigHeaderMap) {

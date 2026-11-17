@@ -110,6 +110,21 @@ fn main() -> eframe::Result {
     } else {
         None
     };
+    // A service check for CI: the Chrome client's TLS (BoringSSL and its
+    // root certificates) reaches a well-known site. 0.9.2 shipped a Windows
+    // build that could not verify any certificate.
+    if args.iter().any(|arg| arg == "--check-tls") {
+        match chrome_http::check_tls() {
+            Ok(status) => {
+                println!("tls ok status={status}");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("tls failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     #[cfg(windows)]
     if args.iter().any(|arg| arg == "--print-data-paths") {
         let config =

@@ -49,6 +49,8 @@ jobs:
         run: |
           ls -l dist
           ./dist/VK-Fast-*-linux-x86_64.AppImage --appimage-extract-and-run --help
+          # The VK client's TLS verifies a real certificate.
+          ./dist/VK-Fast-*-linux-x86_64.AppImage --appimage-extract-and-run --check-tls
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -97,6 +99,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/portable"
           unzip -o dist/VK-Fast-*-windows-x86_64.zip -d "$RUNNER_TEMP/portable"
           "$RUNNER_TEMP/portable/vk-fast.exe" --print-data-paths
+          # The VK client's TLS verifies a real certificate (0.9.2 could not
+          # on Windows: BoringSSL found no root certificates there).
+          "$RUNNER_TEMP/portable/vk-fast.exe" --check-tls
       - uses: actions/upload-artifact@v4
         with:
           name: windows
