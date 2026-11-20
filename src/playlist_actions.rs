@@ -24,7 +24,7 @@ pub(super) struct State {
         Option<Receiver<Result<Option<playlist_cover::ChosenCover>, playlist_cover::CoverError>>>,
     autoplay: Option<PlayRequest>,
     mix_notice: Option<Instant>,
-    track_notice: Option<Instant>,
+    pub(super) track_notice: Option<Instant>,
     follow: Option<FollowRequest>,
     refresh_followed: bool,
 }
@@ -390,6 +390,10 @@ impl MusicApp {
     }
 
     pub(super) fn track_unavailable_notice(&mut self, ctx: &egui::Context) {
+        // Skipping a blocked artist's track is what the user asked for.
+        if self.skipping_blocked {
+            return;
+        }
         self.playlist_controls.track_notice = Some(Instant::now() + Duration::from_secs(3));
         ctx.request_repaint();
     }

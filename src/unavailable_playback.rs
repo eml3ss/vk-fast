@@ -194,7 +194,14 @@ impl MusicApp {
         rejected.extend(
             self.queued_tracks
                 .values()
-                .filter(|track| track.unavailable == Some(true))
+                .filter(|track| self.unplayable(track))
+                .map(Track::key),
+        );
+        // Blocked artists' tracks are passed over, not counted as failures.
+        rejected.extend(
+            tracks
+                .iter()
+                .filter(|track| track.key() != key && self.blocked_artists.blocks(track))
                 .map(Track::key),
         );
         let next = next_candidate(&mut self.play_order, tracks, key, allow_wrap, &rejected);

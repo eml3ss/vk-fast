@@ -1373,6 +1373,11 @@ pub struct MusicApp {
     language: Language,
     player: Player,
     unavailable_playback: unavailable_playback::State,
+    /// Artists blocked from the artist menu: their tracks are greyed out
+    /// and skipped (`blocked_artists`).
+    blocked_artists: crate::blocked_artists::Blocked,
+    /// A blocked track is being skipped: no "Track unavailable" notice.
+    skipping_blocked: bool,
     playback_retry: playback_retry::State,
     system_media: system_media_app::State,
     tray: tray_app::State,
@@ -1867,6 +1872,12 @@ impl MusicApp {
             demo: false,
             language,
             player,
+            blocked_artists: if cfg!(test) {
+                crate::blocked_artists::Blocked::default()
+            } else {
+                preferences::load_blocked_artists()
+            },
+            skipping_blocked: false,
             unavailable_playback: unavailable_playback::State::default(),
             playback_retry: playback_retry::State::default(),
             system_media: system_media_app::State::default(),
@@ -2644,6 +2655,14 @@ impl MusicApp {
             self.reject_unavailable_track(ctx, key, false);
             return;
         }
+        // A blocked artist's track is skipped quietly, like an unavailable one.
+        if self.blocked_artists.blocks(&track) {
+            crate::diagnostics::event("playback", "play_request: blocked_artist; skipped");
+            self.skipping_blocked = true;
+            self.reject_unavailable_track(ctx, key, false);
+            self.skipping_blocked = false;
+            return;
+        }
         crate::diagnostics::event("playback", "play_request: resolve_start");
         let keys = self.playback_keys();
         self.play_order.sync(&keys, Some(key));
@@ -3273,6 +3292,61 @@ impl MusicApp {
         }
         self.broadcast_sent = Some((key, now));
         true
+    }
+
+    /// Whether `track` cannot be played: VK restricts it, or its artist is
+    /// blocked here. Such rows are greyed out and skipped.
+    pub(super) fn unplayable(&self, track: &Track) -> bool {
+        track.unavailable == Some(true) || self.blocked_artists.blocks(track)
+    }
+
+    /// Blocks `artist` on this computer, or unblocks it; the list is saved
+    /// off the UI thread. The playing track gives way at once when its
+    /// artist is now blocked.
+    fn toggle_artist_block(&mut self, ctx: &egui::Context, artist: &ArtistRef) {
+        let blocked = self.blocked_artists.toggle(artist);
+        self.track_view_cache.invalidate();
+        crate::diagnostics::event(
+            "blocked-artists",
+            &format!(
+                "{} (count {})",
+                if blocked { "blocked" } else { "unblocked" },
+                self.blocked_artists.len()
+            ),
+        );
+        self.track_menu_notice = Some((
+            if blocked {
+                self.language
+                    .text("Исполнитель заблокирован", "Artist blocked")
+            } else {
+                self.language
+                    .text("Исполнитель разблокирован", "Artist unblocked")
+            }
+            .into(),
+            Instant::now() + Duration::from_secs(3),
+        ));
+        if !cfg!(test) {
+            let list = self.blocked_artists.clone();
+            if let Ok(worker) = thread::Builder::new()
+                .name("vk-blocked-artists-save".into())
+                .spawn(move || {
+                    if preferences::save_blocked_artists(&list).is_err() {
+                        crate::diagnostics::event("blocked-artists", "save failed");
+                    }
+                })
+            {
+                self.workers.push(worker);
+            }
+        }
+        if blocked
+            && self
+                .playing
+                .as_ref()
+                .is_some_and(|track| self.blocked_artists.blocks(track))
+        {
+            self.next_track(ctx);
+        }
+        ctx.request_repaint();
     }
 
     /// With repeat one, Next plays the current track again from the start.
@@ -9300,6 +9374,7 @@ impl MusicApp {
                                 connected,
                                 followed: follow.as_ref().map(|follow| follow.saved),
                                 follow_busy: follow.is_some_and(|follow| follow.busy),
+                                blocked: self.blocked_artists.contains(artist),
                             },
                         )
                     }
@@ -9427,6 +9502,7 @@ impl MusicApp {
                 }
             }
             track_menu::Action::ToggleFollow(artist) => self.toggle_artist_follow(ctx, artist),
+            track_menu::Action::ToggleBlock(artist) => self.toggle_artist_block(ctx, &artist),
             track_menu::Action::Download => self.download_track(ctx, track),
             track_menu::Action::RefreshPlaylists => self.load_playlists(ctx, true),
             track_menu::Action::CopyDetails(detail) => {
@@ -9624,7 +9700,7 @@ impl MusicApp {
             ui,
             self.view_tracks().len().max(index + 1) + self.row_number_offset,
         );
-        let unavailable = track.unavailable == Some(true);
+        let unavailable = self.unplayable(track);
         let mut action = None;
         let mut controls_contain_pointer = false;
         let mut menu_target = None;
@@ -13506,6 +13582,8 @@ mod tests {
             demo: false,
             language,
             player: Player::new(),
+            blocked_artists: crate::blocked_artists::Blocked::default(),
+            skipping_blocked: false,
             unavailable_playback: unavailable_playback::State::default(),
             playback_retry: playback_retry::State::default(),
             system_media: system_media_app::State::default(),

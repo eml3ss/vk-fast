@@ -285,7 +285,7 @@ impl MusicApp {
             || self
                 .playing
                 .as_ref()
-                .is_none_or(|track| track.unavailable == Some(true))
+                .is_none_or(|track| self.unplayable(track))
         {
             return;
         }

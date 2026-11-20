@@ -323,3 +323,36 @@ fn an_older_resolver_failure_cannot_replace_a_newer_source_selection() {
     assert!(app.playback_pending.is_none());
     assert_eq!(app.queue_origin.as_deref(), Some("old-source"));
 }
+
+#[test]
+fn a_blocked_artists_track_is_greyed_and_skipped_quietly_and_blocking_skips_the_playing_one() {
+    let ctx = egui::Context::default();
+    let mut app = search_test_app(&ctx);
+    app.demo = false;
+    let mut tracks = page(3, &[1, 2, 3]).items;
+    let blocked = ArtistRef {
+        id: "101".into(),
+        name: "Blocked artist".into(),
+    };
+    tracks[1].artists = vec![blocked.clone()];
+    app.library.tracks = tracks.clone();
+    app.library.exhausted = true;
+    app.play_queue = Some(tracks.clone());
+    app.queue_origin = Some("library".into());
+    app.toggle_artist_block(&ctx, &blocked);
+    assert!(app.unplayable(&tracks[1]) && !app.unplayable(&tracks[0]));
+    // Asked to play it, the queue goes on to the next track, with no
+    // "Track unavailable" notice.
+    app.play_track_at(&ctx, tracks[1].key(), 0.0);
+    assert_eq!(app.playing.as_ref().unwrap().key(), tracks[2].key());
+    assert!(app.playlist_controls.track_notice.is_none());
+
+    // Unblocked, it plays again.
+    app.toggle_artist_block(&ctx, &blocked);
+    assert!(!app.unplayable(&tracks[1]));
+    app.play_track_at(&ctx, tracks[1].key(), 0.0);
+    assert_eq!(app.playing.as_ref().unwrap().key(), tracks[1].key());
+    // Blocking the playing track's artist gives way to the next track.
+    app.toggle_artist_block(&ctx, &blocked);
+    assert_eq!(app.playing.as_ref().unwrap().key(), tracks[2].key());
+}

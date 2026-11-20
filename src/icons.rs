@@ -67,6 +67,8 @@ pub enum Icon {
     Save,
     /// A check mark: done, or already there.
     Check,
+    /// A circle struck through: block an artist.
+    Block,
 }
 
 impl Icon {
@@ -877,6 +879,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Check => {
             line(&[(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)]);
+        }
+        Icon::Block => {
+            // The slash meets the ring at its inner edge on the diagonal.
+            painter.circle_stroke(point(12.0, 12.0), 8.5 * scale, stroke);
+            line(&[(6.2, 6.2), (17.8, 17.8)]);
         }
         Icon::Save => {
             line(&[(12.0, 3.5), (12.0, 15.0)]);

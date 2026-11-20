@@ -16,6 +16,7 @@ mod audio_upload_ui;
 mod autoscroll;
 mod avatar_cache;
 mod backdrop;
+mod blocked_artists;
 mod carousel;
 mod chrome_http;
 mod client_platform;

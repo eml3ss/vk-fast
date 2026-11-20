@@ -67,7 +67,7 @@ impl MusicApp {
         if self.session.is_none() || self.demo {
             return;
         }
-        if track.unavailable == Some(true) {
+        if self.unplayable(&track) {
             self.track_unavailable_notice(ctx);
             return;
         }
@@ -104,7 +104,7 @@ impl MusicApp {
     /// Queues a track carried in from a list, without a notice: it shows up
     /// right under the pointer. Returns its entry.
     fn enqueue_carried(&mut self, track: &Track) -> Option<u64> {
-        if self.session.is_none() || self.demo || track.unavailable == Some(true) {
+        if self.session.is_none() || self.demo || self.unplayable(track) {
             return None;
         }
         self.synchronize_order();
@@ -670,6 +670,7 @@ impl MusicApp {
         if hovered {
             ui.painter().rect_filled(rect, 8.0, theme::selected());
         }
+        let unplayable = self.unplayable(track);
         let cover = egui::Rect::from_center_size(
             rect.left_center() + egui::vec2(22.0, 0.0),
             egui::vec2(36.0, 36.0),
@@ -758,7 +759,7 @@ impl MusicApp {
                 ui.add(
                     egui::Label::new(theme::track_title(
                         track,
-                        if track.unavailable == Some(true) {
+                        if unplayable {
                             theme::muted()
                         } else if current {
                             theme::accent()

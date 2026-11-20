@@ -56,6 +56,8 @@ pub enum Action {
     AlbumMix(AlbumRef),
     /// Follows the artist, or unfollows one already followed.
     ToggleFollow(ArtistRef),
+    /// Blocks the artist on this computer, or unblocks a blocked one.
+    ToggleBlock(ArtistRef),
     RefreshPlaylists,
     ToggleDislike,
     CopyDetails(Detail),
@@ -79,6 +81,8 @@ pub struct ArtistView<'a> {
     /// Whether the account follows the artist, when known.
     pub followed: Option<bool>,
     pub follow_busy: bool,
+    /// Whether the artist is blocked here (`blocked_artists`).
+    pub blocked: bool,
 }
 
 pub fn show_artist(ui: &mut egui::Ui, view: ArtistView<'_>) -> Option<Action> {
@@ -127,6 +131,23 @@ pub fn show_artist(ui: &mut egui::Ui, view: ArtistView<'_>) -> Option<Action> {
     .clicked()
     {
         action = Some(Action::ToggleFollow(artist.clone()));
+    }
+    let block = if view.blocked {
+        language.text("Разблокировать исполнителя", "Unblock artist")
+    } else {
+        language.text("Заблокировать исполнителя", "Block artist")
+    };
+    if row(
+        ui,
+        Icon::Block,
+        block,
+        !artist.name.trim().is_empty() || linked,
+        false,
+        false,
+    )
+    .clicked()
+    {
+        action = Some(Action::ToggleBlock(artist.clone()));
     }
     separator(ui);
     let copy = language.text("Копировать ссылку", "Copy link");
@@ -785,6 +806,14 @@ mod tests {
         followed: Option<bool>,
         events: Vec<egui::Event>,
     ) -> (egui::FullOutput, Option<Action>) {
+        artist_menu_blocked(followed, false, events)
+    }
+
+    fn artist_menu_blocked(
+        followed: Option<bool>,
+        blocked: bool,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<Action>) {
         let context = egui::Context::default();
         theme::install(&context);
         let artist = ArtistRef {
@@ -845,6 +874,7 @@ mod tests {
                                 connected: true,
                                 followed,
                                 follow_busy: false,
+                                blocked,
                             },
                         );
                         action = action.take().or(chosen);
@@ -878,6 +908,19 @@ mod tests {
         // While VK has not said whether it is followed, the item waits.
         let (_, action) = artist_menu(None, pointer(follow, true));
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn an_artists_menu_blocks_the_artist_and_unblocks_a_blocked_one() {
+        let (output, _) = artist_menu_blocked(Some(false), false, Vec::new());
+        let block = text_rect(&output, "Block artist").unwrap().center();
+        let (_, action) = artist_menu_blocked(Some(false), false, pointer(block, true));
+        assert!(
+            matches!(action, Some(Action::ToggleBlock(artist)) if artist.name == "Synthetic Artist")
+        );
+        let (output, _) = artist_menu_blocked(Some(false), true, Vec::new());
+        assert!(text_rect(&output, "Unblock artist").is_some());
+        assert!(text_rect(&output, "Block artist").is_none());
     }
 
     #[test]

@@ -824,6 +824,48 @@ pub fn save_equalizer(settings: &crate::equalizer::Settings) -> io::Result<()> {
     save_equalizer_at(&equalizer_path()?, settings)
 }
 
+/// The locally blocked artists (`blocked_artists`), beside the preferences.
+const BLOCKED_ARTISTS_BYTES: u64 = 512 * 1024;
+
+fn blocked_artists_path() -> io::Result<PathBuf> {
+    let preferences = preferences_path()?;
+    Ok(preferences
+        .parent()
+        .ok_or_else(invalid)?
+        .join("blocked-artists.json"))
+}
+
+fn load_blocked_artists_at(path: &Path) -> io::Result<crate::blocked_artists::Blocked> {
+    let Some(bytes) = read_limited_at(path, BLOCKED_ARTISTS_BYTES)? else {
+        return Ok(crate::blocked_artists::Blocked::default());
+    };
+    serde_json::from_slice::<crate::blocked_artists::Blocked>(&bytes)
+        .map(crate::blocked_artists::Blocked::cleaned)
+        .map_err(|_| invalid())
+}
+
+fn save_blocked_artists_at(
+    path: &Path,
+    blocked: &crate::blocked_artists::Blocked,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec(blocked).map_err(|_| invalid())?;
+    let _guard = WRITES
+        .lock()
+        .map_err(|_| io::Error::other("Preferences writer unavailable"))?;
+    write_bytes_at(path, &bytes, BLOCKED_ARTISTS_BYTES, true).map(|_| ())
+}
+
+/// None blocked when there is no file or it cannot be read.
+pub fn load_blocked_artists() -> crate::blocked_artists::Blocked {
+    blocked_artists_path()
+        .and_then(|path| load_blocked_artists_at(&path))
+        .unwrap_or_default()
+}
+
+pub fn save_blocked_artists(blocked: &crate::blocked_artists::Blocked) -> io::Result<()> {
+    save_blocked_artists_at(&blocked_artists_path()?, blocked)
+}
+
 pub fn load_volume() -> Option<f32> {
     load_at(&preferences_path().ok()?).ok().flatten()
 }
@@ -1502,6 +1544,22 @@ mod tests {
         update_at(&path, |preferences| preferences.auto_ui_scale = true).unwrap();
         let restored = load_preferences_at(&path).unwrap().unwrap();
         assert!(restored.auto_ui_scale && restored.ui_scale == 125);
+    }
+
+    #[test]
+    fn blocked_artists_round_trip_and_a_broken_file_blocks_nobody() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("blocked-artists.json");
+        assert!(load_blocked_artists_at(&path).unwrap().is_empty());
+        let mut blocked = crate::blocked_artists::Blocked::default();
+        blocked.toggle(&crate::model::ArtistRef {
+            id: "101".into(),
+            name: "Synthetic Artist".into(),
+        });
+        save_blocked_artists_at(&path, &blocked).unwrap();
+        assert_eq!(load_blocked_artists_at(&path).unwrap(), blocked);
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(load_blocked_artists_at(&path).is_err());
     }
 
     #[test]
