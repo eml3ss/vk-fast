@@ -538,6 +538,209 @@ pub fn load(
     failed.map_or(Ok(()), Err)
 }
 
+/// The Show all reference of VK's "Appears on" block on the artist page:
+/// its header opens `…/artist/<id>/featuring_releases`. With the section's
+/// item count when VK gave it.
+fn featuring_header(blocks: &[Value]) -> Option<(&Value, Option<&str>, Option<u64>)> {
+    blocks.iter().find_map(|block| {
+        let button = [block.get("actions"), block.get("buttons")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .find(|button| {
+                let action = button.get("action").unwrap_or(button);
+                action
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .and_then(|url| reqwest::Url::parse(url).ok())
+                    .is_some_and(|url| url.path().ends_with("/featuring_releases"))
+            })?;
+        let section = opaque(
+            button
+                .get("section_id")
+                .or_else(|| button.pointer("/action/section_id")),
+        );
+        Some((
+            block,
+            section,
+            button.get("ref_items_count").and_then(Value::as_u64),
+        ))
+    })
+}
+
+fn featuring_title(text: &str) -> bool {
+    let text = text.to_lowercase();
+    ["участи", "appears on", "featuring", "featured on"]
+        .iter()
+        .any(|word| text.contains(word))
+}
+
+/// The release IDs of the artist page's "Appears on" block, in VK's order:
+/// the releases block under the header that opens `featuring_releases`, or
+/// one titled so.
+pub fn featuring_ids(blocks: &[Value]) -> Vec<String> {
+    let header_title = featuring_header(blocks).and_then(|(header, _, _)| {
+        header
+            .get("title")
+            .or_else(|| header.pointer("/layout/title"))
+            .and_then(Value::as_str)
+    });
+    blocks
+        .iter()
+        .find(|block| {
+            block.get("data_type").and_then(Value::as_str) == Some("music_playlists")
+                && block.pointer("/layout/style").and_then(Value::as_str) != Some("artist_releases")
+                && (block.pointer("/layout/style").and_then(Value::as_str)
+                    == Some("featuring_releases")
+                    || block
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .is_some_and(|title| Some(title) == header_title || featuring_title(title)))
+        })
+        .and_then(|block| {
+            block
+                .get("playlists_ids")
+                .or_else(|| block.get("playlist_ids"))
+                .and_then(Value::as_array)
+        })
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Loads the rest of "Appears on" through its Show all section when the
+/// artist page held only part of it (VK puts up to ten on the page).
+pub fn load_featuring(
+    page: &mut ArtistPage,
+    initial: &Value,
+    canceled: &AtomicBool,
+    mut request: impl FnMut(&'static str, Vec<(&'static str, String)>) -> Result<Value, WebAudioError>,
+) -> Result<(), WebAudioError> {
+    const MAX_FEATURING_REQUESTS: usize = 16;
+    let default = initial
+        .pointer("/catalog/default_section")
+        .and_then(Value::as_str);
+    let sections = initial
+        .pointer("/catalog/sections")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let Some(blocks) = sections
+        .iter()
+        .find(|section| section.get("id").and_then(Value::as_str) == default)
+        .or_else(|| sections.first())
+        .and_then(|section| section.get("blocks"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    let Some((_, Some(section), count)) = featuring_header(blocks) else {
+        return Ok(());
+    };
+    if count.is_some_and(|count| count as usize <= page.featuring.len()) {
+        return Ok(());
+    }
+    let mut pending = VecDeque::from([(
+        "catalog.getSection",
+        vec![
+            ("section_id", section.to_owned()),
+            ("need_blocks", "1".to_owned()),
+            ("extended", "1".to_owned()),
+        ],
+    )]);
+    let mut seen = HashSet::new();
+    let mut requests = 0;
+    while let Some((method, params)) = pending.pop_front() {
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        if requests >= MAX_FEATURING_REQUESTS {
+            return Err(WebAudioError::Pagination);
+        }
+        requests += 1;
+        let value = request(method, params)?;
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        let pool: HashMap<String, Release> = value
+            .get("playlists")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Release::from_value)
+            .map(|release| {
+                (
+                    format!("{}_{}", release.album.owner_id, release.album.id),
+                    release,
+                )
+            })
+            .collect();
+        let (blocks, section_value): (Vec<&Value>, Option<&Value>) =
+            if let Some(section) = value.get("section") {
+                (
+                    section
+                        .get("blocks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    Some(section),
+                )
+            } else {
+                (value.get("block").into_iter().collect(), None)
+            };
+        for block in blocks {
+            if block.get("data_type").and_then(Value::as_str) != Some("music_playlists") {
+                continue;
+            }
+            let batch: Vec<_> = block
+                .get("playlists_ids")
+                .or_else(|| block.get("playlist_ids"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|id| pool.get(id).cloned())
+                .collect();
+            artist_releases::merge(&mut page.featuring, batch);
+            if page.featuring.len() > MAX_RELEASES {
+                return Err(WebAudioError::TooLarge);
+            }
+            if let (Some(id), Some(cursor)) =
+                (opaque(block.get("id")), opaque(block.get("next_from")))
+                && seen.insert(("block", id.to_owned(), cursor.to_owned()))
+            {
+                pending.push_back((
+                    "catalog.getBlockItems",
+                    vec![
+                        ("block_id", id.to_owned()),
+                        ("start_from", cursor.to_owned()),
+                        ("extended", "1".to_owned()),
+                    ],
+                ));
+            }
+        }
+        if let Some(section) = section_value
+            && let (Some(id), Some(cursor)) =
+                (opaque(section.get("id")), opaque(section.get("next_from")))
+            && seen.insert(("section", id.to_owned(), cursor.to_owned()))
+        {
+            pending.push_back((
+                "catalog.getSection",
+                vec![
+                    ("section_id", id.to_owned()),
+                    ("start_from", cursor.to_owned()),
+                    ("need_blocks", "1".to_owned()),
+                    ("extended", "1".to_owned()),
+                ],
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +760,7 @@ mod tests {
             releases_error: None,
             releases_pending: false,
             related: Vec::new(),
+            featuring: Vec::new(),
         }
     }
     fn release(id: i64, metadata: Value) -> Value {
@@ -681,5 +885,65 @@ mod tests {
             ),
             Err(WebAudioError::Canceled)
         );
+    }
+    #[test]
+    fn appears_on_comes_from_its_own_block_and_the_rest_from_its_show_all() {
+        let blocks = json!([
+            {"data_type":"artist"},
+            {"data_type":"music_playlists","layout":{"style":"artist_releases"},"title":"Releases","playlists_ids":["-42_1"]},
+            {"data_type":"none","title":"Appears in releases","actions":[{
+                "action":{"type":"open_section","url":"https://vk.ru/artist/synthetic-artist/featuring_releases"},
+                "section_id":"featuring","ref_items_count":3
+            }]},
+            {"data_type":"music_playlists","title":"Appears in releases","playlists_ids":["-42_7","-42_8"]},
+            {"data_type":"music_playlists","title":"Recommendations","playlists_ids":["-42_99"]}
+        ]);
+        let blocks = blocks.as_array().unwrap();
+        assert_eq!(featuring_ids(blocks), ["-42_7", "-42_8"]);
+        // Never part of the artist's own discography.
+        let mut page = page();
+        let initial =
+            json!({"catalog":{"default_section":"s","sections":[{"id":"s","blocks":blocks}]}});
+        page.featuring = vec![Release::from_value(&release(7, json!({}))).unwrap()];
+        let mut calls = Vec::new();
+        load_featuring(&mut page, &initial, &AtomicBool::new(false), |method, params| {
+            calls.push(method);
+            let get=|key|params.iter().find(|(name,_)|*name==key).map(|(_,value)|value.as_str());
+            Ok(match method {
+                "catalog.getSection" => {
+                    assert_eq!(get("section_id"), Some("featuring"));
+                    json!({"section":{"id":"featuring","blocks":[
+                        {"id":"b","data_type":"music_playlists","playlists_ids":["-42_7","-42_8"],"next_from":"more"}
+                    ]},"playlists":[
+                        release(7,json!({})),
+                        release(8,json!({"year":2020,"main_artists":[{"id":"o","name":"Other"}],"featured_artists":[{"id":"s","name":"Synthetic artist"}]}))
+                    ]})
+                }
+                "catalog.getBlockItems" => {
+                    assert_eq!(get("start_from"), Some("more"));
+                    json!({"block":{"id":"b","data_type":"music_playlists","playlists_ids":["-42_9"]},"playlists":[release(9,json!({}))]})
+                }
+                _ => panic!("unexpected method: {method}"),
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, ["catalog.getSection", "catalog.getBlockItems"]);
+        assert_eq!(
+            page.featuring
+                .iter()
+                .map(|release| release.album.id)
+                .collect::<Vec<_>>(),
+            [7, 8, 9]
+        );
+        assert_eq!(
+            page.featuring[1].featuring_caption(crate::i18n::Language::English),
+            "2020 · Other feat. Synthetic artist"
+        );
+        // Everything already on the page: no request.
+        page.featuring.truncate(3);
+        load_featuring(&mut page, &initial, &AtomicBool::new(false), |_, _| {
+            panic!("no request")
+        })
+        .unwrap();
     }
 }

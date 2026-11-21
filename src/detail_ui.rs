@@ -568,6 +568,9 @@ pub struct ReleasesView<'a> {
     pub pending: bool,
     pub playback: Playback,
     pub related: &'a [crate::web_audio::RelatedArtist],
+    /// Others' releases the artist appears on; their tab shows only when
+    /// VK gave some.
+    pub featuring: &'a [Release],
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -575,6 +578,7 @@ enum ReleaseTab {
     #[default]
     Albums,
     Singles,
+    Featuring,
 }
 
 pub fn artist_releases(
@@ -589,6 +593,9 @@ pub fn artist_releases(
         .ctx()
         .data(|data| data.get_temp::<ReleaseTab>(id))
         .unwrap_or_default();
+    if tab == ReleaseTab::Featuring && view.featuring.is_empty() {
+        tab = ReleaseTab::default();
+    }
     ui.horizontal(|ui| {
         ui.selectable_value(
             &mut tab,
@@ -600,6 +607,13 @@ pub fn artist_releases(
             ReleaseTab::Singles,
             view.language.text("Синглы и EP", "Singles & EPs"),
         );
+        if !view.featuring.is_empty() {
+            ui.selectable_value(
+                &mut tab,
+                ReleaseTab::Featuring,
+                view.language.text("Участие в релизах", "Appears on"),
+            );
+        }
         if view.pending {
             ui.add_space(4.0);
             ui.spinner();
@@ -631,14 +645,19 @@ pub fn artist_releases(
         });
         ui.add_space(6.0);
     }
-    let filtered: Vec<_> = view
-        .discography
-        .iter()
-        .filter(|release| match tab {
-            ReleaseTab::Albums => matches!(release.kind, ReleaseKind::Album | ReleaseKind::Unknown),
-            ReleaseTab::Singles => matches!(release.kind, ReleaseKind::Single | ReleaseKind::Ep),
-        })
-        .collect();
+    let filtered: Vec<_> = match tab {
+        ReleaseTab::Featuring => view.featuring.iter().collect(),
+        _ => view
+            .discography
+            .iter()
+            .filter(|release| match tab {
+                ReleaseTab::Albums => {
+                    matches!(release.kind, ReleaseKind::Album | ReleaseKind::Unknown)
+                }
+                _ => matches!(release.kind, ReleaseKind::Single | ReleaseKind::Ep),
+            })
+            .collect(),
+    };
     // The space under the last element before "You may also like".
     let mut tail_gap = SECTION_GAP;
     if filtered.is_empty() && !view.incomplete {
@@ -652,6 +671,9 @@ pub fn artist_releases(
                     ReleaseTab::Singles => view
                         .language
                         .text("Синглов и EP пока нет", "No singles or EPs yet"),
+                    ReleaseTab::Featuring => view
+                        .language
+                        .text("Участия в релизах нет", "Appears on nothing yet"),
                 })
                 .color(theme::muted()),
             )
@@ -670,7 +692,13 @@ pub fn artist_releases(
         &filtered[..filtered.len().min(limit)]
     };
     ui.push_id(("artist-discography", view.artist_id, tab as u8), |ui| {
-        if let Some(intent) = release_grid(ui, covers, view.language, shown, view.playback) {
+        let caption = if tab == ReleaseTab::Featuring {
+            Caption::Artists
+        } else {
+            Caption::Kind
+        };
+        if let Some(intent) = release_grid(ui, covers, view.language, shown, view.playback, caption)
+        {
             action = Some(intent);
         }
     });
@@ -859,7 +887,7 @@ pub fn releases(
         .take(release_columns(ui.available_width()))
         .collect();
     ui.push_id("latest-releases", |ui| {
-        release_grid(ui, covers, language, &visible, playback)
+        release_grid(ui, covers, language, &visible, playback, Caption::Kind)
     })
     .inner
 }
@@ -868,12 +896,22 @@ fn release_columns(width: f32) -> usize {
     ((width + 14.0) / 174.0).floor().clamp(1.0, 16.0) as usize
 }
 
+/// What a release card says under its title.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caption {
+    /// Year and kind, for the artist's own releases.
+    Kind,
+    /// Year and whose release it is, for "Appears on".
+    Artists,
+}
+
 fn release_grid(
     ui: &mut egui::Ui,
     covers: &mut CoverCache,
     language: Language,
     releases: &[&Release],
     playback: Playback,
+    caption: Caption,
 ) -> Option<Action> {
     if releases.is_empty() {
         return None;
@@ -915,7 +953,9 @@ fn release_grid(
                 area.min + egui::vec2(column as f32 * (width + 14.0), row as f32 * row_height),
                 egui::vec2(width, card_height),
             );
-            if let Some(intent) = release_card(ui, covers, language, release, rect, playback) {
+            if let Some(intent) =
+                release_card(ui, covers, language, release, rect, playback, caption)
+            {
                 action = Some(intent);
             }
         }
@@ -930,6 +970,7 @@ fn release_card(
     release: &Release,
     rect: egui::Rect,
     playback: Playback,
+    caption: Caption,
 ) -> Option<Action> {
     let album = &release.album;
     ui.push_id(("release", album.owner_id, album.id), |ui| {
@@ -986,9 +1027,12 @@ fn release_card(
         );
         text.add(
             egui::Label::new(
-                RichText::new(release.caption(language))
-                    .small()
-                    .color(theme::muted()),
+                RichText::new(match caption {
+                    Caption::Kind => release.caption(language),
+                    Caption::Artists => release.featuring_caption(language),
+                })
+                .small()
+                .color(theme::muted()),
             )
             .truncate()
             .selectable(false),
@@ -2524,6 +2568,7 @@ mod tests {
             },
             kind,
             year: Some(2026),
+            artists: None,
         };
         let latest: Vec<_> = (1..=12)
             .map(|id| release(id, format!("Latest {id}"), ReleaseKind::Single))
@@ -2533,6 +2578,10 @@ mod tests {
             release(21, "Single only".into(), ReleaseKind::Single),
             release(22, "EP only".into(), ReleaseKind::Ep),
         ];
+        let featuring = vec![Release {
+            artists: Some("Other feat. Synthetic".into()),
+            ..release(30, "Guest spot".into(), ReleaseKind::Single)
+        }];
         for width in [600.0, 1040.0] {
             let context = egui::Context::default();
             theme::install(&context);
@@ -2562,6 +2611,7 @@ mod tests {
                                 pending: false,
                                 playback: Playback::default(),
                                 related: &[],
+                                featuring: &featuring,
                             },
                         );
                     },
@@ -2594,6 +2644,20 @@ mod tests {
             assert!(find(&output, "Album only").is_none());
             assert!(find(&output, "Single only").is_some());
             assert!(find(&output, "EP only").is_some());
+            assert!(find(&output, "Guest spot").is_none());
+            // "Appears on" sits right of Singles & EPs, with whose release
+            // it is under the title.
+            let singles = find(&output, "Singles & EPs").unwrap();
+            let tab = find(&output, "Appears on").unwrap();
+            assert!(
+                tab.left() > singles.right() && (tab.center().y - singles.center().y).abs() < 1.0
+            );
+            frame(6, pointer(tab.center(), true));
+            frame(7, pointer(tab.center(), false));
+            let output = frame(8, vec![]);
+            assert!(find(&output, "Single only").is_none());
+            assert!(find(&output, "Guest spot").is_some());
+            assert!(find(&output, "2026 · Other feat. Synthetic").is_some());
         }
     }
 
@@ -2609,6 +2673,7 @@ mod tests {
             },
             kind: ReleaseKind::Album,
             year: Some(2026),
+            artists: None,
         };
         let discography: Vec<_> = (1..=12).map(release).collect();
         let related = [crate::web_audio::RelatedArtist {
@@ -2648,6 +2713,7 @@ mod tests {
                             pending: false,
                             playback: Playback::default(),
                             related: &related,
+                            featuring: &[],
                         },
                     );
                 },
@@ -2742,6 +2808,7 @@ mod tests {
             },
             kind: ReleaseKind::Single,
             year: Some(2026),
+            artists: None,
         };
         let related = [crate::web_audio::RelatedArtist {
             artist: ArtistRef {
@@ -2775,6 +2842,7 @@ mod tests {
                         pending: false,
                         playback: Playback::default(),
                         related: &related,
+                        featuring: &[],
                     },
                 );
             },
@@ -2845,6 +2913,7 @@ mod tests {
                             album: album.clone(),
                             kind: ReleaseKind::Album,
                             year: None,
+                            artists: None,
                         }],
                         Playback::default(),
                     );

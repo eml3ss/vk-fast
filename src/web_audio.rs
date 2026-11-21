@@ -259,6 +259,8 @@ pub struct ArtistPage {
     pub releases_pending: bool,
     /// VK's "You may also like" artists, in VK's order.
     pub related: Vec<RelatedArtist>,
+    /// Others' releases the artist appears on ("Appears on"), in VK's order.
+    pub featuring: Vec<crate::artist_releases::Release>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2960,6 +2962,27 @@ impl WebAudioClient {
             }
             page.releases_error = Some(error);
         }
+        // The rest of "Appears on" behind its Show all; what the first
+        // response held stays if this fails.
+        match crate::artist_catalog::load_featuring(
+            &mut page,
+            &value,
+            canceled,
+            |method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+        ) {
+            Err(
+                error @ (WebAudioError::Canceled
+                | WebAudioError::WrongAccount
+                | WebAudioError::Unverified),
+            ) => return Err(error),
+            Err(error) => crate::diagnostics::event(
+                "artist",
+                &format!("featuring releases incomplete: {error:?}"),
+            ),
+            Ok(()) => {}
+        }
         Ok(page)
     }
 
@@ -4235,6 +4258,10 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
         .filter_map(|id| album_pool.get(id).cloned())
         .collect();
     let related = related_artists(value, blocks, &artist);
+    let featuring = crate::artist_catalog::featuring_ids(blocks)
+        .iter()
+        .filter_map(|id| album_pool.get(id.as_str()).cloned())
+        .collect();
     Ok((
         ArtistPage {
             artist,
@@ -4245,6 +4272,7 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
             releases_error: None,
             releases_pending: false,
             related,
+            featuring,
         },
         streams,
     ))

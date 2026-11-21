@@ -27,6 +27,8 @@ pub struct Release {
     pub album: AlbumRef,
     pub kind: Kind,
     pub year: Option<u32>,
+    /// "Main, Other feat. Guest", from the release's own artist lists.
+    pub artists: Option<String>,
 }
 impl Release {
     pub fn from_value(value: &Value) -> Option<Self> {
@@ -43,7 +45,17 @@ impl Release {
                 .and_then(Value::as_u64)
                 .and_then(|year| u32::try_from(year).ok())
                 .filter(|year| (1000..=9999).contains(year)),
+            artists: artist_line(value),
         })
+    }
+    /// The caption of a release the artist only appears on: whose it is,
+    /// like VK shows it, instead of its kind.
+    pub fn featuring_caption(&self, language: Language) -> String {
+        match (&self.artists, self.year) {
+            (Some(artists), Some(year)) => format!("{year} · {artists}"),
+            (Some(artists), None) => artists.clone(),
+            (None, _) => self.caption(language),
+        }
     }
     pub fn caption(&self, language: Language) -> String {
         match self.year {
@@ -58,12 +70,38 @@ impl Release {
         if release.year.is_some() {
             self.year = release.year;
         }
+        if release.artists.is_some() {
+            self.artists = release.artists;
+        }
         if release.album.cover_url.is_some() {
             self.album.cover_url = release.album.cover_url;
         }
         if release.album.access_key.is_some() {
             self.album.access_key = release.album.access_key;
         }
+    }
+}
+
+fn artist_line(value: &Value) -> Option<String> {
+    let names = |keys: [&str; 2]| {
+        keys.iter()
+            .filter_map(|key| value.get(*key).and_then(Value::as_array))
+            .flatten()
+            .filter_map(|artist| artist.get("name").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|name| {
+                !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
+            })
+            .take(16)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let main = names(["main_artists", "mainArtists"]);
+    let featured = names(["featured_artists", "featuredArtists"]);
+    match (main.is_empty(), featured.is_empty()) {
+        (true, _) => None,
+        (false, true) => Some(main),
+        (false, false) => Some(format!("{main} feat. {featured}")),
     }
 }
 

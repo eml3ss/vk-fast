@@ -8123,6 +8123,7 @@ impl MusicApp {
                             pending: releases_pending,
                             playback: cover_playback,
                             related: &artist_page.related,
+                            featuring: &artist_page.featuring,
                         },
                     )
                 {
@@ -19258,6 +19259,7 @@ mod tests {
                 releases_error: None,
                 releases_pending: false,
                 related: Vec::new(),
+                featuring: Vec::new(),
             })),
         );
         app.navigate_music(&ctx, MusicPage::Album(album));
@@ -19312,6 +19314,7 @@ mod tests {
                 releases_error: None,
                 releases_pending: false,
                 related: Vec::new(),
+                featuring: Vec::new(),
             })),
         );
         let ids: Vec<i64> = (1..=9).collect();
@@ -19724,6 +19727,7 @@ mod tests {
             releases_error: None,
             releases_pending,
             related: Vec::new(),
+            featuring: Vec::new(),
         })
     }
 
