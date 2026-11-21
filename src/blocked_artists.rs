@@ -31,7 +31,7 @@ impl Entry {
     fn matches(&self, artist: &ArtistRef) -> bool {
         let id = artist.id.trim();
         if !self.id.is_empty() && !id.is_empty() {
-            return self.id == id;
+            return self.id.eq_ignore_ascii_case(id);
         }
         same_name(&self.name, &artist.name)
     }
@@ -104,12 +104,16 @@ impl Blocked {
         if !track.artists.is_empty() {
             return track.artists.iter().any(|artist| self.contains(artist));
         }
-        credited_names(&track.artist).any(|name| {
-            self.contains(&ArtistRef {
-                id: String::new(),
-                name: name.to_owned(),
+        // The whole line too: the artist menu offers it as one artist, and
+        // a name may hold a separator itself ("A/B", "A & B").
+        std::iter::once(track.artist.as_str())
+            .chain(credited_names(&track.artist))
+            .any(|name| {
+                self.contains(&ArtistRef {
+                    id: String::new(),
+                    name: name.to_owned(),
+                })
             })
-        })
     }
 
     /// Blocks `artist`, or unblocks it when it already is; true when it is
@@ -135,14 +139,15 @@ impl Blocked {
 fn credited_names(line: &str) -> impl Iterator<Item = &str> {
     line.split([',', '&', '/'])
         .flat_map(|part| {
-            let lower = part.to_lowercase();
+            // ASCII only: the separators are ASCII, and a full lowercase
+            // can change a capital's length in bytes ("İ"), which would cut
+            // the original line in the wrong place.
+            let lower = part.to_ascii_lowercase();
             let cut = [" feat. ", " feat ", " ft. ", " ft "]
                 .iter()
                 .find_map(|word| lower.find(word).map(|at| (at, word.len())));
             match cut {
-                Some((at, len)) if part.is_char_boundary(at) && part.is_char_boundary(at + len) => {
-                    vec![&part[..at], &part[at + len..]]
-                }
+                Some((at, len)) => vec![&part[..at], &part[at + len..]],
                 _ => vec![part],
             }
         })
@@ -241,5 +246,28 @@ mod tests {
             credited_names("A, B & C feat. D").collect::<Vec<_>>(),
             ["A", "B", "C", "D"]
         );
+    }
+    #[test]
+    fn a_line_in_capitals_or_with_a_separator_in_a_name_is_blocked_like_the_menu_says() {
+        let mut blocked = Blocked::default();
+        // Capitals whose lowercase is longer in bytes: the line is still cut
+        // at "feat." and the name found, in either case.
+        assert!(blocked.toggle(&artist("", "İSTANBUL ŞEHİR")));
+        let caps = track("İSTANBUL ŞEHİR feat. Guest", Vec::new());
+        assert!(blocked.blocks(&caps));
+        assert!(blocked.blocks(&track("Guest & İSTANBUL ŞEHİR", Vec::new())));
+        assert_eq!(
+            credited_names("İSTANBUL ŞEHİR FEAT. Guest").collect::<Vec<_>>(),
+            ["İSTANBUL ŞEHİR", "Guest"]
+        );
+        // A track without its artists list offers the whole line in the
+        // menu: blocked there, it is blocked in the lists too.
+        let line = track("Alpha/Beta", Vec::new());
+        let menu = artist("", "Alpha/Beta");
+        assert!(blocked.toggle(&menu));
+        assert!(blocked.contains(&menu) && blocked.blocks(&line));
+        // Same ID in another case is the same artist.
+        assert!(blocked.toggle(&artist("Domain", "Some name")));
+        assert!(blocked.blocks(&track("x", vec![artist("domain", "Other spelling")])));
     }
 }
