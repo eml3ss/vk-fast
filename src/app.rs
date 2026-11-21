@@ -1458,6 +1458,9 @@ pub struct MusicApp {
     /// The "E" badge by explicit tracks' titles.
     explicit_badge: bool,
     explicit_badge_save_failed: bool,
+    /// The playing track's measured bitrate after its title in the player.
+    show_bitrate: bool,
+    show_bitrate_save_failed: bool,
     /// The fullscreen player's animated blurred backdrop.
     animated_backdrop: bool,
     theme: theme::Theme,
@@ -1948,6 +1951,8 @@ impl MusicApp {
             middle_autoscroll_save_failed: false,
             explicit_badge: preferences::load_explicit_badge(),
             explicit_badge_save_failed: false,
+            show_bitrate: !cfg!(test) && preferences::load_show_bitrate(),
+            show_bitrate_save_failed: false,
             animated_backdrop: preferences::load_animated_backdrop(),
             theme: appearance,
             accent,
@@ -9986,6 +9991,25 @@ impl MusicApp {
             }
         };
         let title_track = track.cloned();
+        let bitrate_label = self
+            .show_bitrate
+            .then_some(())
+            .and(track)
+            .filter(|track| {
+                self.playing
+                    .as_ref()
+                    .is_some_and(|playing| playing.key() == track.key())
+            })
+            .zip(self.session.as_ref())
+            .and_then(|(track, session)| {
+                crate::playback::bitrate(CacheKey {
+                    account_id: session.profile.id,
+                    owner_id: track.owner_id,
+                    track_id: track.id,
+                    duration: track.duration,
+                })
+            })
+            .map(|kbps| format!("{kbps} {}", t("кбит/с", "kbps")));
         let has_track = track.is_some();
         let track_key = track.map(Track::key);
         let artists = track.map_or_else(Vec::new, |track| track.artists.clone());
@@ -10089,6 +10113,13 @@ impl MusicApp {
                     },
                 );
                 let title_width = ui.painter().layout_job(title_job.clone()).size().x;
+                // The playing track's measured bitrate after its title, on
+                // the title's baseline; the title gives way to it.
+                let bitrate = bitrate_label.as_ref().map(|label| {
+                    ui.painter()
+                        .layout_no_wrap(label.clone(), artist_font.clone(), theme::muted())
+                });
+                let bitrate_width = bitrate.as_ref().map_or(0.0, |galley| galley.size().x + 6.0);
                 let artist_width = ui.fonts_mut(|fonts| {
                     let mut width = |text: &str| {
                         fonts
@@ -10111,7 +10142,10 @@ impl MusicApp {
                     theme::explicit_badge(ui.ctx(), title_track.as_ref(), artist_font.size);
                 let artist_width =
                     artist_width + artist_badge.map_or(0.0, |size| size + theme::EXPLICIT_GAP);
-                let text_width = title_width.max(artist_width).ceil().min(max_text_width);
+                let text_width = (title_width + bitrate_width)
+                    .max(artist_width)
+                    .ceil()
+                    .min(max_text_width);
                 ui.spacing_mut().item_spacing.x = heart_gap;
                 ui.allocate_ui_with_layout(
                     egui::vec2(text_width, metadata_height),
@@ -10123,7 +10157,8 @@ impl MusicApp {
                             Layout::left_to_right(Align::Center),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                let width = title_width.min(ui.available_width().max(0.0));
+                                let width = title_width
+                                    .min((ui.available_width() - bitrate_width).max(0.0));
                                 let title_response = ui.add_sized(
                                     egui::vec2(width, title_line_height),
                                     egui::Label::new(title_job.clone())
@@ -10136,6 +10171,32 @@ impl MusicApp {
                                         }),
                                 );
                                 menu_areas.push(title_response.rect);
+                                if let Some(galley) = bitrate.clone() {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(galley.size().x, title_line_height),
+                                        Sense::hover(),
+                                    );
+                                    let title_galley = ui.painter().layout_job(title_job.clone());
+                                    let baseline = |galley: &egui::Galley| {
+                                        galley.rows.first().map_or(galley.size().y, |row| {
+                                            row.pos.y
+                                                + row
+                                                    .glyphs
+                                                    .first()
+                                                    .map_or(row.height(), |glyph| glyph.pos.y)
+                                        })
+                                    };
+                                    // The title label sits centred in its row.
+                                    let title_top = title_response.rect.center().y
+                                        - title_galley.size().y * 0.5;
+                                    let top =
+                                        title_top + baseline(&title_galley) - baseline(&galley);
+                                    ui.painter().galley(
+                                        egui::pos2(rect.left(), top),
+                                        galley,
+                                        theme::muted(),
+                                    );
+                                }
                                 if let Some(key) = track_key
                                     && title_response
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -11563,6 +11624,7 @@ impl MusicApp {
                 Setting::SearchLists,
                 Setting::MiddleAutoscroll,
                 Setting::ExplicitBadge,
+                Setting::Bitrate,
                 Setting::AnimatedBackdrop,
                 Setting::TrackButtons,
             ],
@@ -11845,6 +11907,7 @@ impl MusicApp {
                         || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
                         || query.matches(Setting::TrackButtons)
                     {
@@ -11881,6 +11944,7 @@ impl MusicApp {
                         || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
                         || query.matches(Setting::TrackButtons)
                     {
@@ -11914,6 +11978,7 @@ impl MusicApp {
                         || query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
                         || query.matches(Setting::TrackButtons)
                     {
@@ -11973,6 +12038,7 @@ impl MusicApp {
                     if query.matches(Setting::SearchLists)
                         || query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
                         || query.matches(Setting::TrackButtons)
                     {
@@ -12021,6 +12087,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::MiddleAutoscroll)
                         || query.matches(Setting::ExplicitBadge)
+                        || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
                         || query.matches(Setting::TrackButtons)
                     {
@@ -12053,7 +12120,7 @@ impl MusicApp {
                             ),
                         );
                     }
-                    if query.matches(Setting::ExplicitBadge) {
+                    if query.matches(Setting::ExplicitBadge) || query.matches(Setting::Bitrate) {
                         ui.add_space(16.0);
                     }
                 }
@@ -12072,6 +12139,36 @@ impl MusicApp {
                         .color(theme::muted()),
                     );
                     if self.explicit_badge_save_failed {
+                        ui.colored_label(
+                            theme::error(),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::Bitrate)
+                        || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::TrackButtons)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::Bitrate) {
+                    let label = t("Битрейт трека", "Track bitrate");
+                    if theme::switch(ui, &mut self.show_bitrate, label).changed() {
+                        self.show_bitrate_save_failed = !cfg!(test)
+                            && preferences::save_show_bitrate(self.show_bitrate).is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Битрейт играющего трека рядом с его названием в плеере. VK его не сообщает, поэтому он измеряется при воспроизведении и появляется через секунду.",
+                            "The playing track's bitrate next to its title in the player. VK does not report it, so it is measured while playing and shows after a second.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
+                    if self.show_bitrate_save_failed {
                         ui.colored_label(
                             theme::error(),
                             t(
@@ -13652,6 +13749,8 @@ mod tests {
             middle_autoscroll_save_failed: false,
             explicit_badge: true,
             explicit_badge_save_failed: false,
+            show_bitrate: false,
+            show_bitrate_save_failed: false,
             animated_backdrop: true,
             theme: theme::Theme::default(),
             accent: theme::Accent::default().color(),

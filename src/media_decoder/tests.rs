@@ -537,3 +537,25 @@ fn a_stored_track_is_saved_byte_for_byte_and_named_by_its_content() {
     canceled.cancel();
     assert!(save_whole(None, None, &canceled, &mut Vec::new()).is_err());
 }
+#[test]
+fn decoding_measures_the_bitrate_from_the_packets() {
+    let mut decoder = Pipeline::new(
+        Box::new(File::open(fixture("tone.mp3")).unwrap()),
+        0.0,
+        0.0,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let bitrate = decoder.bitrate.clone();
+    assert_eq!(bitrate.kbps(), None, "nothing before a second is decoded");
+    let mut bytes = Vec::new();
+    decoder.read_to_end(&mut bytes).unwrap();
+    let size = std::fs::metadata(fixture("tone.mp3")).unwrap().len() as f64;
+    // About the file's own average over its 12 seconds.
+    let expected = size * 8.0 / 12.0 / 1000.0;
+    let kbps = f64::from(bitrate.kbps().expect("measured"));
+    assert!(
+        (kbps - expected).abs() < expected * 0.1,
+        "{kbps} vs {expected}"
+    );
+}

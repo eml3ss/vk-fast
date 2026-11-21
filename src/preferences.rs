@@ -95,6 +95,9 @@ struct Preferences {
     crossfade_seconds: u8,
     #[serde(deserialize_with = "deserialize_explicit_badge")]
     explicit_badge: bool,
+    /// The playing track's bitrate next to its title; off unless turned on.
+    #[serde(deserialize_with = "deserialize_off")]
+    show_bitrate: bool,
     /// On unless turned off: recent searches above the popular ones.
     #[serde(deserialize_with = "deserialize_on")]
     search_history: bool,
@@ -160,6 +163,7 @@ impl Default for Preferences {
             crossfade: false,
             crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
             explicit_badge: DEFAULT_EXPLICIT_BADGE,
+            show_bitrate: false,
             search_history: true,
             popular_searches: true,
             track_buttons_player: crate::track_buttons::Set::PLAYER.bits(),
@@ -415,6 +419,13 @@ fn deserialize_explicit_badge<'de, D: serde::Deserializer<'de>>(
     Ok(serde_json::Value::deserialize(deserializer)?
         .as_bool()
         .unwrap_or(DEFAULT_EXPLICIT_BADGE))
+}
+
+/// A switch that is off unless explicitly turned on.
+fn deserialize_off<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(false))
 }
 
 fn deserialize_volume_keys<'de, D: serde::Deserializer<'de>>(
@@ -1169,6 +1180,20 @@ pub fn load_explicit_badge() -> bool {
 pub fn save_explicit_badge(enabled: bool) -> io::Result<()> {
     update_at(&preferences_path()?, |preferences| {
         preferences.explicit_badge = enabled
+    })
+}
+
+/// The playing track's bitrate next to its title; off by default.
+pub fn load_show_bitrate() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.show_bitrate)
+}
+
+pub fn save_show_bitrate(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.show_bitrate = enabled
     })
 }
 

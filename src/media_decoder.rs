@@ -38,7 +38,27 @@ impl Cancellation {
 pub struct Stream {
     pub reader: Box<dyn Read + Send>,
     pub cancellation: Cancellation,
+    /// What the stream's packets measure while it decodes.
+    pub bitrate: Bitrate,
 }
+
+/// A stream's average bitrate, measured from the compressed packets it
+/// decodes (VK gives none): bytes over the time they play. Shared, so the
+/// player can read it while the decoder runs.
+#[derive(Clone, Default)]
+pub struct Bitrate(Arc<std::sync::atomic::AtomicU32>);
+impl Bitrate {
+    /// In kbit/s, once a second of audio has been measured.
+    pub fn kbps(&self) -> Option<u32> {
+        Some(self.0.load(Ordering::Relaxed)).filter(|kbps| *kbps > 0)
+    }
+    fn set(&self, kbps: u32) {
+        self.0.store(kbps, Ordering::Relaxed);
+    }
+}
+
+/// Packets measured until this much audio: enough to average a VBR start.
+const BITRATE_SECONDS: f64 = 30.0;
 
 pub fn open(url: &str, offset: f64) -> io::Result<Stream> {
     open_stored(Some(url), offset, None)
@@ -63,6 +83,7 @@ pub fn open_stored(
         return Err(invalid());
     }
     let cancellation = Cancellation::default();
+    let bitrate = Bitrate::default();
     Ok(Stream {
         reader: Box::new(Lazy {
             url: url.map(|url| Zeroizing::new(url.into())),
@@ -70,8 +91,10 @@ pub fn open_stored(
             canceled: cancellation.0.clone(),
             pipeline: None,
             store,
+            bitrate: bitrate.clone(),
         }),
         cancellation,
+        bitrate,
     })
 }
 /// Fetch the chunks of `url`'s file that the store lacks, on this thread,
@@ -158,6 +181,7 @@ struct Lazy {
     canceled: Arc<AtomicBool>,
     pipeline: Option<Pipeline>,
     store: Option<crate::audio_cache::MediaStore>,
+    bitrate: Bitrate,
 }
 impl Read for Lazy {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
@@ -182,7 +206,8 @@ impl Read for Lazy {
                     return Err(invalid());
                 }
             };
-            let pipeline = Pipeline::new(source, origin, self.offset, self.canceled.clone())?;
+            let mut pipeline = Pipeline::new(source, origin, self.offset, self.canceled.clone())?;
+            pipeline.bitrate = self.bitrate.clone();
             self.pipeline = Some(pipeline);
         }
         let pipeline = self.pipeline.as_mut().ok_or_else(|| invalid())?;
@@ -205,6 +230,9 @@ struct Pipeline {
     failures: usize,
     packets: u64,
     skipped: u64,
+    bitrate: Bitrate,
+    /// Compressed bytes and the seconds they play, measured so far.
+    measured: (u64, f64),
 }
 impl Pipeline {
     fn new(
@@ -288,6 +316,8 @@ impl Pipeline {
             failures: 0,
             packets: 0,
             skipped: 0,
+            bitrate: Bitrate::default(),
+            measured: (0, 0.0),
         })
     }
     fn chunk(&mut self) -> io::Result<bool> {
@@ -326,6 +356,7 @@ impl Pipeline {
                 continue;
             }
             self.packets += 1;
+            self.measure(&packet);
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => {
                     self.failures = 0;
@@ -427,6 +458,28 @@ impl Pipeline {
         }
     }
     /// Decoded position on the track timeline, for the log.
+    fn measure(&mut self, packet: &symphonia::core::packet::Packet) {
+        let (bytes, seconds) = &mut self.measured;
+        if *seconds >= BITRATE_SECONDS {
+            return;
+        }
+        let Some(played) = self
+            .time_base
+            .and_then(|base| base.calc_duration(packet.dur))
+            .map(|played| played.as_secs_f64())
+            .filter(|played| *played > 0.0)
+        else {
+            return;
+        };
+        *bytes += packet.data.len() as u64;
+        *seconds += played;
+        if *seconds >= 1.0 {
+            let kbps = (*bytes as f64 * 8.0 / *seconds / 1000.0).round();
+            if (1.0..=10_000.0).contains(&kbps) {
+                self.bitrate.set(kbps as u32);
+            }
+        }
+    }
     fn seconds(&self) -> f64 {
         self.position.unwrap_or(0) as f64 / 48000.0
     }

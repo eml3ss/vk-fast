@@ -20,6 +20,7 @@ pub enum Setting {
     SearchLists,
     MiddleAutoscroll,
     ExplicitBadge,
+    Bitrate,
     AnimatedBackdrop,
     TrackButtons,
     VolumeKeys,
@@ -95,6 +96,9 @@ impl Query {
             }
             Setting::ExplicitBadge => {
                 "интерфейс значок иконка метка буква е e explicit эксплисит нецензурный ненормативная лексика мат 18+ треки название interface badge icon label letter explicit content mature lyrics tracks title"
+            }
+            Setting::Bitrate => {
+                "интерфейс битрейт качество звука кбит кбит/с килобит трек название плеер mp3 aac interface bitrate bit rate audio quality kbps kbit track title player"
             }
             Setting::AnimatedBackdrop => {
                 "интерфейс анимированный анимация фон размытый размытие обложка полноэкранный полный экран текст плеер interface animated animation background backdrop blur blurred cover fullscreen lyrics player"

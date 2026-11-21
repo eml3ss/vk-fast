@@ -7,6 +7,7 @@ use crate::{
     i18n::Language,
 };
 use std::{
+    collections::VecDeque,
     io::Read,
     mem::size_of,
     sync::{
@@ -1011,6 +1012,37 @@ fn prefill(pcm: &Pcm, bytes: &[u8], was_started: bool) {
 }
 type DecoderFactory = fn(&str, f64) -> std::io::Result<crate::media_decoder::Stream>;
 type DecoderSlot = Arc<Mutex<Option<crate::media_decoder::Cancellation>>>;
+/// Each track's bitrate as its decoders measure it, by cache key: playing,
+/// prefetching or preloading, they read the same file. A new decoder (a
+/// seek, a replay) starts from zero, so the last measurement stays shown
+/// until it has its own.
+static BITRATES: Mutex<VecDeque<(CacheKey, crate::media_decoder::Bitrate, Option<u32>)>> =
+    Mutex::new(VecDeque::new());
+const BITRATES_KEPT: usize = 32;
+
+fn watch_bitrate(key: CacheKey, bitrate: crate::media_decoder::Bitrate) {
+    let Ok(mut watched) = BITRATES.lock() else {
+        return;
+    };
+    let last = watched
+        .iter()
+        .position(|(watched, ..)| *watched == key)
+        .and_then(|at| watched.remove(at))
+        .and_then(|(_, old, last)| old.kbps().or(last));
+    watched.push_front((key, bitrate, last));
+    watched.truncate(BITRATES_KEPT);
+}
+
+/// The bitrate measured for the track with this cache key, in kbit/s;
+/// `None` until a decoder has measured a second of it.
+pub fn bitrate(key: CacheKey) -> Option<u32> {
+    let watched = BITRATES.lock().ok()?;
+    watched
+        .iter()
+        .find(|(watched, ..)| *watched == key)
+        .and_then(|(_, bitrate, last)| bitrate.kbps().or(*last))
+}
+
 fn spawn_decoder(url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {
     crate::media_decoder::open(url, offset)
 }
@@ -1152,6 +1184,9 @@ fn pump_mode(
             PlaybackError::Decoder
         })?;
         control.decoder_starts.fetch_add(1, Ordering::Relaxed);
+        if let Some(key) = source.key {
+            watch_bitrate(key, stream.bitrate);
+        }
         *decoder_slot.lock().map_err(|_| PlaybackError::Worker)? = Some(stream.cancellation);
         let mut input = stream.reader;
         if canceled.load(Ordering::Relaxed) {
@@ -3135,6 +3170,7 @@ mod tests {
                 cancellation: cancellation.clone(),
             }),
             cancellation,
+            bitrate: crate::media_decoder::Bitrate::default(),
         })
     }
     fn synthetic_decoder(_url: &str, offset: f64) -> std::io::Result<crate::media_decoder::Stream> {

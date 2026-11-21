@@ -320,7 +320,7 @@ impl MusicApp {
                 format!(
                     "language={:?} theme={} accent={} tray={} discord={} broadcast={} \
                      titlebar={} compact_seek={} double_click={} search_on_enter={} \
-                     search_history={} popular_searches={} autoscroll={} explicit={} backdrop={} volume_keys={} mix_after_queue={} \
+                     search_history={} popular_searches={} autoscroll={} explicit={} bitrate={} backdrop={} volume_keys={} mix_after_queue={} \
                      equalizer={}:{} crossfade={}",
                     self.language,
                     self.theme.diagnostic_code(),
@@ -342,6 +342,7 @@ impl MusicApp {
                     self.popular_searches,
                     self.middle_autoscroll,
                     self.explicit_badge,
+                    self.show_bitrate,
                     self.animated_backdrop,
                     self.volume_keys_enabled,
                     self.mix_after_queue,
