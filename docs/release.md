@@ -2,9 +2,29 @@
 
 Пакеты выпуска собирает GitHub Actions (`.github/workflows/release.yml`), а не компьютер разработчика: локально нужны только обычные `cargo test`/`clippy`.
 
+## Перед выпуском: TLS-стек
+
+Соединения с VK идут через BoringSSL (крейт `btls-sys`, собирается в программу) и `wreq` с профилем Chrome из `wreq-util`. BoringSSL не выпускает версий и бюллетеней безопасности, `cargo audit` его уязвимостей почти не показывает, а новый снимок BoringSSL приходит только с новым выпуском `btls-sys`. Поэтому перед каждым выпуском:
+
+1. Проверьте, вышли ли новые версии:
+
+   ```sh
+   cargo update --dry-run -p btls-sys -p btls -p wreq -p wreq-util
+   ```
+
+2. Если вышли, обновите только их (`cargo update -p <крейт>`) и посмотрите `git diff Cargo.lock`. Cargo при этом может перевыбрать версии у посторонних крейтов (например, `windows-sys`); тогда верните `Cargo.lock` и поменяйте вручную только `version` и `checksum` обновляемого крейта — `cargo build --locked` проверит, что файл согласован. Версию поднимите и в `Cargo.toml`.
+3. Проверьте, что соединение работает и VK по-прежнему видит Chrome:
+
+   ```sh
+   cargo build --locked && ./target/debug/vk-fast --check-tls
+   cargo test --locked fingerprint_is_chromes -- --ignored
+   ```
+
+   Второй тест спрашивает у tls.peet.ws отпечаток рукопожатия и сверяет его с записанным (JA4 и HTTP/2 Chrome). Если отпечаток поменялся из-за нового профиля Chrome в `wreq-util`, это нормально: поднимите вместе `wreq_util::Profile`, `CHROME_VERSION`/`SEC_CH_UA` в `src/chrome_http.rs`, `client_platform::USER_AGENT`, а новые значения запишите в тест и в `AGENTS.md`. Если поменялся без смены профиля — разберитесь до выпуска.
+
 ## Шаги
 
-1. Поднимите версию в `Cargo.toml` (и `Cargo.lock`: `cargo update -p vk-fast --offline`), версии в примерах `docs/linux.md` и `docs/windows.md`, добавьте раздел `## X.Y.Z` в начало `CHANGELOG.md`. Полный `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, коммит в `main`.
+1. Пройдите проверку TLS-стека выше. Поднимите версию в `Cargo.toml` (и `Cargo.lock`: `cargo update -p vk-fast --offline`), версии в примерах `docs/linux.md` и `docs/windows.md`, добавьте раздел `## X.Y.Z` в начало `CHANGELOG.md`. Полный `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, коммит в `main`.
 2. Отправьте тег:
 
    ```sh

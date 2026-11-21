@@ -39,7 +39,7 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
 # VK's pages and API are reached as the Chrome the client says it is: its
 # TLS handshake (BoringSSL), HTTP/2 settings and header order (src/chrome_http.rs).
-wreq = { version = "0.16.3", default-features = false, features = ["webpki-roots", "form", "query", "gzip", "brotli", "zstd", "deflate", "stream"] }
+wreq = { version = "0.16.4", default-features = false, features = ["webpki-roots", "form", "query", "gzip", "brotli", "zstd", "deflate", "stream"] }
 wreq-util = { version = "0.2.1", default-features = false, features = ["emulation", "emulation-compression", "tokio-rt"] }
 futures-util = { version = "0.3.34", default-features = false }
 serde_urlencoded = "0.7.1"

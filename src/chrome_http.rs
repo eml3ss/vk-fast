@@ -651,4 +651,27 @@ mod tests {
         assert_eq!(text, "hello");
         assert_eq!(response.read(&mut [0; 4]).unwrap(), 0);
     }
+
+    /// The handshake VK sees is still Chrome's, after a `wreq`/`btls-sys`
+    /// update (`docs/release.md`). Asks an outside echo service, so it runs
+    /// only on request: `cargo test --locked fingerprint_is_chromes -- --ignored`.
+    #[test]
+    #[ignore = "asks tls.peet.ws over the network"]
+    fn fingerprint_is_chromes() {
+        let client = Client::builder().build().unwrap();
+        let mut body = Vec::new();
+        client
+            .get("https://tls.peet.ws/api/all")
+            .send()
+            .unwrap()
+            .read_to_end(&mut body)
+            .unwrap();
+        let echo: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo["http_version"], "h2");
+        assert_eq!(echo["tls"]["ja4"], "t13d1516h2_8daaf6152771_d8a2da3f94cd");
+        assert_eq!(
+            echo["http2"]["akamai_fingerprint_hash"],
+            "52d84b11737d980aef856699f885ca86"
+        );
+    }
 }
