@@ -360,9 +360,10 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     } else {
         tone(Color32::from_rgb(49, 56, 67))
     };
-    ui.painter().rect_filled(pill, 11.0, fill);
+    let painter = opaque_painter(ui);
+    painter.rect_filled(pill, 11.0, fill);
     let progress = ui.ctx().animate_bool_responsive(response.id, *value);
-    ui.painter().circle_filled(
+    painter.circle_filled(
         egui::pos2(
             egui::lerp((pill.left() + 11.0)..=(pill.right() - 11.0), progress),
             pill.center().y,
@@ -370,6 +371,7 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
         8.0,
         Color32::WHITE,
     );
+    fade_disabled(ui, &painter, pill, 11.0);
     let label_rect = egui::Rect::from_min_max(egui::pos2(rect.left() + 50.0, rect.top()), rect.max);
     let mut text = egui::text::LayoutJob::simple_singleline(
         label.to_owned(),
@@ -452,6 +454,30 @@ fn toggle_check(response: &mut egui::Response, value: &mut bool, enabled: bool, 
     });
 }
 
+/// A disabled widget fades as one piece. egui fades a disabled Ui by
+/// drawing each shape translucent, so a widget's layers (its rail, fill and
+/// handle; its box and check) showed through each other. This painter draws
+/// them opaque; `fade_disabled` then veils the whole widget with the
+/// card's colour, as much as egui would have faded it.
+fn opaque_painter(ui: &egui::Ui) -> egui::Painter {
+    let mut painter = ui.painter().clone();
+    if !ui.is_enabled() {
+        let alpha = ui.visuals().disabled_alpha().max(0.01);
+        painter.set_opacity((ui.opacity() / alpha).min(1.0));
+    }
+    painter
+}
+
+/// Veils a disabled widget drawn opaque over `shape` (its outline, with
+/// `radius`), in the settings card's colour.
+fn fade_disabled(ui: &egui::Ui, painter: &egui::Painter, shape: egui::Rect, radius: f32) {
+    if ui.is_enabled() {
+        return;
+    }
+    let veil = 1.0 - ui.visuals().disabled_alpha();
+    painter.rect_filled(shape, radius, surface().gamma_multiply(veil));
+}
+
 fn paint_check(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, value: bool) {
     let progress = ui.ctx().animate_bool_responsive(response.id, value);
     let hovered = ui.is_enabled() && (response.hovered() || response.has_focus());
@@ -461,11 +487,8 @@ fn paint_check(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, value
         Color32::from_rgb(49, 56, 67)
     });
     let on = if hovered { accent() } else { primary() };
-    let mut fill = lerp_color(off, on, progress);
-    if !ui.is_enabled() {
-        fill = fill.gamma_multiply(0.5);
-    }
-    let painter = ui.painter();
+    let fill = lerp_color(off, on, progress);
+    let painter = &opaque_painter(ui);
     painter.rect_filled(rect, 7.0, fill);
     if progress > 0.0 {
         // The check is drawn along its path as the box turns on.
@@ -481,10 +504,7 @@ fn paint_check(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, value
             points.push(path[1]);
             points.push(path[1] + (path[2] - path[1]) * ((drawn - first) / second));
         }
-        let mut color = on_fill(on, Color32::WHITE);
-        if !ui.is_enabled() {
-            color = color.gamma_multiply(0.6);
-        }
+        let color = on_fill(on, Color32::WHITE);
         painter.add(egui::Shape::line(
             points.clone(),
             egui::Stroke::new(2.2, color),
@@ -494,6 +514,7 @@ fn paint_check(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, value
             painter.circle_filled(point, 1.1, color);
         }
     }
+    fade_disabled(ui, painter, rect, 7.0);
 }
 
 fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {
@@ -516,6 +537,13 @@ pub fn slider<N: egui::emath::Numeric>(
     // that far past the handle's centre, so it stays hidden under it.
     const HEIGHT: f32 = 28.0;
     ui.scope(|ui| {
+        // Disabled, it is drawn opaque and veiled once (`fade_disabled`):
+        // egui's rail, its fill and the handle no longer show through.
+        let disabled = !ui.is_enabled();
+        if disabled {
+            let alpha = ui.visuals().disabled_alpha().max(0.01);
+            ui.set_opacity((ui.opacity() / alpha).min(1.0));
+        }
         ui.spacing_mut().interact_size.y = HEIGHT;
         ui.visuals_mut().selection.bg_fill = accent();
         let response = ui.add(
@@ -550,6 +578,14 @@ pub fn slider<N: egui::emath::Numeric>(
         if outline != egui::Stroke::NONE {
             ui.painter()
                 .rect_stroke(handle, rounding, outline, egui::StrokeKind::Inside);
+        }
+        if disabled {
+            let veil = 1.0 - ui.visuals().disabled_alpha();
+            ui.painter().rect_filled(
+                response.rect.union(handle).expand(1.0),
+                0.0,
+                surface().gamma_multiply(veil),
+            );
         }
         response
     })
@@ -932,6 +968,55 @@ pub fn visuals(palette: &crate::palette::Palette) -> egui::Visuals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_checks_switches_and_sliders_fade_as_one_piece() {
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        for enabled in [true, false] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let mut on = true;
+                        super::check(ui, &mut on, "Check");
+                        super::switch(ui, &mut on, "Switch");
+                        let mut value = 120.0_f32;
+                        super::slider(ui, &mut value, 50.0..=250.0, 5.0);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            let fills: Vec<egui::Color32> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some(rect.fill),
+                    egui::Shape::Circle(circle) => Some(circle.fill),
+                    _ => None,
+                })
+                .filter(|fill| *fill != egui::Color32::TRANSPARENT)
+                .collect();
+            let veil =
+                super::surface().gamma_multiply(1.0 - ctx.global_style().visuals.disabled_alpha());
+            let (veils, layers): (Vec<egui::Color32>, Vec<egui::Color32>) =
+                fills.iter().partition(|fill| **fill == veil);
+            // Every layer is opaque: nothing shows through another.
+            assert!(
+                layers.iter().all(|fill| fill.a() == 255),
+                "enabled={enabled}: {layers:?}"
+            );
+            // Disabled, one veil each fades the check, the switch and the
+            // slider.
+            assert_eq!(veils.len(), if enabled { 0 } else { 3 }, "{fills:?}");
+        }
+    }
+
     #[test]
     fn page_keys_scroll_the_list_under_the_pointer_and_home_returns_to_the_top() {
         use crate::autoscroll::{KeyScroll, request_key_scroll};
