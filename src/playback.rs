@@ -1033,6 +1033,11 @@ fn watch_bitrate(key: CacheKey, bitrate: crate::media_decoder::Bitrate) {
     watched.truncate(BITRATES_KEPT);
 }
 
+#[cfg(test)]
+pub(crate) fn measured_for_test(key: CacheKey, kbps: u32) {
+    watch_bitrate(key, crate::media_decoder::Bitrate::measured(kbps));
+}
+
 /// The bitrate measured for the track with this cache key, in kbit/s;
 /// `None` until a decoder has measured a second of it.
 pub fn bitrate(key: CacheKey) -> Option<u32> {

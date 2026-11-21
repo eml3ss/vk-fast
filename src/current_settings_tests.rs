@@ -1066,3 +1066,93 @@ fn auto_scale_follows_the_monitor_until_a_zoom_key_and_is_hidden_on_wayland() {
         support.set(crate::volume_keys::Support::Available);
     });
 }
+
+#[test]
+fn the_bitrate_pill_follows_its_switch_and_sits_on_the_titles_letters() {
+    let ctx = egui::Context::default();
+    // Signed in, so the playing track has its cache key; demo keeps the
+    // test from loading anything.
+    let mut app = crate::app::tests::search_test_app(&ctx);
+    app.page = MusicPage::Library;
+    let mut track = page(1, &[7]).items.remove(0);
+    track.title = "Little title".into();
+    track.duration = 200;
+    app.library.tracks = vec![track.clone()];
+    app.library.exhausted = true;
+    app.playing = Some(track.clone());
+    app.selected = Some(track.key());
+    let account = app.session.as_ref().unwrap().profile.id;
+    crate::playback::measured_for_test(
+        crate::audio_cache::CacheKey {
+            account_id: account,
+            owner_id: track.owner_id,
+            track_id: track.id,
+            duration: track.duration,
+        },
+        256,
+    );
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let label = |output: &egui::FullOutput| {
+        account_ui_shapes(output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == "256 kbps" => Some(text.clone()),
+                _ => None,
+            })
+    };
+    // Off by default.
+    assert!(!app.show_bitrate);
+    assert!(label(&warm(&ctx, &mut app, size, &mut tick)).is_none());
+    // The switch, in Settings (opened signed out: Settings ask the cache
+    // size of a signed-in account).
+    {
+        let ctx = egui::Context::default();
+        let mut settings_app = account_ui_app(&ctx, Language::English);
+        settings_app.settings_open = true;
+        settings_app.settings_section = SettingsSection::Interface;
+        settings_app.settings_query = "bitrate".into();
+        let mut tick = 0;
+        let settings = warm(&ctx, &mut settings_app, size, &mut tick);
+        let point = content_text(&settings, "Track bitrate").center();
+        account_ui_click(&ctx, &mut settings_app, size, &mut tick, point);
+        assert!(settings_app.show_bitrate && !settings_app.show_bitrate_save_failed);
+    }
+    app.show_bitrate = true;
+    let output = warm(&ctx, &mut app, size, &mut tick);
+    let text = label(&output).expect("the pill's text");
+    let letters = text.visual_bounding_rect();
+    // The player's title: the lowest one on screen.
+    let title = account_ui_shapes(&output)
+        .into_iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.text() == "Little title" => Some(text.clone()),
+            _ => None,
+        })
+        .max_by(|a, b| a.pos.y.total_cmp(&b.pos.y))
+        .expect("the player's title");
+    let row = &title.galley.rows[0];
+    let glyph = &row.glyphs[0];
+    let baseline = title.pos.y + row.pos.y + glyph.pos.y;
+    let cap = title.visual_bounding_rect().top();
+    let pill = account_ui_shapes(&output)
+        .into_iter()
+        .find_map(|shape| match shape {
+            egui::Shape::Rect(rect)
+                if rect.rect.contains_rect(letters) && (rect.rect.height() - 17.0).abs() < 0.5 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .expect("the pill");
+    assert!(pill.left() > title.visual_bounding_rect().right());
+    assert!(
+        ((cap + baseline) * 0.5 - pill.center().y).abs() <= 0.75,
+        "pill {pill:?}, title letters {cap}..{baseline}"
+    );
+    assert!(
+        (letters.center() - pill.center()).length() <= 0.75,
+        "{letters:?} in {pill:?}"
+    );
+}

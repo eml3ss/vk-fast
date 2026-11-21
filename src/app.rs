@@ -1028,6 +1028,39 @@ fn bounded_track_position(position: f64, duration: u32) -> f64 {
     )
 }
 
+/// Inter's capital height in ems.
+const INTER_CAP_HEIGHT: f32 = 0.727;
+/// The bitrate pill's text size and height.
+const BITRATE_PILL_FONT: f32 = 11.0;
+const BITRATE_PILL_HEIGHT: f32 = 17.0;
+
+fn bitrate_pill_width(text: &egui::Galley) -> f32 {
+    (text.mesh_bounds.width() + 14.0).ceil()
+}
+
+/// The playing track's bitrate in a pill whose left middle is `at`, filled
+/// like the theme's controls; the text centred by its own letters.
+fn paint_bitrate_pill(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    text: Arc<egui::Galley>,
+    fill: Color32,
+) {
+    let pixels = painter.pixels_per_point();
+    let snap = |value: f32| (value * pixels).round() / pixels;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(snap(at.x), snap(at.y - BITRATE_PILL_HEIGHT * 0.5)),
+        egui::vec2(bitrate_pill_width(&text), BITRATE_PILL_HEIGHT),
+    );
+    painter.rect_filled(rect, BITRATE_PILL_HEIGHT * 0.5, fill);
+    let offset = rect.center() - text.mesh_bounds.center();
+    painter.galley(
+        egui::pos2(snap(offset.x), snap(offset.y)),
+        text,
+        theme::muted(),
+    );
+}
+
 fn time_slot_width(ui: &egui::Ui, duration: u32) -> f32 {
     let font = egui::TextStyle::Small.resolve(ui.style());
     ui.fonts_mut(|fonts| {
@@ -10116,10 +10149,15 @@ impl MusicApp {
                 // The playing track's measured bitrate after its title, on
                 // the title's baseline; the title gives way to it.
                 let bitrate = bitrate_label.as_ref().map(|label| {
-                    ui.painter()
-                        .layout_no_wrap(label.clone(), artist_font.clone(), theme::muted())
+                    ui.painter().layout_no_wrap(
+                        label.clone(),
+                        egui::FontId::new(BITRATE_PILL_FONT, theme::semibold()),
+                        theme::muted(),
+                    )
                 });
-                let bitrate_width = bitrate.as_ref().map_or(0.0, |galley| galley.size().x + 6.0);
+                let bitrate_width = bitrate
+                    .as_ref()
+                    .map_or(0.0, |galley| bitrate_pill_width(galley) + 6.0);
                 let artist_width = ui.fonts_mut(|fonts| {
                     let mut width = |text: &str| {
                         fonts
@@ -10173,28 +10211,31 @@ impl MusicApp {
                                 menu_areas.push(title_response.rect);
                                 if let Some(galley) = bitrate.clone() {
                                     let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(galley.size().x, title_line_height),
+                                        egui::vec2(bitrate_pill_width(&galley), title_line_height),
                                         Sense::hover(),
                                     );
+                                    // Centred on the title's letters: from
+                                    // its capitals to its baseline.
                                     let title_galley = ui.painter().layout_job(title_job.clone());
-                                    let baseline = |galley: &egui::Galley| {
-                                        galley.rows.first().map_or(galley.size().y, |row| {
+                                    let baseline = title_galley.rows.first().map_or(
+                                        title_galley.size().y,
+                                        |row| {
                                             row.pos.y
                                                 + row
                                                     .glyphs
                                                     .first()
                                                     .map_or(row.height(), |glyph| glyph.pos.y)
-                                        })
-                                    };
-                                    // The title label sits centred in its row.
+                                        },
+                                    );
                                     let title_top = title_response.rect.center().y
                                         - title_galley.size().y * 0.5;
-                                    let top =
-                                        title_top + baseline(&title_galley) - baseline(&galley);
-                                    ui.painter().galley(
-                                        egui::pos2(rect.left(), top),
+                                    let middle = title_top + baseline
+                                        - title_font.size * INTER_CAP_HEIGHT * 0.5;
+                                    paint_bitrate_pill(
+                                        ui.painter(),
+                                        egui::pos2(rect.left(), middle),
                                         galley,
-                                        theme::muted(),
+                                        ui.visuals().widgets.inactive.bg_fill,
                                     );
                                 }
                                 if let Some(key) = track_key

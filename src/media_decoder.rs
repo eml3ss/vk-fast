@@ -55,6 +55,12 @@ impl Bitrate {
     fn set(&self, kbps: u32) {
         self.0.store(kbps, Ordering::Relaxed);
     }
+    #[cfg(test)]
+    pub fn measured(kbps: u32) -> Self {
+        let bitrate = Self::default();
+        bitrate.set(kbps);
+        bitrate
+    }
 }
 
 /// Packets measured until this much audio: enough to average a VBR start.
