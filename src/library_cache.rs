@@ -313,6 +313,75 @@ impl Write for BoundedBytes {
     }
 }
 
+/// `value` made storable: control characters (a line break or tab in a
+/// user's own upload) become spaces and the length is bounded.
+fn clean_text(value: &str) -> String {
+    let mut text: String = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if text.len() > MAX_TEXT {
+        let mut end = MAX_TEXT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// A track as it can be stored: odd text cleaned and fields that do not pass
+/// dropped, so one unusual row never keeps the whole library from being
+/// saved (it used to fail the save, and a restart showed only what an older
+/// save held). `None` only without a valid identity.
+fn storable(track: &Track) -> Option<Track> {
+    if track.id <= 0 || track.owner_id == 0 {
+        return None;
+    }
+    let mut artists: Vec<ArtistRef> = track
+        .artists
+        .iter()
+        .map(|artist| ArtistRef {
+            id: artist.id.clone(),
+            name: clean_text(&artist.name),
+        })
+        .filter(|artist| valid_artist(&artist.id, &artist.name))
+        .collect();
+    artists.truncate(64);
+    Some(Track {
+        artist: clean_text(&track.artist),
+        title: clean_text(&track.title),
+        subtitle: track
+            .subtitle
+            .as_deref()
+            .map(clean_text)
+            .filter(|value| !value.trim().is_empty()),
+        cover_url: track
+            .cover_url
+            .clone()
+            .filter(|url| valid_cover_url(url).is_some()),
+        artists,
+        album: track
+            .album
+            .as_ref()
+            .filter(|album| album.id != 0 && album.owner_id != 0)
+            .map(|album| AlbumRef {
+                title: clean_text(&album.title),
+                cover_url: album
+                    .cover_url
+                    .clone()
+                    .filter(|url| valid_cover_url(url).is_some()),
+                ..album.clone()
+            }),
+        release_key: track.release_key.filter(|key| valid_release_key(*key)),
+        library_source_key: track
+            .library_source_key
+            .filter(|key| valid_release_key(*key)),
+        url: None,
+        ..track.clone()
+    })
+}
+
 pub(crate) fn encode_bounded(
     account_id: i64,
     tracks: &[Track],
@@ -326,9 +395,19 @@ pub(crate) fn encode_bounded(
     {
         return Err(invalid());
     }
-    let mut seen = HashSet::with_capacity(tracks.len());
-    let mut stored = Vec::with_capacity(tracks.len());
-    for track in tracks {
+    let cleaned: Vec<Track> = tracks.iter().filter_map(storable).collect();
+    if cleaned.len() != tracks.len() {
+        crate::diagnostics::event(
+            "library",
+            &format!(
+                "cache_rows_without_identity skipped={}",
+                tracks.len() - cleaned.len()
+            ),
+        );
+    }
+    let mut seen = HashSet::with_capacity(cleaned.len());
+    let mut stored = Vec::with_capacity(cleaned.len());
+    for track in &cleaned {
         if !valid_metadata(
             track.id,
             track.owner_id,
@@ -491,6 +570,9 @@ pub(crate) fn decode_bounded(
     }
     let mut seen = HashSet::with_capacity(stored.tracks.len());
     let mut tracks = Vec::with_capacity(stored.tracks.len());
+    // A row that does not pass is left out; the rest of the library stays
+    // (it used to discard the whole cache).
+    let mut skipped = 0;
     for track in stored.tracks {
         if !valid_metadata(
             track.id,
@@ -499,7 +581,8 @@ pub(crate) fn decode_bounded(
             &track.title,
             track.cover_url.as_deref(),
         ) {
-            return Err(invalid());
+            skipped += 1;
+            continue;
         }
         if track
             .subtitle
@@ -523,7 +606,8 @@ pub(crate) fn decode_bounded(
                 .library_source_key
                 .is_some_and(|key| !valid_release_key(key))
         {
-            return Err(invalid());
+            skipped += 1;
+            continue;
         }
         if seen.insert((track.owner_id, track.id)) {
             tracks.push(Track {
@@ -567,6 +651,9 @@ pub(crate) fn decode_bounded(
                     .filter(|_| track.availability_revision == Some(AVAILABILITY_REVISION)),
             });
         }
+    }
+    if skipped > 0 {
+        crate::diagnostics::event("library", &format!("cache_rows_skipped count={skipped}"));
     }
     Ok(tracks)
 }
@@ -999,16 +1086,30 @@ mod tests {
         let path = fixture.path(42);
         save_at(&path, 42, &[track(1)]).unwrap();
         let original = fs::read(&path).unwrap();
+        // An invalid key is dropped from the row; the row itself is kept.
         for invalid_key in [(0, 7), (42, 0), (42, -7)] {
             let mut invalid_track = track(2);
             invalid_track.release_key = Some(invalid_key);
-            assert!(save_at(&path, 42, &[invalid_track]).is_err());
-            assert_eq!(fs::read(&path).unwrap(), original);
+            save_at(&path, 42, &[invalid_track]).unwrap();
+            let saved = load_at(&path, 42).unwrap().unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].release_key, None);
         }
+        fs::write(&path, &original).unwrap();
+        // A key out of range leaves its row out.
+        for value in [
+            serde_json::json!([0, 7]),
+            serde_json::json!([42, 0]),
+            serde_json::json!([42, -7]),
+        ] {
+            let mut injected: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            injected["tracks"][0]["release_key"] = value;
+            fs::write(&path, serde_json::to_vec(&injected).unwrap()).unwrap();
+            assert!(load_at(&path, 42).unwrap().unwrap().is_empty());
+        }
+        // A field of the wrong shape, or one that must never be stored,
+        // rejects the file.
         for (field, value) in [
-            ("release_key", serde_json::json!([0, 7])),
-            ("release_key", serde_json::json!([42, 0])),
-            ("release_key", serde_json::json!([42, -7])),
             ("release_key", serde_json::json!([42, 7, 8])),
             ("release_key", serde_json::json!(["42", "7"])),
             ("release_key", serde_json::json!("42_7_secret")),
@@ -1145,28 +1246,42 @@ mod tests {
         assert_eq!(restored[1].owner_id, 9);
         save_at(&path, 42, &[track(8)]).unwrap();
         let original = fs::read(&path).unwrap();
-        for invalid_track in [
-            Track { id: 0, ..track(9) },
-            Track {
-                owner_id: 0,
-                ..track(9)
-            },
-            Track {
-                artist: "bad\nartist".into(),
-                ..track(9)
-            },
-            Track {
-                title: "a".repeat(MAX_TEXT + 1),
-                ..track(9)
-            },
-            Track {
-                cover_url: Some("http://images.example.test/cover.jpg".into()),
-                ..track(9)
-            },
-        ] {
-            assert!(save_at(&path, 42, &[invalid_track]).is_err());
-            assert_eq!(fs::read(&path).unwrap(), original);
-        }
+        // One odd row never keeps the rest from being saved: text is
+        // cleaned, a bad cover dropped, a row without an identity left out.
+        save_at(
+            &path,
+            42,
+            &[
+                track(8),
+                Track { id: 0, ..track(9) },
+                Track {
+                    owner_id: 0,
+                    ..track(9)
+                },
+                Track {
+                    artist: "bad\nartist".into(),
+                    ..track(10)
+                },
+                Track {
+                    title: "a".repeat(MAX_TEXT + 1),
+                    ..track(11)
+                },
+                Track {
+                    cover_url: Some("http://images.example.test/cover.jpg".into()),
+                    ..track(12)
+                },
+            ],
+        )
+        .unwrap();
+        let saved = load_at(&path, 42).unwrap().unwrap();
+        assert_eq!(
+            saved.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [8, 10, 11, 12]
+        );
+        assert_eq!(saved[1].artist, "bad artist");
+        assert_eq!(saved[2].title.len(), MAX_TEXT);
+        assert_eq!(saved[3].cover_url, None);
+        fs::write(&path, &original).unwrap();
         assert!(save_at(&path, -42, &[track(9)]).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
@@ -1192,12 +1307,15 @@ mod tests {
         for bytes in [
             b"not JSON".to_vec(),
             serde_json::to_vec(&bad_version).unwrap(),
-            serde_json::to_vec(&bad_identity).unwrap(),
             serde_json::to_vec(&credential).unwrap(),
-            serde_json::to_vec(&bad_cover).unwrap(),
         ] {
             fs::write(&path, bytes).unwrap();
             assert!(load_at(&path, 42).is_err());
+        }
+        // A bad row is left out, not loaded; the file itself still reads.
+        for bad_row in [bad_identity, bad_cover] {
+            fs::write(&path, serde_json::to_vec(&bad_row).unwrap()).unwrap();
+            assert!(load_at(&path, 42).unwrap().unwrap().is_empty());
         }
         OpenOptions::new()
             .write(true)

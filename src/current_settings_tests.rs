@@ -736,7 +736,7 @@ fn the_scrollbar_keeps_the_same_gap_to_the_window_edge_as_the_content_on_the_lef
         })
         .max_by(|a, b| a.height().total_cmp(&b.height()))
         .expect("the list's scrollbar");
-    let search = account_ui_text_rect(&output, "Search loaded tracks").unwrap();
+    let search = account_ui_text_rect(&output, "Search tracks").unwrap();
     // The search field's frame starts 8 points after the page's left edge.
     let left_gap = 8.0;
     assert!(search.left() > app.page_rect.left() + left_gap);
@@ -1097,7 +1097,7 @@ fn the_bitrate_pill_follows_its_switch_and_sits_on_the_titles_letters() {
         account_ui_shapes(output)
             .into_iter()
             .find_map(|shape| match shape {
-                egui::Shape::Text(text) if text.galley.text() == "256 kbps" => Some(text.clone()),
+                egui::Shape::Text(text) if text.galley.text() == "256" => Some(text.clone()),
                 _ => None,
             })
     };
@@ -1155,4 +1155,55 @@ fn the_bitrate_pill_follows_its_switch_and_sits_on_the_titles_letters() {
         (letters.center() - pill.center()).length() <= 0.75,
         "{letters:?} in {pill:?}"
     );
+}
+
+#[test]
+fn a_search_in_my_music_loads_the_rest_of_it() {
+    let ctx = egui::Context::default();
+    // Signed in without a music client: a page request fails at once,
+    // nothing reaches VK.
+    let mut app = crate::app::tests::search_test_app(&ctx);
+    app.demo = false;
+    app.page = MusicPage::Library;
+    app.library.tracks = page(100, &(1..=100).collect::<Vec<_>>()).items;
+    app.library.exhausted = false;
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let mut render = |app: &mut MusicApp| {
+        tick += 1;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(f64::from(tick) * 0.1),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        output
+    };
+    // At the top of a long list nothing more loads.
+    render(&mut app);
+    render(&mut app);
+    assert!(app.pending.is_none());
+    // A search that finds nothing among the loaded tracks asks for more
+    // and says so.
+    app.filter = "nothing like this".into();
+    let output = render(&mut app);
+    assert!(app.pending.is_some(), "the next page was requested");
+    assert!(
+        account_ui_shapes(&output).into_iter().any(|shape| matches!(
+            shape,
+            egui::Shape::Text(text) if text.galley.text() == "Searching the rest of your tracks…"
+        )) || {
+            let output = render(&mut app);
+            account_ui_shapes(&output).into_iter().any(|shape| matches!(
+                shape,
+                egui::Shape::Text(text) if text.galley.text() == "Searching the rest of your tracks…"
+            ))
+        }
+    );
+    for worker in app.workers.drain(..) {
+        let _ = worker.join();
+    }
 }

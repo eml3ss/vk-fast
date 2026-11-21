@@ -9055,7 +9055,7 @@ impl MusicApp {
                             egui::TextEdit::singleline(&mut self.filter)
                                 .frame(Frame::NONE)
                                 .desired_width(ui.available_width())
-                                .hint_text(t("Поиск в загруженных треках", "Search loaded tracks")),
+                                .hint_text(t("Поиск по трекам", "Search tracks")),
                         );
                     });
                 });
@@ -9214,11 +9214,27 @@ impl MusicApp {
             0
         };
         if visible.is_empty() {
+            let more_to_load = filtering
+                && is_library
+                && self.audio_error.is_none()
+                && if tail_mode {
+                    self.library_tail_start != Some(0)
+                } else {
+                    !self.library.exhausted
+                };
             theme::inset_heading(ui, |ui| {
-                ui.label(t(
-                    "Среди загруженных треков ничего не найдено.",
-                    "No matching tracks in the loaded library.",
-                ))
+                if more_to_load {
+                    ui.horizontal(|ui| {
+                        ui.label(t(
+                            "Ищем среди остальных треков…",
+                            "Searching the rest of your tracks…",
+                        ));
+                        ui.spinner();
+                    })
+                    .response
+                } else {
+                    ui.label(t("Ничего не найдено.", "No matching tracks."))
+                }
             });
         }
         let row_height = 54.0;
@@ -9298,18 +9314,20 @@ impl MusicApp {
         }
         let near_bottom = scroll.state.offset.y + scroll.inner_rect.height() + row_height * 2.0
             >= scroll.content_size.y;
-        if !near_bottom || filtering {
+        // A search in My music looks through all of it: the rest loads page
+        // after page while it is typed, as scrolling to the end would.
+        let wants_more = near_bottom || (filtering && is_library);
+        if !wants_more {
             ctx.data_mut(|data| data.remove::<(i64, usize, usize)>(pagination_id));
         }
         self.row_number_offset = 0;
         if tail_mode {
             // Reversed: scrolling down reads further back from VK's end.
-            if near_bottom && !filtering {
+            if wants_more {
                 self.load_library_tail(&ctx);
             }
         } else if is_library
-            && near_bottom
-            && !filtering
+            && wants_more
             && self.pending.is_none()
             && self.audio_error.is_none()
             && !self.library.exhausted
@@ -10042,7 +10060,7 @@ impl MusicApp {
                     duration: track.duration,
                 })
             })
-            .map(|kbps| format!("{kbps} {}", t("кбит/с", "kbps")));
+            .map(|kbps| kbps.to_string());
         let has_track = track.is_some();
         let track_key = track.map(Track::key);
         let artists = track.map_or_else(Vec::new, |track| track.artists.clone());

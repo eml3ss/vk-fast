@@ -404,10 +404,16 @@ mod tests {
             assert!(save_at(&path, 42, &snapshot(9, position)).is_err());
             assert_eq!(fs::read(&path).unwrap(), previous);
         }
-        let mut invalid = snapshot(9, 1.0);
-        invalid.track.title = "invalid\ntitle".into();
-        assert!(save_at(&path, 42, &invalid).is_err());
-        assert_eq!(fs::read(&path).unwrap(), previous);
+        // A line break in a title is cleaned, not a reason to lose the
+        // place.
+        let mut odd = snapshot(9, 1.0);
+        odd.track.title = "odd\ntitle".into();
+        save_at(&path, 42, &odd).unwrap();
+        assert_eq!(
+            load_at(&path, 42).unwrap().unwrap().track.title,
+            "odd title"
+        );
+        fs::write(&path, &previous).unwrap();
         let mut large = snapshot(9, 1.0);
         large.track.artists = (0..64)
             .map(|index| ArtistRef {

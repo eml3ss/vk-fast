@@ -193,10 +193,12 @@ mod tests {
         let path = fixture.path(42);
         save_at(&path, 42, &[track(1)]).unwrap();
         let previous = fs::read(&path).unwrap();
-        let mut invalid = track(2);
-        invalid.title = "invalid\ntitle".into();
-        assert!(save_at(&path, 42, &[invalid]).is_err());
-        assert_eq!(fs::read(&path).unwrap(), previous);
+        // A line break in a title is cleaned, not a reason to lose history.
+        let mut odd = track(2);
+        odd.title = "odd\ntitle".into();
+        save_at(&path, 42, &[odd]).unwrap();
+        assert_eq!(load_at(&path, 42).unwrap()[0].title, "odd title");
+        fs::write(&path, &previous).unwrap();
         let mut large = track(2);
         large.artists = (0..64)
             .map(|index| ArtistRef {
