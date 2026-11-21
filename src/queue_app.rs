@@ -756,6 +756,26 @@ impl MusicApp {
                 ui.set_clip_rect(ui.clip_rect().intersect(metadata));
                 ui.set_width(metadata.width().max(0.0));
                 ui.spacing_mut().item_spacing.y = 1.0;
+                // From the title's capitals to the artists' baseline, the
+                // same space above and below inside the cover, as in the
+                // track lists.
+                let title_font = egui::FontId::new(13.0, theme::semibold());
+                let artist_font = egui::FontId::proportional(12.0);
+                let (cap, title_height, baseline) = ui.fonts_mut(|fonts| {
+                    let title_height = fonts.row_height(&title_font);
+                    let mut ink = |font: &egui::FontId| {
+                        fonts
+                            .layout_no_wrap("H".to_owned(), font.clone(), Color32::WHITE)
+                            .mesh_bounds
+                    };
+                    (
+                        ink(&title_font).top(),
+                        title_height,
+                        ink(&artist_font).bottom(),
+                    )
+                });
+                let artists_baseline = title_height + ui.spacing().item_spacing.y + baseline;
+                ui.add_space(((metadata.height() - cap - artists_baseline) * 0.5).max(0.0));
                 ui.add(
                     egui::Label::new(theme::track_title(
                         track,

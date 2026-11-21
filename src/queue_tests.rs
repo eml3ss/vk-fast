@@ -723,3 +723,65 @@ fn a_track_in_both_playlists_does_not_jump_when_playback_moves_to_the_other() {
         "the shared track jumped: {places:?}"
     );
 }
+
+#[test]
+fn queue_titles_and_artists_are_centred_on_the_cover() {
+    for explicit in [true, false] {
+        let ctx = egui::Context::default();
+        let mut app = prepared(&ctx);
+        app.page = MusicPage::Library;
+        let mut track = external();
+        track.id = 77;
+        track.title = "Little title".into();
+        track.artist = "Hello".into();
+        track.explicit = explicit;
+        app.play_order.enqueue(track.key());
+        app.queued_tracks.insert(track.key(), track);
+        app.queue_ui.open = true;
+        let size = egui::vec2(1280.0, 800.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..5 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let title = account_ui_text_rect(&output, "Little title").unwrap();
+        let artist = account_ui_text_rect(&output, "Hello").unwrap();
+        let cover = account_ui_shapes(&output)
+            .into_iter()
+            .map(|shape| shape.visual_bounding_rect())
+            .find(|rect| {
+                (rect.width() - 36.0).abs() < 0.6
+                    && (rect.height() - 36.0).abs() < 0.6
+                    && rect.right() < title.left()
+                    && (rect.center().y - title.center().y).abs() < 20.0
+            })
+            .expect("the row's cover");
+        // From the title's capitals to the artists' baseline, the same
+        // space above and below inside the cover.
+        let top = title.top() - cover.top();
+        let bottom = cover.bottom() - artist.bottom();
+        assert!(
+            (top - bottom).abs() <= 1.0,
+            "explicit {explicit}: top {top}, bottom {bottom}"
+        );
+        let duration = account_ui_shapes(&output)
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text)
+                    if text.galley.text() == "0:01"
+                        && text.visual_bounding_rect().left() > title.left()
+                        && cover
+                            .y_range()
+                            .contains(text.visual_bounding_rect().center().y) =>
+                {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .expect("the row's duration");
+        assert!(
+            (duration.center().y - cover.center().y).abs() <= 0.5,
+            "{duration:?} {cover:?}"
+        );
+    }
+}

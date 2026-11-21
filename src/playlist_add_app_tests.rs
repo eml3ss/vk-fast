@@ -101,7 +101,7 @@ fn a_plus_adds_one_track_at_a_time_and_tracks_already_there_are_marked() {
         .unwrap();
     let middle = (beta.top() + artist.bottom()) * 0.5;
     assert!(
-        (middle - duration.center().y).abs() < 2.5,
+        (middle - duration.center().y).abs() < 1.0,
         "text centred: {middle} vs {}",
         duration.center().y
     );
