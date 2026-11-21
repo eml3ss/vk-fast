@@ -12221,8 +12221,8 @@ impl MusicApp {
                     }
                     ui.label(
                         RichText::new(t(
-                            "Битрейт играющего трека рядом с его названием в плеере. VK его не сообщает, поэтому он измеряется при воспроизведении и появляется через секунду.",
-                            "The playing track's bitrate next to its title in the player. VK does not report it, so it is measured while playing and shows after a second.",
+                            "Битрейт играющего трека рядом с его названием в плеере.",
+                            "The playing track's bitrate next to its title in the player.",
                         ))
                         .small()
                         .color(theme::muted()),
