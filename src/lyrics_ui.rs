@@ -414,11 +414,13 @@ pub fn show(
         ui.scope_builder(egui::UiBuilder::new().max_rect(cover), |ui| {
             covers.show(ui, cover_url, 40.0);
         });
+        // From the title's capitals to the artists' baseline, the same
+        // space above and below inside the cover.
         let title_rect = caption_job(
             ui,
             Rect::from_min_size(
                 metadata.min + egui::vec2(50.0, 0.0),
-                egui::vec2((metadata.width() - 50.0).max(0.0), 22.0),
+                egui::vec2((metadata.width() - 50.0).max(0.0), 20.0),
             ),
             theme::track_title(
                 track,
@@ -432,7 +434,7 @@ pub fn show(
             action = Some(Action::Album);
         }
         let artists_line = Rect::from_min_size(
-            metadata.min + egui::vec2(50.0, 23.0),
+            metadata.min + egui::vec2(50.0, 22.0),
             egui::vec2((metadata.width() - 50.0).max(0.0), 20.0),
         );
         let badge = theme::explicit_badge(ui.ctx(), Some(track), 12.0);

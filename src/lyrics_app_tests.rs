@@ -428,3 +428,58 @@ fn every_track_playing_in_fullscreen_fetches_its_large_cover_once_even_if_fetche
     assert_eq!(app.fullscreen_metadata_key(), None);
     assert_eq!(app.fullscreen_metadata, None);
 }
+
+#[test]
+fn the_panels_track_title_and_artists_are_centred_on_its_cover() {
+    for explicit in [false, true] {
+        let ctx = egui::Context::default();
+        let mut app = prepared(&ctx, Language::English);
+        app.lyrics.active = true;
+        app.lyrics.open = true;
+        if let Some(track) = &mut app.playing {
+            // No descenders: their tails would move the measured edge.
+            track.title = "Little title".into();
+            track.artist = "Hello".into();
+            track.explicit = explicit;
+        }
+        let size = egui::vec2(1280.0, 800.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..5 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        let in_panel = |caption: &str| {
+            account_ui_shapes(&output)
+                .into_iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text() == caption
+                            && text.visual_bounding_rect().left() > size.x * 0.6
+                            && text.visual_bounding_rect().top() < 300.0 =>
+                    {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{caption} in the lyrics panel"))
+        };
+        let title = in_panel("Little title");
+        let artist = in_panel("Hello");
+        let cover = account_ui_shapes(&output)
+            .into_iter()
+            .map(|shape| shape.visual_bounding_rect())
+            .find(|rect| {
+                (rect.width() - 40.0).abs() < 0.6
+                    && (rect.height() - 40.0).abs() < 0.6
+                    && rect.right() < title.left()
+                    && (rect.center().y - title.center().y).abs() < 25.0
+            })
+            .expect("the panel's cover");
+        let top = title.top() - cover.top();
+        let bottom = cover.bottom() - artist.bottom();
+        assert!(
+            (top - bottom).abs() <= 1.0,
+            "explicit {explicit}: top {top}, bottom {bottom}"
+        );
+    }
+}

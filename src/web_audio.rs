@@ -2907,13 +2907,14 @@ impl WebAudioClient {
 
     /// Like `artist_page`, but hands over the first response (banner, popular
     /// tracks, latest releases, related artists) before the discography's
-    /// continuation requests, so the page can appear immediately.
+    /// continuation requests, so the page can appear immediately, and then
+    /// the page again as each discography reply adds to it.
     pub fn artist_page_progressive(
         &self,
         expected_owner: i64,
         reference: &ArtistRef,
         canceled: &AtomicBool,
-        first: impl FnOnce(ArtistPage),
+        mut partial: impl FnMut(ArtistPage),
     ) -> Result<ArtistPage, WebAudioError> {
         let generation = self.home_owner(expected_owner, canceled)?;
         let reference = if reference.id.is_empty() {
@@ -2945,15 +2946,26 @@ impl WebAudioClient {
         )?;
         let (mut page, streams) = parse_artist_page(&value, &reference)?;
         self.commit_home_streams(expected_owner, generation, streams, canceled)?;
-        first(ArtistPage {
+        partial(ArtistPage {
             releases_pending: true,
             ..page.clone()
         });
-        if let Err(error) =
-            crate::artist_catalog::load(&mut page, &value, canceled, |method, params| {
+        // The discography shows as its pages arrive, not after the last.
+        let loaded = crate::artist_catalog::load_progressive(
+            &mut page,
+            &value,
+            canceled,
+            |method, params| {
                 self.detail_request(expected_owner, generation, method, params, canceled)
-            })
-        {
+            },
+            |so_far| {
+                partial(ArtistPage {
+                    releases_pending: true,
+                    ..so_far.clone()
+                })
+            },
+        );
+        if let Err(error) = loaded {
             if matches!(
                 error,
                 WebAudioError::Canceled | WebAudioError::WrongAccount | WebAudioError::Unverified
@@ -2962,8 +2974,12 @@ impl WebAudioClient {
             }
             page.releases_error = Some(error);
         }
-        // The rest of "Appears on" behind its Show all; what the first
-        // response held stays if this fails.
+        // The rest of "Appears on"; what the first response held stays if
+        // this fails. The full discography shows meanwhile.
+        partial(ArtistPage {
+            releases_pending: true,
+            ..page.clone()
+        });
         match crate::artist_catalog::load_featuring(
             &mut page,
             &value,

@@ -90,7 +90,8 @@ pub fn show(
             ui.add_space(10.0);
             let Some(page) = page else {
                 if loading {
-                    ui.spinner();
+                    // Inset like the heading above and the page's messages.
+                    theme::inset_heading(ui, |ui| ui.spinner());
                 }
                 return action;
             };
@@ -834,6 +835,91 @@ mod tests {
             .iter()
             .for_each(|shape| collect(&shape.shape, &mut texts));
         texts
+    }
+
+    #[test]
+    fn the_loading_spinner_lines_up_with_the_playlists_heading() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut covers = CoverCache::new();
+        let creator = page(0).creator;
+        let mut tab = Tab::All;
+        let mut output = egui::FullOutput::default();
+        for tick in 0..2 {
+            output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    time: Some(f64::from(tick) * 0.1),
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        &mut covers,
+                        Language::English,
+                        &creator,
+                        None,
+                        true,
+                        Playback::default(),
+                        &mut tab,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let heading = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Playlists" => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.top().total_cmp(&b.top()))
+            .expect("the Playlists heading");
+        // The spinner's arc moves each frame: its circle, found from three
+        // of its points, is what stays put.
+        let (centre, radius) = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Path(path)
+                    if path.points.len() > 8 && path.points[0].y > heading.bottom() =>
+                {
+                    let (a, b, c) = (
+                        path.points[0],
+                        path.points[path.points.len() / 2],
+                        path.points[path.points.len() - 1],
+                    );
+                    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+                    let square = |p: egui::Pos2| p.x * p.x + p.y * p.y;
+                    let centre = egui::pos2(
+                        (square(a) * (b.y - c.y)
+                            + square(b) * (c.y - a.y)
+                            + square(c) * (a.y - b.y))
+                            / d,
+                        (square(a) * (c.x - b.x)
+                            + square(b) * (a.x - c.x)
+                            + square(c) * (b.x - a.x))
+                            / d,
+                    );
+                    Some((centre, (a - centre).length()))
+                }
+                _ => None,
+            })
+            .expect("the spinner under the heading");
+        // Its circle starts where the heading's letters do, not at the page
+        // edge.
+        let left = centre.x - radius;
+        assert!(
+            (left - heading.left()).abs() < 2.5,
+            "spinner from {left}, heading from {}",
+            heading.left()
+        );
     }
 
     #[test]
