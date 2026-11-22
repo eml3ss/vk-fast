@@ -66,6 +66,69 @@ pub struct State {
     select_reach: f32,
     /// Where the fullscreen cover last came from, logged when it changes.
     cover_source: Option<&'static str>,
+    highlight: Highlight,
+}
+
+/// Which lines are lit as the current one: the current line fades in while
+/// the one before it fades out; every other line is plain. Kept here rather
+/// than as egui animations per line, which only advance while a line is
+/// drawn: a line that left the view still lit (a seek, a replay, other
+/// lyrics) kept that value and flashed lit when it scrolled back in.
+#[derive(Default)]
+struct Highlight {
+    current: Option<usize>,
+    previous: Option<usize>,
+    /// How lit `previous` was when `current` took over.
+    previous_from: f32,
+    /// When `current` took over; `None` lights it at once.
+    since: Option<f64>,
+}
+impl Highlight {
+    const FADE: f64 = 0.25;
+
+    fn progress(&self, now: f64) -> f32 {
+        self.since.map_or(1.0, |since| {
+            ((now - since) / Self::FADE).clamp(0.0, 1.0) as f32
+        })
+    }
+
+    /// Follows `active` at `now`; `animate` false lights it at once.
+    fn update(&mut self, active: Option<usize>, now: f64, animate: bool) {
+        if active == self.current {
+            return;
+        }
+        let lit = self.level(self.current, now);
+        *self = if animate {
+            Self {
+                current: active,
+                previous: self.current,
+                previous_from: lit,
+                since: Some(now),
+            }
+        } else {
+            Self {
+                current: active,
+                ..Self::default()
+            }
+        };
+    }
+
+    /// How lit the line at `index` is, from 0 to 1.
+    fn level(&self, index: Option<usize>, now: f64) -> f32 {
+        let Some(index) = index else { return 0.0 };
+        let progress = self.progress(now);
+        if Some(index) == self.current {
+            progress
+        } else if Some(index) == self.previous {
+            self.previous_from * (1.0 - progress)
+        } else {
+            0.0
+        }
+    }
+
+    fn animating(&self, now: f64) -> bool {
+        self.progress(now) < 1.0
+    }
 }
 
 /// Text selected by dragging over the lines: copied when the button is
@@ -157,6 +220,7 @@ impl Default for State {
             selection: Selection::default(),
             select_reach: 0.0,
             cover_source: None,
+            highlight: Highlight::default(),
         }
     }
 }
@@ -793,6 +857,19 @@ fn lines(
                     state.height += rect.height() * 0.16;
                     state.stamp = Some(stamp);
                 }
+                // Other lyrics light their current line at once; within the
+                // same lyrics it fades in as the last one fades out.
+                let now = ui.input(|input| input.time);
+                let lit = active.filter(|_| data.synced);
+                if changed {
+                    state.highlight = Highlight::default();
+                    state.highlight.update(lit, now, false);
+                } else {
+                    state.highlight.update(lit, now, true);
+                }
+                if state.highlight.animating(now) {
+                    ui.ctx().request_repaint();
+                }
                 let (whole, _) = ui.allocate_exact_size(
                     egui::vec2(width, state.height.max(rect.height())),
                     Sense::hover(),
@@ -845,11 +922,7 @@ fn lines(
                     );
                     // The current line grows a little and turns accent blue,
                     // easing in and out.
-                    let current = ui.ctx().animate_bool_with_time(
-                        ui.id().with(("lyric-active", stamp.0, index)),
-                        data.synced && active == Some(index),
-                        0.25,
-                    );
+                    let current = state.highlight.level(Some(index), now);
                     let resting = if !data.synced || response.hovered() {
                         theme::tone(Color32::from_rgb(238, 241, 247))
                     } else {
@@ -2117,5 +2190,71 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_line_that_left_the_view_still_lit_comes_back_plain() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = State::default();
+        let data = crate::lyrics::test_data(40, true);
+        let plain = theme::tone(Color32::from_gray(124));
+        let run = |state: &mut State, frame: u32, position: f64| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 260.0),
+                    )),
+                    time: Some(f64::from(frame) / 60.0),
+                    ..Default::default()
+                },
+                |ui| {
+                    lines(
+                        ui,
+                        state,
+                        ui.available_rect_before_wrap(),
+                        &data,
+                        position,
+                        18.0,
+                        false,
+                        true,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .into_iter()
+                .find_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Synthetic lyric line 30" => {
+                        text.override_text_color
+                    }
+                    _ => None,
+                })
+        };
+        // Line 30 is current and lit; a seek back to the start takes the
+        // view away from it at once, still lit.
+        let mut lit = None;
+        for frame in 0..60 {
+            lit = run(&mut state, frame, 305.0).or(lit);
+        }
+        assert_eq!(lit, Some(theme::accent()));
+        let mut after_seek = None;
+        for frame in 60..120 {
+            after_seek = run(&mut state, frame, 5.0);
+        }
+        assert_eq!(after_seek, None, "out of view once the scroll settles");
+        // Playing on, the view reaches it again before it is current: it
+        // comes into view plain, never lit.
+        let mut seen = 0;
+        for frame in 120..400 {
+            let position = (5.0 + f64::from(frame - 120) * 2.0).min(295.0);
+            if let Some(color) = run(&mut state, frame, position) {
+                assert_eq!(color, plain, "frame {frame} at {position}");
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "line 30 came back into view");
     }
 }
