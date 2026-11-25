@@ -78,32 +78,13 @@ jobs:
       # Windows code with NASM.
       - name: Install NASM
         run: |
-          choco install nasm --no-progress -y
-          nasm_bin="$(command -v nasm || true)"
-          if [[ -z "$nasm_bin" ]]; then
-            for candidate in \
-              "/c/Program Files/NASM/nasm.exe" \
-              "/c/Program Files (x86)/NASM/nasm.exe" \
-              "/c/ProgramData/chocolatey/bin/nasm.exe" \
-              "$(cygpath -u "$LOCALAPPDATA")/bin/NASM/nasm.exe"
-            do
-              if [[ -x "$candidate" ]]; then
-                nasm_bin="$candidate"
-                break
-              fi
-            done
-          fi
-          if [[ -z "$nasm_bin" ]]; then
-            nasm_bin="$(find /c/ProgramData/chocolatey "/c/Program Files" "/c/Program Files (x86)" "$(cygpath -u "$LOCALAPPDATA")" -maxdepth 4 -iname nasm.exe 2>/dev/null | head -n 1 || true)"
-          fi
-          if [[ -z "$nasm_bin" ]]; then
-            echo "nasm.exe not found after choco install" >&2
-            exit 1
-          fi
-          nasm_win="$(cygpath -w "$nasm_bin")"
-          nasm_dir="$(cygpath -w "$(dirname "$nasm_bin")")"
-          echo "Using NASM: $nasm_win"
-          "$nasm_bin" -v
+          nasm_zip="$RUNNER_TEMP/nasm-2.16.03-win64.zip"
+          curl -fsSL --retry 3 "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip" -o "$nasm_zip"
+          echo "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6  $nasm_zip" | sha256sum -c -
+          unzip -q -o "$nasm_zip" -d "$RUNNER_TEMP/nasm"
+          nasm_dir="$(cygpath -w "$RUNNER_TEMP/nasm/nasm-2.16.03")"
+          nasm_win="$nasm_dir\\nasm.exe"
+          "$RUNNER_TEMP/nasm/nasm-2.16.03/nasm.exe" -v
           echo "$nasm_dir" >> "$GITHUB_PATH"
           echo "ASM_NASM=$nasm_win" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
