@@ -20484,7 +20484,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ========================================================================
-wreq 0.16.4
+wreq 0.16.5
 License: Apache-2.0
 Source: https://github.com/0x676e67/wreq
 
