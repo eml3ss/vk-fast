@@ -79,7 +79,33 @@ jobs:
       - name: Install NASM
         run: |
           choco install nasm --no-progress -y
-          echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
+          nasm_bin="$(command -v nasm || true)"
+          if [[ -z "$nasm_bin" ]]; then
+            for candidate in \
+              "/c/Program Files/NASM/nasm.exe" \
+              "/c/Program Files (x86)/NASM/nasm.exe" \
+              "/c/ProgramData/chocolatey/bin/nasm.exe" \
+              "$(cygpath -u "$LOCALAPPDATA")/bin/NASM/nasm.exe"
+            do
+              if [[ -x "$candidate" ]]; then
+                nasm_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$nasm_bin" ]]; then
+            nasm_bin="$(find /c/ProgramData/chocolatey "/c/Program Files" "/c/Program Files (x86)" "$(cygpath -u "$LOCALAPPDATA")" -maxdepth 4 -iname nasm.exe 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -z "$nasm_bin" ]]; then
+            echo "nasm.exe not found after choco install" >&2
+            exit 1
+          fi
+          nasm_win="$(cygpath -w "$nasm_bin")"
+          nasm_dir="$(cygpath -w "$(dirname "$nasm_bin")")"
+          echo "Using NASM: $nasm_win"
+          "$nasm_bin" -v
+          echo "$nasm_dir" >> "$GITHUB_PATH"
+          echo "ASM_NASM=$nasm_win" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-release
