@@ -1,6 +1,7 @@
 //! Artist release navigation follows opaque section/block references returned by VK.
 use crate::{
     artist_releases::{self, Kind, Release},
+    model::Track,
     web_audio::{ArtistPage, WebAudioError},
 };
 use serde_json::Value;
@@ -813,6 +814,325 @@ pub fn load_featuring(
     Ok(())
 }
 
+/// References from an artist page's Popular block used to load the full
+/// list of popular tracks on demand.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct PopularTracksSource {
+    pub domain: Option<String>,
+    pub block_id: Option<String>,
+    pub next_from: Option<String>,
+    pub section_id: Option<String>,
+    pub total: Option<usize>,
+}
+
+impl PopularTracksSource {
+    /// Whether the tracks already on the artist page are known to be the full list.
+    pub fn is_complete(&self, loaded: usize) -> bool {
+        loaded > 0 && self.next_from.is_none() && self.total.is_some_and(|total| total <= loaded)
+    }
+}
+
+fn popular_header(blocks: &[Value]) -> Option<(Option<&str>, Option<usize>)> {
+    blocks.iter().find_map(|block| {
+        let button = [block.get("actions"), block.get("buttons")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .find(|button| {
+                let action = button.get("action").unwrap_or(button);
+                action
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .and_then(|url| reqwest::Url::parse(url).ok())
+                    .is_some_and(|url| url.path().ends_with("/top_audios"))
+            })?;
+        let section = opaque(
+            button
+                .get("section_id")
+                .or_else(|| button.pointer("/action/section_id")),
+        );
+        let count = button
+            .get("ref_items_count")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok());
+        Some((section, count))
+    })
+}
+
+fn open_section_id(block: &Value) -> Option<&str> {
+    opaque(block.pointer("/meta/show_all_info/section_id")).or_else(|| {
+        [block.get("actions"), block.get("buttons")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .find_map(|button| {
+                let action = button.get("action").unwrap_or(button);
+                let kind = action.get("type").and_then(Value::as_str);
+                matches!(kind, Some("open_section" | "switch_section"))
+                    .then(|| {
+                        opaque(
+                            button
+                                .get("section_id")
+                                .or_else(|| action.get("section_id")),
+                        )
+                    })
+                    .flatten()
+            })
+    })
+}
+
+/// Extracts continuation and "Show all" section references for an artist's
+/// Popular tracks block from the initial artist page response.
+pub fn popular_tracks_source(
+    blocks: &[Value],
+    raw_artist: Option<&Value>,
+) -> PopularTracksSource {
+    let domain = raw_artist
+        .and_then(|artist| artist.get("domain"))
+        .and_then(Value::as_str)
+        .filter(|domain| crate::model::valid_artist_id(domain))
+        .map(str::to_owned);
+    let audio_index = blocks
+        .iter()
+        .position(|block| block.get("data_type").and_then(Value::as_str) == Some("music_audios"));
+    let audio_block = audio_index.map(|index| &blocks[index]);
+    let block_id = audio_block
+        .and_then(|block| opaque(block.get("id")))
+        .map(str::to_owned);
+    let next_from = audio_block
+        .and_then(|block| opaque(block.get("next_from")))
+        .map(str::to_owned);
+    let (header_section, total) = popular_header(blocks).unwrap_or((None, None));
+    let section_id = header_section
+        .or_else(|| audio_block.and_then(open_section_id))
+        .or_else(|| {
+            audio_index
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|prev| open_section_id(&blocks[prev]))
+        })
+        .map(str::to_owned);
+    PopularTracksSource {
+        domain,
+        block_id,
+        next_from,
+        section_id,
+        total,
+    }
+}
+
+/// Loads the full list of an artist's popular tracks, starting from the tracks
+/// already on the artist page when available and handing over progress as pages
+/// arrive.
+#[allow(clippy::too_many_arguments)]
+pub fn load_popular_tracks_progressive(
+    artist_id: &str,
+    source: &PopularTracksSource,
+    initial: Vec<Track>,
+    force_reload: bool,
+    canceled: &AtomicBool,
+    mut request: impl FnMut(&'static str, Vec<(&'static str, String)>) -> Result<Value, WebAudioError>,
+    mut parse_audios: impl FnMut(&[Value]) -> Result<Vec<Track>, WebAudioError>,
+    mut progress: impl FnMut(&[Track]),
+) -> Result<Vec<Track>, WebAudioError> {
+    const MAX_TRACKS: usize = 10_000;
+    let mut tracks = if force_reload { Vec::new() } else { initial };
+    if !force_reload && source.is_complete(tracks.len()) {
+        return Ok(tracks);
+    }
+    let mut known: HashSet<(i64, i64)> = tracks.iter().map(Track::key).collect();
+    let mut seen: HashSet<(&'static str, String, String)> = HashSet::new();
+    let first = match (
+        !force_reload,
+        source.block_id.as_deref(),
+        source.next_from.as_deref(),
+        source.section_id.as_deref(),
+    ) {
+        (true, Some(block_id), Some(cursor), _) => {
+            seen.insert(("block", block_id.to_owned(), cursor.to_owned()));
+            (
+                "catalog.getBlockItems",
+                vec![
+                    ("block_id", block_id.to_owned()),
+                    ("start_from", cursor.to_owned()),
+                    ("extended", "1".to_owned()),
+                    ("count", PAGE.to_string()),
+                ],
+            )
+        }
+        (_, _, _, Some(section_id)) => {
+            seen.insert(("section", section_id.to_owned(), String::new()));
+            (
+                "catalog.getSection",
+                vec![
+                    ("section_id", section_id.to_owned()),
+                    ("need_blocks", "1".to_owned()),
+                    ("extended", "1".to_owned()),
+                ],
+            )
+        }
+        _ => {
+            let domain = source.domain.as_deref().unwrap_or(artist_id);
+            (
+                "catalog.getAudioArtist",
+                vec![
+                    ("artist_id", artist_id.to_owned()),
+                    ("need_blocks", "1".to_owned()),
+                    ("url", format!("https://vk.ru/artist/{domain}/top_audios")),
+                ],
+            )
+        }
+    };
+    let mut pending = VecDeque::from([first]);
+    let mut requests = 0;
+    while let Some((method, params)) = pending.pop_front() {
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        if requests >= MAX_REQUESTS {
+            return Err(WebAudioError::Pagination);
+        }
+        requests += 1;
+        let value = request(method, params)?;
+        if canceled.load(Ordering::Acquire) {
+            return Err(WebAudioError::Canceled);
+        }
+        let audio_pool: HashMap<String, &Value> = value
+            .get("audios")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|raw| {
+                let owner = raw
+                    .get("owner_id")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))?;
+                let id = raw
+                    .get("id")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))?;
+                Some((format!("{owner}_{id}"), raw))
+            })
+            .collect();
+        let (blocks, section_value, is_overview): (Vec<&Value>, Option<&Value>, bool) =
+            if let Some(section) = value.get("section") {
+                (
+                    section
+                        .get("blocks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    Some(section),
+                    false,
+                )
+            } else if let Some(block) = value.get("block") {
+                (vec![block], None, false)
+            } else if let Some(sections) = value
+                .pointer("/catalog/sections")
+                .and_then(Value::as_array)
+            {
+                let default = value
+                    .pointer("/catalog/default_section")
+                    .and_then(Value::as_str);
+                let section = sections
+                    .iter()
+                    .find(|section| section.get("id").and_then(Value::as_str) == default)
+                    .or_else(|| sections.first());
+                let blocks: Vec<&Value> = section
+                    .and_then(|section| section.get("blocks"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                let overview = blocks
+                    .iter()
+                    .any(|block| block.get("data_type").and_then(Value::as_str) == Some("artist"));
+                (blocks, section, overview)
+            } else {
+                return Err(WebAudioError::Format);
+            };
+        let before = tracks.len();
+        let mut raw_batch = Vec::new();
+        for block in &blocks {
+            if block.get("data_type").and_then(Value::as_str) != Some("music_audios") {
+                continue;
+            }
+            if let Some(ids) = block
+                .get("audios_ids")
+                .or_else(|| block.get("audio_ids"))
+                .and_then(Value::as_array)
+            {
+                for id in ids.iter().filter_map(Value::as_str) {
+                    if let Some(raw) = audio_pool.get(id) {
+                        raw_batch.push((*raw).clone());
+                    }
+                }
+            }
+            if let (Some(id), Some(cursor)) =
+                (opaque(block.get("id")), opaque(block.get("next_from")))
+                && seen.insert(("block", id.to_owned(), cursor.to_owned()))
+            {
+                pending.push_back((
+                    "catalog.getBlockItems",
+                    vec![
+                        ("block_id", id.to_owned()),
+                        ("start_from", cursor.to_owned()),
+                        ("extended", "1".to_owned()),
+                        ("count", PAGE.to_string()),
+                    ],
+                ));
+            }
+        }
+        if !raw_batch.is_empty() {
+            let batch = parse_audios(&raw_batch)?;
+            for mut track in batch {
+                track.url = None;
+                if known.insert(track.key()) {
+                    tracks.push(track);
+                    if tracks.len() > MAX_TRACKS {
+                        return Err(WebAudioError::TooLarge);
+                    }
+                }
+            }
+        }
+        if !is_overview
+            && let Some(section) = section_value
+            && let (Some(id), Some(cursor)) =
+                (opaque(section.get("id")), opaque(section.get("next_from")))
+            && seen.insert(("section", id.to_owned(), cursor.to_owned()))
+        {
+            pending.push_back((
+                "catalog.getSection",
+                vec![
+                    ("section_id", id.to_owned()),
+                    ("start_from", cursor.to_owned()),
+                    ("need_blocks", "1".to_owned()),
+                    ("extended", "1".to_owned()),
+                ],
+            ));
+        }
+        if is_overview && pending.is_empty() {
+            let owned_blocks: Vec<Value> = blocks.into_iter().cloned().collect();
+            if let Some(section_id) = popular_tracks_source(&owned_blocks, None).section_id
+                && seen.insert(("section", section_id.clone(), String::new()))
+            {
+                pending.push_back((
+                    "catalog.getSection",
+                    vec![
+                        ("section_id", section_id),
+                        ("need_blocks", "1".to_owned()),
+                        ("extended", "1".to_owned()),
+                    ],
+                ));
+            }
+        }
+        if tracks.len() > before && !pending.is_empty() {
+            progress(&tracks);
+        }
+    }
+    Ok(tracks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +1147,7 @@ mod tests {
             },
             image_url: None,
             tracks: Vec::new(),
+            popular_source: PopularTracksSource::default(),
             latest_releases: Vec::new(),
             discography: Vec::new(),
             releases_error: None,
@@ -1080,5 +1401,194 @@ mod tests {
                 .collect::<Vec<_>>(),
             [7, 8, 9]
         );
+    }
+
+    fn test_track(id: i64) -> Track {
+        Track {
+            id,
+            owner_id: -42,
+            artist: "Synthetic artist".into(),
+            title: format!("Track {id}"),
+            subtitle: None,
+            duration: 180,
+            url: None,
+            cover_url: None,
+            artists: Vec::new(),
+            album: None,
+            library_liked: None,
+            release_key: None,
+            library_source_key: None,
+            unavailable: None,
+            added: None,
+            explicit: false,
+        }
+    }
+
+    fn parse_test_audios(raw: &[Value]) -> Result<Vec<Track>, WebAudioError> {
+        Ok(raw
+            .iter()
+            .filter_map(|v| v.get("id").and_then(Value::as_i64).map(test_track))
+            .collect())
+    }
+
+    #[test]
+    fn popular_tracks_continue_from_block_cursor_and_deduplicate() {
+        let blocks = vec![
+            json!({
+                "data_type": "none",
+                "actions": [{
+                    "section_id": "top-sec",
+                    "ref_items_count": 4,
+                    "action": {"type": "open_section", "url": "https://vk.ru/artist/synth/top_audios"}
+                }]
+            }),
+            json!({
+                "id": "pop-block",
+                "data_type": "music_audios",
+                "audios_ids": ["-42_1", "-42_2"],
+                "next_from": "page2"
+            }),
+        ];
+        let raw_artist = json!({"id": "synthetic-artist", "domain": "synth"});
+        let source = popular_tracks_source(&blocks, Some(&raw_artist));
+        assert_eq!(source.domain.as_deref(), Some("synth"));
+        assert_eq!(source.block_id.as_deref(), Some("pop-block"));
+        assert_eq!(source.next_from.as_deref(), Some("page2"));
+        assert_eq!(source.section_id.as_deref(), Some("top-sec"));
+        assert_eq!(source.total, Some(4));
+        assert!(!source.is_complete(2));
+
+        let mut progress_counts = Vec::new();
+        let tracks = load_popular_tracks_progressive(
+            "synthetic-artist",
+            &source,
+            vec![test_track(1), test_track(2)],
+            false,
+            &AtomicBool::new(false),
+            |method, params| {
+                let get = |key| {
+                    params
+                        .iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, value)| value.as_str())
+                };
+                assert_eq!(method, "catalog.getBlockItems");
+                assert_eq!(get("block_id"), Some("pop-block"));
+                Ok(if get("start_from") == Some("page2") {
+                    json!({
+                        "block": {"id": "pop-block", "data_type": "music_audios", "audios_ids": ["-42_2", "-42_3"], "next_from": "page3"},
+                        "audios": [{"owner_id": -42, "id": 2}, {"owner_id": -42, "id": 3}]
+                    })
+                } else {
+                    json!({
+                        "block": {"id": "pop-block", "data_type": "music_audios", "audios_ids": ["-42_4"]},
+                        "audios": [{"owner_id": -42, "id": 4}]
+                    })
+                })
+            },
+            parse_test_audios,
+            |so_far| progress_counts.push(so_far.len()),
+        )
+        .unwrap();
+        assert_eq!(
+            tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(progress_counts, [3]);
+    }
+
+    #[test]
+    fn popular_tracks_fall_back_to_section_and_top_audios_url() {
+        let source = PopularTracksSource {
+            domain: Some("synth".into()),
+            section_id: Some("top-sec".into()),
+            ..Default::default()
+        };
+        let mut calls = Vec::new();
+        let tracks = load_popular_tracks_progressive(
+            "synthetic-artist",
+            &source,
+            Vec::new(),
+            false,
+            &AtomicBool::new(false),
+            |method, params| {
+                calls.push(method);
+                let get = |key| {
+                    params
+                        .iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, value)| value.as_str())
+                };
+                Ok(match method {
+                    "catalog.getSection" => {
+                        assert_eq!(get("section_id"), Some("top-sec"));
+                        json!({
+                            "section": {
+                                "id": "top-sec",
+                                "blocks": [{
+                                    "id": "b1",
+                                    "data_type": "music_audios",
+                                    "audios_ids": ["-42_10"],
+                                    "next_from": "c2"
+                                }]
+                            },
+                            "audios": [{"owner_id": -42, "id": 10}]
+                        })
+                    }
+                    "catalog.getBlockItems" => {
+                        assert_eq!((get("block_id"), get("start_from")), (Some("b1"), Some("c2")));
+                        json!({
+                            "block": {"id": "b1", "data_type": "music_audios", "audios_ids": ["-42_11"]},
+                            "audios": [{"owner_id": -42, "id": 11}]
+                        })
+                    }
+                    other => panic!("unexpected {other}"),
+                })
+            },
+            parse_test_audios,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(calls, ["catalog.getSection", "catalog.getBlockItems"]);
+        assert_eq!(tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [10, 11]);
+
+        // Without block cursor or section_id, requests .../top_audios.
+        let bare = PopularTracksSource {
+            domain: Some("synth".into()),
+            ..Default::default()
+        };
+        let tracks = load_popular_tracks_progressive(
+            "synthetic-artist",
+            &bare,
+            Vec::new(),
+            true,
+            &AtomicBool::new(false),
+            |method, params| {
+                assert_eq!(method, "catalog.getAudioArtist");
+                let url = params
+                    .iter()
+                    .find(|(k, _)| *k == "url")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(url, Some("https://vk.ru/artist/synth/top_audios"));
+                Ok(json!({
+                    "catalog": {
+                        "default_section": "top",
+                        "sections": [{
+                            "id": "top",
+                            "blocks": [{
+                                "id": "b2",
+                                "data_type": "music_audios",
+                                "audios_ids": ["-42_20", "-42_21"]
+                            }]
+                        }]
+                    },
+                    "audios": [{"owner_id": -42, "id": 20}, {"owner_id": -42, "id": 21}]
+                }))
+            },
+            parse_test_audios,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [20, 21]);
     }
 }

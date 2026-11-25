@@ -394,6 +394,7 @@ fn page_kind(page: &MusicPage) -> &'static str {
         MusicPage::Owner(_) => "Owner",
         MusicPage::TrackAlbum(..) => "Release",
         MusicPage::ArtistLibrary(_) => "Artist in My music",
+        MusicPage::ArtistPopular(_) => "Artist popular",
     }
 }
 
@@ -407,6 +408,7 @@ fn origin_kind(origin: &str) -> &'static str {
         "collection" => "collection",
         "artist" | "artist-name" => "artist",
         "artist-library" => "artist in my music",
+        "artist-popular" => "artist popular",
         "album" => "album",
         "playlist" => "playlist",
         "owner" => "owner",

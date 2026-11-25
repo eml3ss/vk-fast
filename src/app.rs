@@ -428,6 +428,8 @@ enum MusicPage {
     TrackAlbum((i64, i64), String),
     /// An artist's tracks in My music, opened from the artist's page.
     ArtistLibrary(ArtistRef),
+    /// An artist's full list of popular tracks, opened from the artist's page.
+    ArtistPopular(ArtistRef),
 }
 
 impl MusicPage {
@@ -474,6 +476,32 @@ struct DetailRequest {
     key: String,
     canceled: Arc<AtomicBool>,
     receiver: Receiver<Result<DetailPage, WebAudioError>>,
+}
+
+struct ArtistPopularRequest {
+    owner: i64,
+    key: String,
+    canceled: Arc<AtomicBool>,
+    receiver: Receiver<Result<(Vec<Track>, bool), WebAudioError>>,
+}
+
+impl Drop for ArtistPopularRequest {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+    }
+}
+
+struct ArtistPopularCache {
+    tracks: Vec<Track>,
+    complete: bool,
+}
+
+fn artist_popular_key(artist: &ArtistRef) -> String {
+    if artist.id.is_empty() {
+        format!("artist-name:{}", artist.name)
+    } else {
+        artist.id.clone()
+    }
 }
 
 struct MetadataRequest {
@@ -1390,6 +1418,10 @@ pub struct MusicApp {
     /// An artist page's tracks from My music, kept while the library and
     /// the artist stay the same.
     artist_library: Option<ArtistLibrary>,
+    /// Full popular tracks loaded on demand for `MusicPage::ArtistPopular`.
+    artist_popular: HashMap<String, ArtistPopularCache>,
+    artist_popular_request: Option<ArtistPopularRequest>,
+    artist_popular_error: Option<WebAudioError>,
     /// What the diagnostic log last wrote about the interface.
     frame_log: app_diagnostics::FrameLog,
     mix_has_more: bool,
@@ -1616,6 +1648,24 @@ impl MusicApp {
             self.detail_request = None;
             self.detail_error = None;
         }
+        let next_popular_key = match &location.page {
+            MusicPage::ArtistPopular(artist) if !location.settings => {
+                Some(artist_popular_key(artist))
+            }
+            _ => None,
+        };
+        if self
+            .artist_popular_request
+            .as_ref()
+            .is_some_and(|request| next_popular_key.as_deref() != Some(request.key.as_str()))
+        {
+            self.artist_popular_request = None;
+        }
+        if next_popular_key.is_none()
+            || !matches!(&self.page, MusicPage::ArtistPopular(prev) if Some(artist_popular_key(prev)) == next_popular_key)
+        {
+            self.artist_popular_error = None;
+        }
         if !matches!(location.page, MusicPage::Search(_)) || location.settings {
             self.search.cancel_requests();
         }
@@ -1648,6 +1698,7 @@ impl MusicApp {
         }
         if !self.settings_open {
             self.ensure_detail(ctx, false);
+            self.ensure_artist_popular(ctx, false);
         }
         if !self.settings_open
             && let MusicPage::Search(query) = self.page.clone()
@@ -1894,6 +1945,9 @@ impl MusicApp {
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
             artist_library: None,
+            artist_popular: HashMap::new(),
+            artist_popular_request: None,
+            artist_popular_error: None,
             frame_log: Default::default(),
             mix_has_more: false,
             mix_advance: false,
@@ -2299,6 +2353,9 @@ impl MusicApp {
         self.home_collections.clear();
         self.home_sources.clear();
         self.home_catalog = Default::default();
+        self.artist_popular.clear();
+        self.artist_popular_request = None;
+        self.artist_popular_error = None;
         self.catalog_request = None;
         self.catalog_mix = None;
         self.playlist_items.clear();
@@ -2901,6 +2958,7 @@ impl MusicApp {
             | MusicPage::TrackAlbum(_, _) => self.page.detail_key().unwrap_or_default(),
             MusicPage::Home | MusicPage::Library => "library".into(),
             MusicPage::ArtistLibrary(artist) => format!("artist-library:{}", artist.id),
+            MusicPage::ArtistPopular(artist) => format!("artist-popular:{}", artist.id),
         }
     }
 
@@ -3090,6 +3148,11 @@ impl MusicApp {
             MusicPage::Library | MusicPage::ArtistLibrary(_) => {
                 if self.pending.is_none() && self.home_request.is_none() {
                     self.load_page(ctx, true);
+                }
+            }
+            MusicPage::ArtistPopular(_) => {
+                if self.artist_popular_request.is_none() {
+                    self.ensure_artist_popular(ctx, true);
                 }
             }
             MusicPage::Collection(id) => {
@@ -4776,6 +4839,17 @@ impl MusicApp {
                 .as_ref()
                 .filter(|cached| cached.artist == artist.id)
                 .map_or(&[], |cached| &cached.tracks),
+            MusicPage::ArtistPopular(artist) => {
+                let key = artist_popular_key(artist);
+                if let Some(cached) = self.artist_popular.get(&key) {
+                    cached.tracks.as_slice()
+                } else {
+                    MusicPage::Artist(artist.clone())
+                        .detail_key()
+                        .and_then(|detail| self.details.get(&detail))
+                        .map_or(&[], |page| page.tracks())
+                }
+            }
             MusicPage::Recent => &self.recent,
             MusicPage::Search(query) => self
                 .search
@@ -4854,6 +4928,7 @@ impl MusicApp {
                 | MusicPage::Owner(_)
                 | MusicPage::TrackAlbum(_, _)
                 | MusicPage::ArtistLibrary(_)
+                | MusicPage::ArtistPopular(_)
         ) {
             Some(self.view_tracks().to_vec())
         } else {
@@ -7017,6 +7092,13 @@ impl MusicApp {
                 update(track);
             }
         }
+        for track in self
+            .artist_popular
+            .values_mut()
+            .flat_map(|cached| &mut cached.tracks)
+        {
+            update(track);
+        }
         for result in self
             .search
             .results
@@ -7552,6 +7634,13 @@ impl MusicApp {
                 enrich(track, false);
             }
         }
+        for track in self
+            .artist_popular
+            .values_mut()
+            .flat_map(|cached| &mut cached.tracks)
+        {
+            enrich(track, false);
+        }
         for result in self
             .search
             .results
@@ -7817,6 +7906,170 @@ impl MusicApp {
         ctx.request_repaint();
     }
 
+    fn ensure_artist_popular(&mut self, ctx: &egui::Context, reload: bool) {
+        let MusicPage::ArtistPopular(artist) = self.page.clone() else {
+            return;
+        };
+        let key = artist_popular_key(&artist);
+        if !reload
+            && (self
+                .artist_popular
+                .get(&key)
+                .is_some_and(|cached| cached.complete)
+                || self
+                    .artist_popular_request
+                    .as_ref()
+                    .is_some_and(|request| request.key == key))
+        {
+            return;
+        }
+        let (initial, source) = MusicPage::Artist(artist.clone())
+            .detail_key()
+            .and_then(|detail| self.details.get(&detail))
+            .and_then(|page| match page.as_ref() {
+                DetailPage::Artist(page) => {
+                    Some((page.tracks.clone(), page.popular_source.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        if !reload && source.is_complete(initial.len()) {
+            self.artist_popular.insert(
+                key,
+                ArtistPopularCache {
+                    tracks: initial,
+                    complete: true,
+                },
+            );
+            self.artist_popular_error = None;
+            return;
+        }
+        self.artist_popular_request = None;
+        self.artist_popular_error = None;
+        let Some(session) = &self.session else { return };
+        let Some(client) = session.music.clone() else {
+            return;
+        };
+        let owner = session.profile.id;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = canceled.clone();
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let ctx = self.repaint_target.with_context(ctx);
+        match thread::Builder::new()
+            .name("vk-artist-popular".into())
+            .spawn(move || {
+                let result = client
+                    .artist_popular_tracks_progressive(
+                        owner,
+                        &artist,
+                        &source,
+                        initial,
+                        reload,
+                        &worker_cancel,
+                        |so_far| {
+                            let _ = sender.try_send(Ok((so_far, true)));
+                            ctx.request_repaint();
+                        },
+                    )
+                    .map(|tracks| (tracks, false));
+                let _ = sender.send(result);
+                ctx.request_repaint();
+            }) {
+            Ok(worker) => {
+                self.workers.push(worker);
+                self.artist_popular_request = Some(ArtistPopularRequest {
+                    owner,
+                    key,
+                    canceled,
+                    receiver,
+                });
+            }
+            Err(_) => self.artist_popular_error = Some(WebAudioError::Network),
+        }
+    }
+
+    fn poll_artist_popular(&mut self, ctx: &egui::Context) {
+        let Some(request) = &self.artist_popular_request else {
+            return;
+        };
+        let result = match request.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(WebAudioError::Network),
+        };
+        let partial = matches!(&result, Ok((_, true)));
+        let (owner, key, canceled) = (
+            request.owner,
+            request.key.clone(),
+            request.canceled.load(Ordering::Acquire),
+        );
+        if !partial {
+            self.artist_popular_request = None;
+        }
+        if canceled
+            || self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.profile.id != owner)
+        {
+            return;
+        }
+        match result {
+            Ok((tracks, pending)) => {
+                if self.artist_popular.len() >= 32 && !self.artist_popular.contains_key(&key) {
+                    let retained: HashSet<_> = self
+                        .back_history
+                        .iter()
+                        .rev()
+                        .take(8)
+                        .filter_map(|location| match &location.page {
+                            MusicPage::ArtistPopular(artist) => Some(artist_popular_key(artist)),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(evict) = self
+                        .artist_popular
+                        .keys()
+                        .find(|cached| !retained.contains(*cached))
+                        .cloned()
+                    {
+                        self.artist_popular.remove(&evict);
+                    }
+                }
+                self.artist_popular.insert(
+                    key.clone(),
+                    ArtistPopularCache {
+                        tracks: tracks.clone(),
+                        complete: !pending,
+                    },
+                );
+                self.artist_popular_error = None;
+                self.track_view_cache.invalidate();
+                if let MusicPage::ArtistPopular(artist) = &self.page
+                    && artist_popular_key(artist) == key
+                {
+                    let origin = self.view_queue_origin();
+                    if self.queue_origin.as_deref() == Some(origin.as_str()) {
+                        self.prepare_view_queue();
+                    }
+                }
+            }
+            Err(error @ WebAudioError::WrongAccount) => {
+                self.reset();
+                self.auth_error = Some(UiError::Music(error));
+            }
+            Err(WebAudioError::Canceled) => {}
+            Err(error) => {
+                if let MusicPage::ArtistPopular(artist) = &self.page
+                    && artist_popular_key(artist) == key
+                {
+                    self.artist_popular_error = Some(error);
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
     fn detail_content(&mut self, ui: &mut egui::Ui) {
         let cover_playback = self.cover_playback();
         let ctx = ui.ctx().clone();
@@ -7952,6 +8205,7 @@ impl MusicApp {
         let mut action = None;
         let mut track_action = None;
         let mut open_library = false;
+        let mut open_popular = false;
         let connected = !self.demo && self.search_ready();
         theme::scroll_area(
             ui,
@@ -8125,15 +8379,22 @@ impl MusicApp {
                 if let Some(DetailPage::Album(release) | DetailPage::Playlist(release)) = data {
                     release_info::show(ui, language, tracks, &release.stats);
                 }
-                // The same blue "Show all" link as under the discography.
                 if artist.is_some()
-                    && tracks.len() > 6
-                    && detail_ui::expand_button(ui, language, expanded)
+                    && !tracks.is_empty()
+                    && let Some(footer) =
+                        detail_ui::popular_tracks_footer(ui, language, expanded, tracks.len() > 6)
                 {
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(expanded_id, !expanded));
-                    ui.ctx()
-                        .request_discard("popular tracks expanded or hidden");
+                    match footer {
+                        detail_ui::PopularFooterAction::ShowAll => {
+                            open_popular = true;
+                        }
+                        detail_ui::PopularFooterAction::ToggleExpand => {
+                            ui.ctx()
+                                .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+                            ui.ctx()
+                                .request_discard("popular tracks expanded or hidden");
+                        }
+                    }
                 }
                 // The artist's tracks the account keeps in My music, one entry
                 // that opens them as a list.
@@ -8171,6 +8432,10 @@ impl MusicApp {
         );
         if let Some(action) = track_action {
             self.handle_track_action(&ctx, action);
+            return;
+        }
+        if open_popular && let Some(artist) = &artist {
+            self.navigate_music(&ctx, MusicPage::ArtistPopular(artist.clone()));
             return;
         }
         if open_library && let Some(artist) = &artist {
@@ -8901,6 +9166,9 @@ impl MusicApp {
             MusicPage::ArtistLibrary(artist) => {
                 format!("{} · {}", t("Вам понравилось", "You liked"), artist.name)
             }
+            MusicPage::ArtistPopular(artist) => {
+                format!("{} · {}", t("Популярное", "Popular"), artist.name)
+            }
             MusicPage::Collection(id) => self
                 .home_collections
                 .iter()
@@ -8914,7 +9182,10 @@ impl MusicApp {
         ui.horizontal(|ui| {
             if matches!(
                 self.page,
-                MusicPage::Recent | MusicPage::Collection(_) | MusicPage::ArtistLibrary(_)
+                MusicPage::Recent
+                    | MusicPage::Collection(_)
+                    | MusicPage::ArtistLibrary(_)
+                    | MusicPage::ArtistPopular(_)
             ) && !self.back_history.is_empty()
                 && icons::compact_button(ui, Icon::ArrowLeft, t("Назад", "Back"), true, false)
                     .clicked()
@@ -8989,6 +9260,7 @@ impl MusicApp {
                     self.session.is_some()
                         && self.pending.is_none()
                         && self.home_request.is_none()
+                        && self.artist_popular_request.is_none()
                         && self.page != MusicPage::Recent,
                     false,
                 )
@@ -8997,6 +9269,8 @@ impl MusicApp {
                     ctx.data_mut(|data| data.remove::<(i64, usize, usize)>(pagination_id));
                     if let MusicPage::Collection(id) = self.page.clone() {
                         self.open_collection(&ctx, id, true);
+                    } else if matches!(self.page, MusicPage::ArtistPopular(_)) {
+                        self.ensure_artist_popular(&ctx, true);
                     } else {
                         self.load_page(&ctx, true);
                     }
@@ -9089,8 +9363,14 @@ impl MusicApp {
             ui.add_space(6.0);
         }
         let artist_library = matches!(self.page, MusicPage::ArtistLibrary(_));
-        if !is_library
+        let artist_popular = matches!(self.page, MusicPage::ArtistPopular(_));
+        if artist_popular && let Some(error) = &self.artist_popular_error {
+            theme::inset_heading(ui, |ui| {
+                ui.colored_label(theme::error(), error.localized(language))
+            });
+        } else if !is_library
             && !artist_library
+            && !artist_popular
             && let Some(error) = &self.home_error
         {
             theme::inset_heading(ui, |ui| {
@@ -9099,14 +9379,18 @@ impl MusicApp {
         }
         if self.view_tracks().is_empty() && !is_library {
             ui.add_space(28.0);
-            if self.home_request.is_some() && !artist_library {
+            if (artist_popular && self.artist_popular_request.is_some())
+                || (!artist_popular && !artist_library && self.home_request.is_some())
+            {
                 theme::inset_heading(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(t("Загружаем треки…", "Loading tracks…"));
                         ui.spinner();
                     })
                 });
-            } else if self.home_error.is_none() || artist_library {
+            } else if (artist_popular && self.artist_popular_error.is_none())
+                || (!artist_popular && (self.home_error.is_none() || artist_library))
+            {
                 theme::inset_heading(ui, |ui| {
                     ui.label(if self.page == MusicPage::Recent {
                         t(
@@ -9117,6 +9401,11 @@ impl MusicApp {
                         t(
                             "В вашей музыке больше нет треков этого исполнителя.",
                             "My music has no more tracks by this artist.",
+                        )
+                    } else if artist_popular {
+                        t(
+                            "VK не вернул популярные треки.",
+                            "VK did not return popular tracks.",
                         )
                     } else {
                         t(
@@ -9257,10 +9546,15 @@ impl MusicApp {
                             match &self.page {
                                 MusicPage::Recent => "recent",
                                 MusicPage::Collection(id) => id,
-                                MusicPage::ArtistLibrary(artist) => artist.id.as_str(),
+                                MusicPage::ArtistLibrary(artist)
+                                | MusicPage::ArtistPopular(artist) => artist.id.as_str(),
                                 _ => "library",
                             },
-                            matches!(self.page, MusicPage::ArtistLibrary(_)),
+                            match &self.page {
+                                MusicPage::ArtistLibrary(_) => 1u8,
+                                MusicPage::ArtistPopular(_) => 2u8,
+                                _ => 0u8,
+                            },
                         ))
                         .max_height(ui.available_height().max(row_height))
                         .auto_shrink([false, false]),
@@ -9348,7 +9642,7 @@ impl MusicApp {
                 self.load_page(&ctx, false);
             }
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() || (artist_popular && self.artist_popular_request.is_some()) {
             ui.put(
                 egui::Rect::from_center_size(
                     scroll.inner_rect.right_bottom() - egui::vec2(14.0, 14.0),
@@ -13014,6 +13308,7 @@ impl MusicApp {
         self.poll_downloads();
         self.poll_download_dir();
         self.poll_detail(ctx);
+        self.poll_artist_popular(ctx);
         self.poll_metadata(ctx);
         self.hydrate_library_dates(ctx);
         self.poll_like(ctx);
@@ -13725,6 +14020,9 @@ mod tests {
             mix_track_seeds: HashSet::new(),
             prepared_mix: None,
             artist_library: None,
+            artist_popular: HashMap::new(),
+            artist_popular_request: None,
+            artist_popular_error: None,
             frame_log: Default::default(),
             mix_has_more: false,
             mix_advance: false,
@@ -19412,6 +19710,7 @@ mod tests {
                 artist: artist.clone(),
                 image_url: None,
                 tracks: tracks.clone(),
+                popular_source: Default::default(),
                 latest_releases: Vec::new(),
                 discography: Vec::new(),
                 releases_error: None,
@@ -19467,6 +19766,7 @@ mod tests {
                 artist: artist.clone(),
                 image_url: None,
                 tracks: popular,
+                popular_source: Default::default(),
                 latest_releases: Vec::new(),
                 discography: Vec::new(),
                 releases_error: None,
@@ -19550,6 +19850,82 @@ mod tests {
             matches!(app.page, MusicPage::Artist(_)),
             "back to the artist"
         );
+    }
+
+    #[test]
+    fn an_artist_page_expands_popular_on_the_right_and_opens_full_list_on_the_left() {
+        let ctx = egui::Context::default();
+        let mut app = account_ui_app(&ctx, Language::Russian);
+        let artist = ArtistRef {
+            id: "pop-artist".into(),
+            name: "Поп Исполнитель".into(),
+        };
+        let ids: Vec<i64> = (1..=10).collect();
+        let mut popular = page(10, &ids).items;
+        for (index, track) in popular.iter_mut().enumerate() {
+            track.title = format!("Хит {index}");
+        }
+        app.details.insert(
+            MusicPage::Artist(artist.clone()).detail_key().unwrap(),
+            Arc::new(DetailPage::Artist(crate::web_audio::ArtistPage {
+                artist: artist.clone(),
+                image_url: None,
+                tracks: popular.clone(),
+                popular_source: crate::artist_catalog::PopularTracksSource {
+                    total: Some(10),
+                    ..Default::default()
+                },
+                latest_releases: Vec::new(),
+                discography: Vec::new(),
+                releases_error: None,
+                releases_pending: false,
+                related: Vec::new(),
+                featuring: Vec::new(),
+            })),
+        );
+        app.navigate_music(&ctx, MusicPage::Artist(artist));
+        let size = egui::vec2(1040.0, 1100.0);
+        let mut frame = 0;
+        let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        // Collapsed shows 6 tracks, "Показать все" on the left and "Развернуть" on the right.
+        assert!(account_ui_text_rect(&output, "Хит 5").is_some());
+        assert!(account_ui_text_rect(&output, "Хит 6").is_none());
+        let show_all = account_ui_text_rect(&output, "Показать все").expect("show all button");
+        let expand = account_ui_text_rect(&output, "Развернуть").expect("expand button");
+        assert!(
+            expand.left() > show_all.right() + 200.0,
+            "expand button sits on the right edge"
+        );
+        // Clicking "Развернуть" keeps the inline 6/30 expand behavior and switches to "Свернуть".
+        account_ui_click(&ctx, &mut app, size, &mut frame, expand.center());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert!(matches!(app.page, MusicPage::Artist(_)));
+        assert!(account_ui_text_rect(&output, "Хит 9").is_some());
+        let collapse = account_ui_text_rect(&output, "Свернуть").expect("collapse button");
+        account_ui_click(&ctx, &mut app, size, &mut frame, collapse.center());
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert!(account_ui_text_rect(&output, "Хит 6").is_none());
+        // Clicking "Показать все" opens the full Popular list with search and back navigation.
+        let show_all = account_ui_text_rect(&output, "Показать все").unwrap();
+        account_ui_click(&ctx, &mut app, size, &mut frame, show_all.center());
+        assert!(
+            matches!(&app.page, MusicPage::ArtistPopular(opened) if opened.id == "pop-artist")
+        );
+        for _ in 0..3 {
+            output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+        }
+        assert!(account_ui_text_rect(&output, "Популярное · Поп Исполнитель").is_some());
+        assert!(account_ui_text_rect(&output, "Хит 9").is_some());
+        assert_eq!(app.view_queue_origin(), "artist-popular:pop-artist");
+        app.go_back(&ctx);
+        assert!(matches!(app.page, MusicPage::Artist(_)));
     }
 
     #[test]
@@ -19880,6 +20256,7 @@ mod tests {
             artist,
             image_url: None,
             tracks: Vec::new(),
+            popular_source: Default::default(),
             latest_releases: Vec::new(),
             discography: Vec::new(),
             releases_error: None,

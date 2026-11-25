@@ -251,6 +251,7 @@ pub struct ArtistPage {
     pub artist: ArtistRef,
     pub image_url: Option<String>,
     pub tracks: Vec<Track>,
+    pub popular_source: crate::artist_catalog::PopularTracksSource,
     pub latest_releases: Vec<crate::artist_releases::Release>,
     pub discography: Vec<crate::artist_releases::Release>,
     pub releases_error: Option<WebAudioError>,
@@ -3002,6 +3003,56 @@ impl WebAudioClient {
         Ok(page)
     }
 
+    /// Loads the full list of an artist's popular tracks on demand, reusing
+    /// any tracks and continuation references already parsed from the artist
+    /// page unless `force_reload` is set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn artist_popular_tracks_progressive(
+        &self,
+        expected_owner: i64,
+        reference: &ArtistRef,
+        source: &crate::artist_catalog::PopularTracksSource,
+        initial: Vec<Track>,
+        force_reload: bool,
+        canceled: &AtomicBool,
+        mut partial: impl FnMut(Vec<Track>),
+    ) -> Result<Vec<Track>, WebAudioError> {
+        let generation = self.home_owner(expected_owner, canceled)?;
+        let artist_id = if reference.id.is_empty() {
+            if reference.name.trim().is_empty() || reference.name.len() > 4096 {
+                return Err(WebAudioError::Format);
+            }
+            let result = self.detail_request(
+                expected_owner,
+                generation,
+                "audio.searchArtists",
+                vec![("q", reference.name.clone()), ("count", "20".into())],
+                canceled,
+            )?;
+            exact_artist(&result, &reference.name)?.id
+        } else if valid_artist_id(&reference.id) {
+            reference.id.clone()
+        } else {
+            return Err(WebAudioError::Format);
+        };
+        crate::artist_catalog::load_popular_tracks_progressive(
+            &artist_id,
+            source,
+            initial,
+            force_reload,
+            canceled,
+            |method, params| {
+                self.detail_request(expected_owner, generation, method, params, canceled)
+            },
+            |raw_batch| {
+                let (tracks, streams) = home_tracks(raw_batch)?;
+                self.commit_home_streams(expected_owner, generation, streams, canceled)?;
+                Ok(tracks)
+            },
+            |so_far| partial(so_far.to_vec()),
+        )
+    }
+
     /// Read the current account's created and saved playlists. The default
     /// endpoint list deliberately has no `owned` filter: followed references
     /// may belong to a different owner while still being in this library.
@@ -4278,11 +4329,13 @@ fn parse_artist_page(value: &Value, reference: &ArtistRef) -> Result<ParsedArtis
         .iter()
         .filter_map(|id| album_pool.get(id.as_str()).cloned())
         .collect();
+    let popular_source = crate::artist_catalog::popular_tracks_source(blocks, Some(raw_artist));
     Ok((
         ArtistPage {
             artist,
             image_url: artist_image(raw_artist),
             tracks,
+            popular_source,
             discography: latest_releases.clone(),
             latest_releases,
             releases_error: None,

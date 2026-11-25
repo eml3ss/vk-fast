@@ -755,6 +755,83 @@ pub fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> b
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopularFooterAction {
+    ShowAll,
+    ToggleExpand,
+}
+
+/// Footer under an artist's "Popular" track list: "Show all" on the left
+/// (opens the full track list), and "Expand"/"Collapse" on the right when
+/// there are more than six tracks (keeps the inline 6/30 toggle).
+pub fn popular_tracks_footer(
+    ui: &mut egui::Ui,
+    language: Language,
+    expanded: bool,
+    can_expand: bool,
+) -> Option<PopularFooterAction> {
+    ui.add_space(LINK_GAP);
+    let mut rect = ui.available_rect_before_wrap();
+    rect.min.x = (rect.min.x + 8.0).min(rect.max.x);
+    rect.max.x = (rect.max.x - 8.0).max(rect.min.x);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("popular-tracks-footer")
+            .max_rect(rect)
+            .layout(*ui.layout()),
+        |ui| {
+            ui.horizontal(|ui| {
+                let mut action = None;
+                let show_all = language.text("Показать все", "Show all");
+                let response = ui.add(
+                    egui::Label::new(RichText::new(show_all).color(theme::accent()))
+                        .sense(Sense::click())
+                        .selectable(false),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), show_all)
+                });
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    action = Some(PopularFooterAction::ShowAll);
+                }
+                if can_expand {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let toggle = if expanded {
+                            language.text("Свернуть", "Collapse")
+                        } else {
+                            language.text("Развернуть", "Expand")
+                        };
+                        let response = ui.add(
+                            egui::Label::new(RichText::new(toggle).color(theme::accent()))
+                                .sense(Sense::click())
+                                .selectable(false),
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                toggle,
+                            )
+                        });
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(PopularFooterAction::ToggleExpand);
+                        }
+                    });
+                }
+                action
+            })
+            .inner
+        },
+    )
+    .inner
+}
+
 /// VK's "You may also like" artists at the bottom of an artist page.
 fn related_artists(
     ui: &mut egui::Ui,
