@@ -740,6 +740,58 @@ fn wheel_while_dragging(ui: &mut egui::Ui) {
     ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
 }
 
+/// Ctrl + mouse wheel over a vertical list scrolls it by a page per notch,
+/// using the same smooth easing as Page Up / Page Down. Called after the
+/// list's contents so the innermost vertical list under the pointer takes it.
+fn ctrl_wheel_pages(ui: &mut egui::Ui) -> f32 {
+    if ui.ctx().current_pass_index() != 0 {
+        return 0.0;
+    }
+    let vertical = ui.min_rect().height() > ui.clip_rect().height() + 1.0;
+    let over = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|point| ui.clip_rect().contains(point));
+    if !vertical || !over {
+        return 0.0;
+    }
+    let consumed_id = egui::Id::new("ctrl-wheel-page-consumed");
+    let frame = ui.ctx().cumulative_frame_nr();
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<u64>(consumed_id) == Some(frame))
+    {
+        return 0.0;
+    }
+    let pages = ui.input(|input| {
+        let mut total = 0.0_f32;
+        for event in &input.events {
+            if let egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } = event
+                && modifiers.ctrl
+                && !modifiers.shift
+                && !modifiers.alt
+                && delta.y != 0.0
+            {
+                total += match unit {
+                    egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => -delta.y.signum(),
+                    egui::MouseWheelUnit::Point => (-delta.y / 40.0).clamp(-1.0, 1.0),
+                };
+            }
+        }
+        total
+    });
+    if pages != 0.0 {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(consumed_id, frame));
+        ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+    }
+    pages
+}
+
 /// After a list's contents: the wheel during a drag, and the middle-click
 /// autoscroll of a list that shows its anchor, wherever the pointer is.
 fn after_contents(ui: &mut egui::Ui) {
@@ -750,14 +802,21 @@ fn after_contents(ui: &mut egui::Ui) {
             egui::style::ScrollAnimation::none(),
         );
     }
-    // Page keys: the distance still to go eases out over a few frames; a
-    // press while it is under way adds a page to it, so quick presses slide
-    // on smoothly instead of restarting the motion.
+    // Page keys and Ctrl + wheel: the distance still to go eases out over a
+    // few frames; another step while it is under way adds a page to it, so
+    // quick steps slide on smoothly instead of restarting the motion.
     let remaining_id = ui.id().with("key-scroll-remaining");
     let mut remaining = ui
         .ctx()
         .data(|data| data.get_temp::<f32>(remaining_id))
         .unwrap_or(0.0);
+    let wheel_pages = ctrl_wheel_pages(ui);
+    if wheel_pages != 0.0 {
+        if remaining * wheel_pages < 0.0 {
+            remaining = 0.0;
+        }
+        remaining += wheel_pages * ui.clip_rect().height() * 0.85;
+    }
     match crate::autoscroll::take_key_scroll_for(ui) {
         // Most of a screen, leaving a little of the previous one in view.
         Some(crate::autoscroll::KeyScroll::Page(direction)) => {
@@ -1092,6 +1151,78 @@ mod tests {
             offset = frame(None);
         }
         assert_eq!(offset, 0.0);
+    }
+
+    #[test]
+    fn ctrl_wheel_scrolls_vertical_list_by_a_page_per_notch() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut tick = 0;
+        let mut frame = |extra_events: Vec<egui::Event>| {
+            tick += 1;
+            let mut offset = 0.0;
+            let mut events = vec![egui::Event::PointerMoved(egui::pos2(100.0, 100.0))];
+            events.extend(extra_events);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    time: Some(f64::from(tick)),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let output =
+                        scroll_area(ui, egui::ScrollArea::vertical().id_salt("page"), |ui| {
+                            // A sideways strip under the pointer must not consume Ctrl + wheel.
+                            scroll_area(
+                                ui,
+                                egui::ScrollArea::horizontal().id_salt("strip"),
+                                |ui| {
+                                    ui.allocate_exact_size(
+                                        egui::vec2(900.0, 140.0),
+                                        egui::Sense::hover(),
+                                    );
+                                },
+                            );
+                            ui.allocate_exact_size(egui::vec2(380.0, 3000.0), egui::Sense::hover());
+                        });
+                    offset = output.state.offset.y;
+                },
+            );
+            output.textures_delta.clear();
+            offset
+        };
+        let ctrl_wheel = |y: f32| {
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, y),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::CTRL,
+            }]
+        };
+        frame(Vec::new());
+        // Windows sends -3.0 lines per notch: still one page down.
+        frame(ctrl_wheel(-3.0));
+        let mut offset = 0.0;
+        for _ in 0..40 {
+            offset = frame(Vec::new());
+        }
+        assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
+        // Another notch down adds a second page.
+        frame(ctrl_wheel(-1.0));
+        for _ in 0..40 {
+            offset = frame(Vec::new());
+        }
+        assert!((offset - 600.0 * 0.85).abs() < 2.0, "{offset}");
+        // Notch up returns one page.
+        frame(ctrl_wheel(3.0));
+        for _ in 0..40 {
+            offset = frame(Vec::new());
+        }
+        assert!((offset - 300.0 * 0.85).abs() < 2.0, "{offset}");
     }
 
     use super::*;

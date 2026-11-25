@@ -306,6 +306,9 @@ fn read_wheel(events: &[Event], options: &egui::InputOptions) -> Wheel {
             modifiers,
         } = event
         {
+            if modifiers.matches_any(options.zoom_modifier) {
+                continue;
+            }
             let horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
             let vertical = modifiers.matches_any(options.vertical_scroll_modifier);
             wheel.forced = match (horizontal, vertical) {
