@@ -8271,20 +8271,22 @@ impl MusicApp {
                     detail_ui::playlist_description(ui, description);
                 }
                 ui.add_space(20.0);
-                theme::inset_heading(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(if artist.is_some() {
-                                language.text("Популярное", "Popular")
-                            } else {
-                                language.text("Треки", "Tracks")
-                            })
-                            .size(20.0)
-                            .family(theme::semibold()),
+                if artist.is_some() {
+                    if detail_ui::popular_tracks_heading(ui, language, !tracks.is_empty()) {
+                        open_popular = true;
+                    }
+                } else {
+                    theme::inset_heading(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(language.text("Треки", "Tracks"))
+                                    .size(20.0)
+                                    .family(theme::semibold()),
+                            )
+                            .selectable(false),
                         )
-                        .selectable(false),
-                    )
-                });
+                    });
+                }
                 ui.add_space(8.0);
                 if loading && tracks.is_empty() {
                     theme::inset_heading(ui, |ui| {
@@ -8380,21 +8382,13 @@ impl MusicApp {
                     release_info::show(ui, language, tracks, &release.stats);
                 }
                 if artist.is_some()
-                    && !tracks.is_empty()
-                    && let Some(footer) =
-                        detail_ui::popular_tracks_footer(ui, language, expanded, tracks.len() > 6)
+                    && tracks.len() > 6
+                    && detail_ui::popular_expand_button(ui, language, expanded)
                 {
-                    match footer {
-                        detail_ui::PopularFooterAction::ShowAll => {
-                            open_popular = true;
-                        }
-                        detail_ui::PopularFooterAction::ToggleExpand => {
-                            ui.ctx()
-                                .data_mut(|data| data.insert_temp(expanded_id, !expanded));
-                            ui.ctx()
-                                .request_discard("popular tracks expanded or hidden");
-                        }
-                    }
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(expanded_id, !expanded));
+                    ui.ctx()
+                        .request_discard("popular tracks expanded or hidden");
                 }
                 // The artist's tracks the account keeps in My music, one entry
                 // that opens them as a list.
@@ -19853,7 +19847,7 @@ mod tests {
     }
 
     #[test]
-    fn an_artist_page_expands_popular_on_the_right_and_opens_full_list_on_the_left() {
+    fn an_artist_page_shows_all_popular_in_heading_and_expands_on_the_left() {
         let ctx = egui::Context::default();
         let mut app = account_ui_app(&ctx, Language::Russian);
         let artist = ArtistRef {
@@ -19890,14 +19884,21 @@ mod tests {
         for _ in 0..3 {
             output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
         }
-        // Collapsed shows 6 tracks, "Показать все" on the left and "Развернуть" on the right.
+        // Collapsed shows 6 tracks, "Показать все" in the Popular heading on the right,
+        // and "Развернуть" on the left under the tracks.
         assert!(account_ui_text_rect(&output, "Хит 5").is_some());
         assert!(account_ui_text_rect(&output, "Хит 6").is_none());
+        let heading = account_ui_text_rect(&output, "Популярное").expect("popular heading");
         let show_all = account_ui_text_rect(&output, "Показать все").expect("show all button");
         let expand = account_ui_text_rect(&output, "Развернуть").expect("expand button");
         assert!(
-            expand.left() > show_all.right() + 200.0,
-            "expand button sits on the right edge"
+            show_all.left() > heading.right() + 200.0
+                && (show_all.center().y - heading.center().y).abs() < 6.0,
+            "show all sits on the right side of the Popular heading"
+        );
+        assert!(
+            (expand.left() - heading.left()).abs() < 2.0 && expand.top() > heading.bottom(),
+            "expand button sits on the left under the tracks"
         );
         // Clicking "Развернуть" keeps the inline 6/30 expand behavior and switches to "Свернуть".
         account_ui_click(&ctx, &mut app, size, &mut frame, expand.center());

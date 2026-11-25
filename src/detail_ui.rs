@@ -755,81 +755,79 @@ pub fn expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> b
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PopularFooterAction {
-    ShowAll,
-    ToggleExpand,
-}
-
-/// Footer under an artist's "Popular" track list: "Show all" on the left
-/// (opens the full track list), and "Expand"/"Collapse" on the right when
-/// there are more than six tracks (keeps the inline 6/30 toggle).
-pub fn popular_tracks_footer(
-    ui: &mut egui::Ui,
-    language: Language,
-    expanded: bool,
-    can_expand: bool,
-) -> Option<PopularFooterAction> {
-    ui.add_space(LINK_GAP);
+/// Heading row for an artist's "Popular" track list: "Popular" on the left and
+/// a "Show all" link on the right (opening the full track list) when `show_all`
+/// is true. Returns true when "Show all" is clicked.
+pub fn popular_tracks_heading(ui: &mut egui::Ui, language: Language, show_all: bool) -> bool {
     let mut rect = ui.available_rect_before_wrap();
     rect.min.x = (rect.min.x + 8.0).min(rect.max.x);
     rect.max.x = (rect.max.x - 8.0).max(rect.min.x);
     ui.scope_builder(
         egui::UiBuilder::new()
-            .id_salt("popular-tracks-footer")
+            .id_salt("popular-tracks-heading")
             .max_rect(rect)
             .layout(*ui.layout()),
         |ui| {
             ui.horizontal(|ui| {
-                let mut action = None;
-                let show_all = language.text("Показать все", "Show all");
-                let response = ui.add(
-                    egui::Label::new(RichText::new(show_all).color(theme::accent()))
-                        .sense(Sense::click())
-                        .selectable(false),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(language.text("Популярное", "Popular"))
+                            .size(20.0)
+                            .family(theme::semibold()),
+                    )
+                    .selectable(false),
                 );
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), show_all)
-                });
-                if response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    action = Some(PopularFooterAction::ShowAll);
+                if !show_all {
+                    return false;
                 }
-                if can_expand {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let toggle = if expanded {
-                            language.text("Свернуть", "Collapse")
-                        } else {
-                            language.text("Развернуть", "Expand")
-                        };
-                        let response = ui.add(
-                            egui::Label::new(RichText::new(toggle).color(theme::accent()))
-                                .sense(Sense::click())
-                                .selectable(false),
-                        );
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                ui.is_enabled(),
-                                toggle,
-                            )
-                        });
-                        if response
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            action = Some(PopularFooterAction::ToggleExpand);
-                        }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = language.text("Показать все", "Show all");
+                    let response = ui.add(
+                        egui::Label::new(RichText::new(label).color(theme::accent()))
+                            .sense(Sense::click())
+                            .selectable(false),
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            label,
+                        )
                     });
-                }
-                action
+                    response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                })
+                .inner
             })
             .inner
         },
     )
     .inner
+}
+
+/// "Expand" / "Collapse" under an artist's shortened "Popular" track list:
+/// keeps the inline 6/30 toggle on the left, matching `expand_button`.
+pub fn popular_expand_button(ui: &mut egui::Ui, language: Language, expanded: bool) -> bool {
+    ui.add_space(LINK_GAP);
+    theme::inset_heading(ui, |ui| {
+        let label = if expanded {
+            language.text("Свернуть", "Collapse")
+        } else {
+            language.text("Развернуть", "Expand")
+        };
+        let response = ui.add(
+            egui::Label::new(RichText::new(label).color(theme::accent()))
+                .sense(Sense::click())
+                .selectable(false),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    })
 }
 
 /// VK's "You may also like" artists at the bottom of an artist page.
