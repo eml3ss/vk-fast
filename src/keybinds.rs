@@ -23,6 +23,18 @@ struct Binding {
     repeat: bool,
 }
 
+/// W, A, S and D, by their place on the keyboard (so they work in any
+/// layout, Russian included), act like the arrows they stand in for.
+fn arrow(key: Key, physical: Option<Key>) -> Key {
+    match physical.unwrap_or(key) {
+        Key::W => Key::ArrowUp,
+        Key::A => Key::ArrowLeft,
+        Key::S => Key::ArrowDown,
+        Key::D => Key::ArrowRight,
+        _ => key,
+    }
+}
+
 fn binding(key: Key, modifiers: Modifiers) -> Option<Binding> {
     if modifiers.alt || modifiers.shift || (modifiers.ctrl && modifiers.mac_cmd) {
         return None;
@@ -93,6 +105,7 @@ pub fn read(context: &egui::Context) -> Vec<Command> {
         input.events.retain(|event| {
             let Event::Key {
                 key,
+                physical_key,
                 modifiers,
                 pressed: true,
                 repeat,
@@ -101,7 +114,7 @@ pub fn read(context: &egui::Context) -> Vec<Command> {
             else {
                 return true;
             };
-            let Some(binding) = binding(*key, *modifiers) else {
+            let Some(binding) = binding(arrow(*key, *physical_key), *modifiers) else {
                 return true;
             };
             if !repeat || binding.repeat {
@@ -189,6 +202,71 @@ mod tests {
     }
 
     #[test]
+    fn wasd_by_its_place_on_the_keyboard_acts_like_the_arrows() {
+        // Another layout: the key under W types a comma, but still turns it up.
+        let physical = |logical, place| Event::Key {
+            key: logical,
+            physical_key: Some(place),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        let context = egui::Context::default();
+        let events = vec![
+            key(Key::A, Modifiers::NONE, true, false),
+            key(Key::D, Modifiers::NONE, true, false),
+            physical(Key::Comma, Key::W),
+            key(Key::S, Modifiers::NONE, true, false),
+            key(Key::D, Modifiers::NONE, true, true),
+        ];
+        let (commands, remaining) = frame(&context, events, true, |_| {});
+        assert_eq!(
+            commands,
+            [
+                Command::Seek(-5.0),
+                Command::Seek(5.0),
+                Command::Volume(0.05),
+                Command::Volume(-0.05),
+                Command::Seek(5.0),
+            ]
+        );
+        assert!(remaining.is_empty());
+
+        let context = egui::Context::default();
+        let events = vec![
+            key(Key::A, Modifiers::CTRL, true, false),
+            key(Key::D, Modifiers::COMMAND, true, false),
+            key(Key::W, Modifiers::CTRL, true, false),
+        ];
+        let (commands, remaining) = frame(&context, events, true, |_| {});
+        assert_eq!(commands, [Command::Previous, Command::Next]);
+        assert_eq!(remaining.len(), 1, "Ctrl+W has no player action");
+
+        // A key typing W elsewhere on the keyboard is not the W place.
+        let context = egui::Context::default();
+        let events = vec![physical(Key::W, Key::Comma)];
+        let (commands, remaining) = frame(&context, events.clone(), true, |_| {});
+        assert!(commands.is_empty());
+        assert_eq!(remaining, events);
+
+        let context = egui::Context::default();
+        let mut text = String::new();
+        frame(&context, vec![], true, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text).id_salt("query"))
+                .request_focus();
+        });
+        let events = vec![
+            key(Key::W, Modifiers::NONE, true, false),
+            Event::Text("w".into()),
+        ];
+        let (commands, _) = frame(&context, events, true, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text).id_salt("query"));
+        });
+        assert!(commands.is_empty());
+        assert_eq!(text, "w", "Typing W must stay in the search field");
+    }
+
+    #[test]
     fn page_keys_scroll_and_home_goes_to_the_top_but_not_while_typing() {
         let context = egui::Context::default();
         let events = [Key::PageDown, Key::PageUp, Key::Home]
@@ -258,7 +336,8 @@ mod tests {
             (Key::ArrowUp, Modifiers::CTRL),
             (Key::ArrowDown, Modifiers::COMMAND),
             (Key::Space, Modifiers::COMMAND),
-            (Key::A, Modifiers::NONE),
+            (Key::W, Modifiers::CTRL),
+            (Key::Q, Modifiers::NONE),
         ] {
             let context = egui::Context::default();
             let events = vec![key(key_name, modifiers, true, false)];
