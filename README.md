@@ -10,6 +10,7 @@
 ![Linux Wayland | X11](https://img.shields.io/badge/Linux-Wayland%20%7C%20X11-20262f?labelColor=171b21)
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-20262f?labelColor=171b21)
 ![сделано на Rust + egui](https://img.shields.io/badge/%D1%81%D0%B4%D0%B5%D0%BB%D0%B0%D0%BD%D0%BE%20%D0%BD%D0%B0-Rust%20%2B%20egui-20262f?labelColor=171b21)
+[![поддержать на Boosty](https://img.shields.io/badge/%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C-Boosty-3670c4?labelColor=171b21)](https://boosty.to/emless/single-payment/donation/845270/target?share=target_link)
 [![лицензия GPL-3.0](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-GPL--3.0-20262f?labelColor=171b21)](LICENSE)
 
 [Скачать](https://github.com/eml3ss/vk-fast/releases/latest) ·
