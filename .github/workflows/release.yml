@@ -1,6 +1,6 @@
 # Release packages are built here instead of on a developer machine.
 # A pushed tag vX.Y.Z builds both platforms and creates a DRAFT release with
-# exactly the four runtime files; publishing the draft stays a manual step
+# exactly the five runtime files; publishing the draft stays a manual step
 # after the OTA check of the previous client (docs/release.md).
 # Running the workflow by hand builds the same files as artifacts only.
 name: Release
@@ -118,10 +118,65 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  flatpak:
+    name: Linux Flatpak bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder elfutils appstream desktop-file-utils python3-venv
+          # bubblewrap needs unprivileged user namespaces, which Ubuntu 24.04
+          # restricts by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Check desktop entry and metainfo
+        run: |
+          desktop-file-validate flatpak/io.github.eml3ss.VkFast.desktop
+          appstreamcli validate --no-net --explain flatpak/io.github.eml3ss.VkFast.metainfo.xml
+          # Software centres show the version from the metainfo's releases.
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          grep -q "<release version=\"$version\"" flatpak/io.github.eml3ss.VkFast.metainfo.xml \
+            || { echo "metainfo has no <release> for $version"; exit 1; }
+      # The build itself is offline: every crate comes from Cargo.lock.
+      - name: Generate cargo sources
+        run: |
+          generator="$RUNNER_TEMP/flatpak-cargo-generator.py"
+          curl -fsSL --retry 3 -o "$generator" \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/9d86d336a39b9af38b86f114b6ce5820fe260f91/cargo/flatpak-cargo-generator.py
+          echo "0a2db6be87d75910facef28ab46d4d6460802e8419ab850d0caa6a364d26b380  $generator" | sha256sum -c -
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q aiohttp==3.12.15 tomlkit==0.13.3 PyYAML==6.0.2
+          "$RUNNER_TEMP/venv/bin/python" -I "$generator" Cargo.lock -o flatpak/cargo-sources.json
+      - name: Build the bundle
+        run: |
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --repo="$RUNNER_TEMP/repo" --force-clean "$RUNNER_TEMP/build" \
+            flatpak/io.github.eml3ss.VkFast.yml
+          mkdir -p dist
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            "$RUNNER_TEMP/repo" "dist/VK-Fast-$version-linux-x86_64.flatpak" io.github.eml3ss.VkFast
+      - name: Check that the Flatpak starts
+        run: |
+          ls -l dist
+          flatpak install --user -y --noninteractive dist/VK-Fast-*-linux-x86_64.flatpak
+          flatpak run io.github.eml3ss.VkFast --help
+          # The VK client's TLS verifies a real certificate inside the sandbox.
+          flatpak run io.github.eml3ss.VkFast --check-tls
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/VK-Fast-*-linux-x86_64.flatpak
+          if-no-files-found: error
+          retention-days: 14
+
   draft:
     name: Draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [linux, windows, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -143,6 +198,7 @@ jobs:
           expected = {
               f'VK-Fast-{version}-linux-x86_64.AppImage',
               f'VK-Fast-{version}-linux-x86_64.tar.gz',
+              f'VK-Fast-{version}-linux-x86_64.flatpak',
               f'VK-Fast-{version}-windows-x86_64.zip',
               f'VK-Fast-{version}-windows-x86_64-setup.exe',
           }

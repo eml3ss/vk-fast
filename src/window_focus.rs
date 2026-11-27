@@ -21,7 +21,8 @@ fn set(variable: &str) -> bool {
 /// The running compositor with a focus IPC. Tests never talk to the user's
 /// compositor.
 pub fn compositor() -> Option<Compositor> {
-    if cfg!(test) {
+    // A sandbox has neither the compositor's client nor the host's PIDs.
+    if cfg!(test) || crate::flatpak::active() {
         None
     } else if set("NIRI_SOCKET") {
         Some(Compositor::Niri)

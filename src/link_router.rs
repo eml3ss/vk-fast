@@ -193,6 +193,12 @@ fn pick_browser(
         .find(|id| id != own && valid_handler(id) && usable(id))
 }
 
+/// Whether VK Fast may become the system's link handler. A Flatpak sandbox
+/// cannot change the host's default applications.
+pub fn available() -> bool {
+    !crate::flatpak::active()
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::{disable, enable, forward, refresh_registration, status};
 #[cfg(windows)]

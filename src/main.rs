@@ -29,6 +29,7 @@ mod discord_rpc;
 mod downloads;
 mod equalizer;
 mod equalizer_ui;
+mod flatpak;
 mod home_ui;
 mod i18n;
 mod icons;
@@ -294,9 +295,11 @@ fn main() -> eframe::Result {
         activation.open_link(link);
     }
     // Keep an enabled link handler pointing at this copy of the application.
-    let _ = std::thread::Builder::new()
-        .name("vk-link-handler".into())
-        .spawn(link_router::refresh_registration);
+    if link_router::available() {
+        let _ = std::thread::Builder::new()
+            .name("vk-link-handler".into())
+            .spawn(link_router::refresh_registration);
+    }
     #[cfg(windows)]
     {
         app_paths::config_dir().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
@@ -322,7 +325,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("VK Fast")
             .with_icon(app_icon::native_icon())
-            .with_app_id(app_icon::APP_ID)
+            .with_app_id(app_icon::window_id())
             .with_decorations(system_titlebar)
             .with_inner_size([1040.0, 720.0])
             .with_min_inner_size([800.0, 540.0]),

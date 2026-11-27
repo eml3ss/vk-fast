@@ -4,6 +4,16 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui::{self, IconData, TextureHandle};
 
 pub const APP_ID: &str = "vk-fast";
+
+/// The window's application ID: the desktop matches it to the launcher, so
+/// the Flatpak build uses its own reverse-DNS ID.
+pub fn window_id() -> &'static str {
+    if crate::flatpak::active() {
+        crate::flatpak::ID
+    } else {
+        APP_ID
+    }
+}
 const PNG: &[u8] = include_bytes!("../assets/vk-fast-icon.png");
 const TEXTURE_KEY: &str = "vk-fast-brand-icon";
 

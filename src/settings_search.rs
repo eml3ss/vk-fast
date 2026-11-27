@@ -63,6 +63,10 @@ impl Query {
     }
 
     pub fn matches(&self, setting: Setting) -> bool {
+        // The Flatpak sandbox cannot become the system's link handler.
+        if matches!(setting, Setting::LinkHandler) && !crate::link_router::available() {
+            return false;
+        }
         let keywords = match setting {
             Setting::Language => {
                 "общие язык языки интерфейса русский английский перевод локализация general interface language languages russian english translation localization"

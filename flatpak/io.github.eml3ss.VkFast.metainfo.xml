@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.eml3ss.VkFast</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>VK Fast</name>
+  <summary>Fast desktop client for VK Music</summary>
+  <summary xml:lang="ru">Быстрый десктопный клиент VK Музыки</summary>
+  <developer id="io.github.eml3ss">
+    <name>eml3ss</name>
+  </developer>
+  <description>
+    <p>
+      Listen to your VK Music in a native window instead of a browser tab: your library, mixes,
+      synced lyrics and an equalizer in one program that starts quickly and stays light.
+    </p>
+    <p xml:lang="ru">
+      Слушайте свою VK Музыку в нативном окне вместо вкладки браузера: библиотека, миксы,
+      синхронные тексты песен и эквалайзер в одной программе, которая быстро открывается
+      и почти не нагружает компьютер.
+    </p>
+    <ul>
+      <li>Library, playlists, albums, artists, VK Mix, recommendations and search</li>
+      <li xml:lang="ru">Библиотека, плейлисты, альбомы, исполнители, VK Микс, рекомендации и поиск</li>
+      <li>Synced lyrics from several sources with a full-screen view</li>
+      <li xml:lang="ru">Синхронные тексты из нескольких источников и полноэкранный режим</li>
+      <li>Ten-band equalizer, crossfade and an audio cache</li>
+      <li xml:lang="ru">Десятиполосный эквалайзер, плавный переход и аудиокэш</li>
+      <li>Themes, any accent colour, media keys and Discord status</li>
+      <li xml:lang="ru">Темы, любой цвет акцента, медиаклавиши и статус в Discord</li>
+    </ul>
+    <p>
+      You sign in by scanning a QR code with the VK app on your phone. VK Fast is an independent
+      project, not a VK product; a VK account is required.
+    </p>
+    <p xml:lang="ru">
+      Вход — по QR-коду из приложения VK на телефоне. VK Fast — независимый проект, а не продукт
+      VK; нужна учётная запись VK.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.eml3ss.VkFast.desktop</launchable>
+  <url type="homepage">https://github.com/eml3ss/vk-fast</url>
+  <url type="bugtracker">https://github.com/eml3ss/vk-fast/issues</url>
+  <url type="vcs-browser">https://github.com/eml3ss/vk-fast</url>
+  <url type="donation">https://boosty.to/emless/single-payment/donation/845270/target?share=target_link</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+  <keywords>
+    <keyword>vk</keyword>
+    <keyword>music</keyword>
+    <keyword>lyrics</keyword>
+  </keywords>
+  <branding>
+    <color type="primary" scheme_preference="light">#a9c6ee</color>
+    <color type="primary" scheme_preference="dark">#3670c4</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <internet>always</internet>
+  </requires>
+  <releases>
+    <release version="0.9.6" date="2026-11-26"/>
+  </releases>
+</component>

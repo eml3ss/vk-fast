@@ -1677,7 +1677,9 @@ impl MusicApp {
         if opening_settings {
             self.start_cache_job(ctx, CacheAction::Info);
             self.start_storage_job(ctx, StorageAction::Info);
-            self.start_link_handler_job(ctx, None);
+            if crate::link_router::available() {
+                self.start_link_handler_job(ctx, None);
+            }
         }
         if restore_pending
             && !self.settings_open

@@ -62,7 +62,9 @@ impl Backend {
                 };
                 // Do not use assume_sni_available: accepting a non-existent host
                 // would let the application hide with no way to restore it.
-                match data.spawn() {
+                // Flatpak may not own a StatusNotifierItem-PID name; hosts
+                // find the item by its unique bus name instead.
+                match data.disable_dbus_name(crate::flatpak::active()).spawn() {
                     Ok(handle) => {
                         let _ = worker_status.compare_exchange(
                             PENDING,

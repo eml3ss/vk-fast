@@ -54,10 +54,11 @@
 | Система | Файл | Что нужно |
 | --- | --- | --- |
 | Linux | `VK-Fast-…-linux-x86_64.AppImage` или `.tar.gz` | glibc 2.39+ (Ubuntu 24.04+, Arch, Fedora), PipeWire, fontconfig |
+| Linux | `VK-Fast-…-linux-x86_64.flatpak` | Flatpak; ставится командой `flatpak install --user VK-Fast-…-linux-x86_64.flatpak` |
 | Windows 10 / 11 | `VK-Fast-…-windows-x86_64-setup.exe` — установщик | — |
 | Windows 10 / 11 | `VK-Fast-…-windows-x86_64.zip` — без установки | — |
 
-Подробнее: [Linux](docs/linux.md), [Windows](docs/windows.md). На Windows приложение само
+Подробнее: [Linux](docs/linux.md), [Flatpak](docs/flatpak.md), [Windows](docs/windows.md). На Windows приложение само
 предлагает обновиться, когда выходит новая версия.
 
 ## Вход

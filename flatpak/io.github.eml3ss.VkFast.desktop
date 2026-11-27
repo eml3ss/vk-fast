@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=VK Fast
+GenericName=Music Player
+GenericName[ru]=Музыкальный плеер
+Comment=Fast desktop client for VK Music
+Comment[ru]=Быстрый десктопный клиент VK Музыки
+Exec=vk-fast
+Icon=io.github.eml3ss.VkFast
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=vk;music;player;lyrics;вк;музыка;плеер;
+StartupNotify=true
+SingleMainWindow=true

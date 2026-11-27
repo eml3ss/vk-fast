@@ -1,0 +1,58 @@
+# Flatpak build of VK Fast. CI builds a .flatpak bundle from this checkout
+# (.github/workflows/release.yml); for Flathub the first source becomes the
+# tagged git repository. cargo-sources.json is generated from Cargo.lock by
+# flatpak-cargo-generator (docs/flatpak.md), so the build needs no network.
+id: io.github.eml3ss.VkFast
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang for bindgen (BoringSSL and PipeWire bindings).
+  - org.freedesktop.Sdk.Extension.llvm23
+command: vk-fast
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Audio goes straight to PipeWire, as in the native build.
+  - --filesystem=xdg-run/pipewire-0
+  # Downloaded tracks land in the Downloads folder; another folder is picked
+  # through the file chooser portal.
+  - --filesystem=xdg-download
+  # Media keys and the desktop's player controls (MPRIS).
+  - --own-name=org.mpris.MediaPlayer2.vk-fast
+  # Tray icon.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Discord status, for native and Flatpak Discord.
+  - --filesystem=xdg-run/discord-ipc-0
+  - --filesystem=xdg-run/app/com.discordapp.Discord:create
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm23/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm23/lib
+  env:
+    CARGO_HOME: /run/build/vk-fast/cargo
+    CARGO_NET_OFFLINE: 'true'
+    LIBCLANG_PATH: /usr/lib/sdk/llvm23/lib
+modules:
+  - name: vk-fast
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/vk-fast -t /app/bin
+      - install -Dm644 flatpak/io.github.eml3ss.VkFast.desktop -t /app/share/applications
+      - install -Dm644 flatpak/io.github.eml3ss.VkFast.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 assets/vk-fast-icon-512.png /app/share/icons/hicolor/512x512/apps/io.github.eml3ss.VkFast.png
+      - install -Dm644 LICENSE assets/fonts/OFL.txt docs/third-party/linux/Rust-notices.txt -t /app/share/licenses/io.github.eml3ss.VkFast
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - .flatpak-builder
+          - flatpak/build
+          - flatpak/repo
+          - vk-auth
+      - cargo-sources.json

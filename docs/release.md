@@ -24,7 +24,7 @@
 
 ## Шаги
 
-1. Пройдите проверку TLS-стека выше. Поднимите версию в `Cargo.toml` (и `Cargo.lock`: `cargo update -p vk-fast --offline`), версии в примерах `docs/linux.md` и `docs/windows.md`, добавьте раздел `## X.Y.Z` в начало `CHANGELOG.md`. Полный `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, коммит в `main`.
+1. Пройдите проверку TLS-стека выше. Поднимите версию в `Cargo.toml` (и `Cargo.lock`: `cargo update -p vk-fast --offline`), версии в примерах `docs/linux.md` и `docs/windows.md`, запись `<release version="X.Y.Z" date="ГГГГ-ММ-ДД"/>` первой в `<releases>` файла `flatpak/io.github.eml3ss.VkFast.metainfo.xml` (без неё сборка Flatpak остановится), добавьте раздел `## X.Y.Z` в начало `CHANGELOG.md`. Полный `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, коммит в `main`.
 2. Отправьте тег:
 
    ```sh
@@ -34,8 +34,9 @@
 
 3. Workflow собирает:
    - на Ubuntu 24.04 (база glibc 2.39) — `scripts/build-linux.sh`: AppImage и tar.gz, затем проверяет, что AppImage запускается (`--help`);
+   - на Ubuntu 24.04 — Flatpak-пакет `VK-Fast-X.Y.Z-linux-x86_64.flatpak` из `flatpak/` ([flatpak.md](flatpak.md)), затем ставит его и проверяет запуск (`--help`, `--check-tls`) в песочнице;
    - на Windows Server 2022 нативным MSVC — `scripts/build-windows.sh --installer`: portable ZIP (только `vk-fast.exe` в корне, это проверяется) и установщик NSIS, затем проверяет запуск `vk-fast.exe --print-data-paths`.
-4. Когда обе сборки прошли, workflow сверяет тег с версией `Cargo.toml`, проверяет, что файлов ровно четыре с ожидаемыми именами, и создаёт **черновик** релиза `VK Fast X.Y.Z` с описанием из раздела `CHANGELOG.md`. Черновик не виден OTA и пользователям.
+4. Когда все сборки прошли, workflow сверяет тег с версией `Cargo.toml`, проверяет, что файлов ровно пять с ожидаемыми именами, и создаёт **черновик** релиза `VK Fast X.Y.Z` с описанием из раздела `CHANGELOG.md`. Черновик не виден OTA и пользователям.
 5. Опубликуйте черновик:
 
    ```sh
