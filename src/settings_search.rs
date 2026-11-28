@@ -22,6 +22,7 @@ pub enum Setting {
     ExplicitBadge,
     Bitrate,
     AnimatedBackdrop,
+    CoverFullscreen,
     TrackButtons,
     VolumeKeys,
     MixAfterQueue,
@@ -106,6 +107,9 @@ impl Query {
             }
             Setting::AnimatedBackdrop => {
                 "интерфейс анимированный анимация фон размытый размытие обложка полноэкранный полный экран текст плеер interface animated animation background backdrop blur blurred cover fullscreen lyrics player"
+            }
+            Setting::CoverFullscreen => {
+                "интерфейс обложка трека клик щелчок нажатие плеер полноэкранный полный экран на весь экран текст альбом interface track cover artwork click player fullscreen full screen lyrics album"
             }
             Setting::TrackButtons => {
                 "интерфейс кнопки у трека справа плеер списки сердечко лайк нравится не нравится дизлайк микс по треку скачать загрузить показывать скрыть interface track buttons player lists heart like dislike mix download show hide"

@@ -1068,6 +1068,22 @@ fn auto_scale_follows_the_monitor_until_a_zoom_key_and_is_hidden_on_wayland() {
 }
 
 #[test]
+fn the_cover_fullscreen_switch_is_off_by_default_and_turns_on_from_settings() {
+    let ctx = egui::Context::default();
+    let mut app = account_ui_app(&ctx, Language::English);
+    assert!(!app.cover_opens_fullscreen);
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Interface;
+    app.settings_query = "cover fullscreen".into();
+    let size = egui::vec2(1120.0, 850.0);
+    let mut tick = 0;
+    let settings = warm(&ctx, &mut app, size, &mut tick);
+    let point = content_text(&settings, "Open fullscreen from the cover").center();
+    account_ui_click(&ctx, &mut app, size, &mut tick, point);
+    assert!(app.cover_opens_fullscreen && !app.cover_opens_fullscreen_save_failed);
+}
+
+#[test]
 fn the_bitrate_pill_follows_its_switch_and_sits_on_the_titles_letters() {
     let ctx = egui::Context::default();
     // Signed in, so the playing track has its cache key; demo keeps the

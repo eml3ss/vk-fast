@@ -1153,13 +1153,13 @@ fn hover_play(painter: &egui::Painter, art: egui::Rect) {
 }
 
 fn cover_icon(painter: &egui::Painter, art: egui::Rect, icon: Icon) {
+    cover_icon_in(painter, art, icon, Color32::WHITE);
+}
+
+/// A darkened cover under an icon half its size.
+pub(crate) fn cover_icon_in(painter: &egui::Painter, art: egui::Rect, icon: Icon, color: Color32) {
     painter.rect_filled(art, 6.0, Color32::from_black_alpha(165));
-    icons::paint(
-        painter,
-        art.shrink(art.width() * 0.25),
-        icon,
-        Color32::WHITE,
-    );
+    icons::paint(painter, art.shrink(art.width() * 0.25), icon, color);
 }
 
 /// The cover of a track on Home: Pause over the one playing, Play over the

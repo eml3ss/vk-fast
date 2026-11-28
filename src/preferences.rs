@@ -122,6 +122,10 @@ struct Preferences {
     auto_ui_scale: bool,
     #[serde(deserialize_with = "deserialize_animated_backdrop")]
     animated_backdrop: bool,
+    /// Off unless turned on: the player's cover opens fullscreen lyrics
+    /// instead of the album.
+    #[serde(deserialize_with = "deserialize_off")]
+    cover_opens_fullscreen: bool,
     /// Off unless turned on: it takes Ctrl + volume keys from the system.
     #[serde(deserialize_with = "deserialize_volume_keys")]
     volume_keys: bool,
@@ -172,6 +176,7 @@ impl Default for Preferences {
             ui_scale: DEFAULT_UI_SCALE,
             auto_ui_scale: false,
             animated_backdrop: DEFAULT_ANIMATED_BACKDROP,
+            cover_opens_fullscreen: false,
             volume_keys: false,
             broadcast: false,
             link_browser: String::new(),
@@ -1227,6 +1232,20 @@ pub fn save_animated_backdrop(enabled: bool) -> io::Result<()> {
     })
 }
 
+/// A click on the player's cover opens fullscreen lyrics; off by default.
+pub fn load_cover_opens_fullscreen() -> bool {
+    preferences_path()
+        .ok()
+        .and_then(|path| load_preferences_at(&path).ok().flatten())
+        .is_some_and(|preferences| preferences.cover_opens_fullscreen)
+}
+
+pub fn save_cover_opens_fullscreen(enabled: bool) -> io::Result<()> {
+    update_at(&preferences_path()?, |preferences| {
+        preferences.cover_opens_fullscreen = enabled
+    })
+}
+
 pub fn load_broadcast() -> bool {
     preferences_path()
         .ok()
@@ -1446,6 +1465,24 @@ mod tests {
         let loaded = load_equalizer_at(&path).unwrap();
         assert!(loaded.enabled);
         assert_eq!(loaded.gains[0], crate::equalizer::MAX_DB);
+    }
+
+    #[test]
+    fn the_cover_opens_fullscreen_only_once_turned_on() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("preferences.json");
+        for json in [r#"{}"#, r#"{"cover_opens_fullscreen":"invalid"}"#] {
+            let preferences: Preferences = serde_json::from_str(json).unwrap();
+            assert!(!preferences.cover_opens_fullscreen);
+        }
+        update_at(&path, |preferences| {
+            preferences.cover_opens_fullscreen = true
+        })
+        .unwrap();
+        save_at(&path, 0.375).unwrap();
+        let restored = load_preferences_at(&path).unwrap().unwrap();
+        assert!(restored.cover_opens_fullscreen);
+        assert_eq!(restored.volume, 0.375);
     }
 
     #[test]

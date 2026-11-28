@@ -1528,6 +1528,9 @@ pub struct MusicApp {
     show_bitrate_save_failed: bool,
     /// The fullscreen player's animated blurred backdrop.
     animated_backdrop: bool,
+    /// A click on the player's cover opens fullscreen lyrics, not the album.
+    cover_opens_fullscreen: bool,
+    cover_opens_fullscreen_save_failed: bool,
     theme: theme::Theme,
     accent: Color32,
     accent_save_at: Option<Instant>,
@@ -2043,6 +2046,8 @@ impl MusicApp {
             show_bitrate: !cfg!(test) && preferences::load_show_bitrate(),
             show_bitrate_save_failed: false,
             animated_backdrop: preferences::load_animated_backdrop(),
+            cover_opens_fullscreen: !cfg!(test) && preferences::load_cover_opens_fullscreen(),
+            cover_opens_fullscreen_save_failed: false,
             theme: appearance,
             accent,
             accent_save_at: None,
@@ -10409,6 +10414,7 @@ impl MusicApp {
         let mut menu_areas = Vec::with_capacity(2);
         let mut menu_target = None;
         let mut artwork_rect = None;
+        let mut cover_fullscreen = None;
         let metadata_response = ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt("player-metadata")
@@ -10417,7 +10423,39 @@ impl MusicApp {
             |ui| {
                 ui.set_clip_rect(ui.clip_rect().intersect(metadata));
                 let artwork = self.covers.show(ui, cover_url.as_deref(), artwork_size);
-                if let Some(album) = &album {
+                if self.cover_opens_fullscreen && has_track {
+                    artwork_rect = Some(artwork.rect);
+                    let fullscreen = self.lyrics.fullscreen;
+                    let response = ui
+                        .interact(
+                            artwork.rect,
+                            ui.id().with("player-fullscreen"),
+                            Sense::click(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if fullscreen {
+                            t("Выйти из полноэкранного режима", "Exit fullscreen")
+                        } else {
+                            t("На весь экран", "Fullscreen lyrics")
+                        });
+                    if response.hovered() {
+                        // The lyrics panel's own fullscreen icon, in the
+                        // accent of the seek bar's played part.
+                        crate::home_ui::cover_icon_in(
+                            ui.painter(),
+                            artwork.rect,
+                            if fullscreen {
+                                Icon::Collapse
+                            } else {
+                                Icon::Expand
+                            },
+                            theme::accent(),
+                        );
+                    }
+                    if response.clicked() {
+                        cover_fullscreen = Some(!fullscreen);
+                    }
+                } else if let Some(album) = &album {
                     artwork_rect = Some(artwork.rect);
                     let response = ui
                         .interact(artwork.rect, ui.id().with("player-album"), Sense::click())
@@ -10644,6 +10682,9 @@ impl MusicApp {
         }
         if let Some(action) = metadata_action {
             self.handle_track_action(&ctx, action);
+        }
+        if let Some(fullscreen) = cover_fullscreen {
+            self.set_lyrics_fullscreen(&ctx, fullscreen);
         }
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -11975,6 +12016,7 @@ impl MusicApp {
                 Setting::ExplicitBadge,
                 Setting::Bitrate,
                 Setting::AnimatedBackdrop,
+                Setting::CoverFullscreen,
                 Setting::TrackButtons,
             ],
             SettingsSection::Playback => &[
@@ -12258,6 +12300,7 @@ impl MusicApp {
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12295,6 +12338,7 @@ impl MusicApp {
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12329,6 +12373,7 @@ impl MusicApp {
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12389,6 +12434,7 @@ impl MusicApp {
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12438,6 +12484,7 @@ impl MusicApp {
                         || query.matches(Setting::ExplicitBadge)
                         || query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12498,6 +12545,7 @@ impl MusicApp {
                     }
                     if query.matches(Setting::Bitrate)
                         || query.matches(Setting::AnimatedBackdrop)
+                        || query.matches(Setting::CoverFullscreen)
                         || query.matches(Setting::TrackButtons)
                     {
                         ui.add_space(16.0);
@@ -12550,6 +12598,41 @@ impl MusicApp {
                         .color(theme::muted()),
                     );
                     if self.animated_backdrop_save_failed {
+                        ui.colored_label(
+                            theme::error(),
+                            t(
+                                "Не удалось сохранить настройку.",
+                                "Could not save the setting.",
+                            ),
+                        );
+                    }
+                    if query.matches(Setting::CoverFullscreen)
+                        || query.matches(Setting::TrackButtons)
+                    {
+                        ui.add_space(16.0);
+                    }
+                }
+                if query.matches(Setting::CoverFullscreen) {
+                    let label = t(
+                        "Полноэкранный режим по клику на обложку",
+                        "Open fullscreen from the cover",
+                    );
+                    if theme::switch(ui, &mut self.cover_opens_fullscreen, label).changed() {
+                        self.cover_opens_fullscreen_save_failed = !cfg!(test)
+                            && preferences::save_cover_opens_fullscreen(
+                                self.cover_opens_fullscreen,
+                            )
+                            .is_err();
+                    }
+                    ui.label(
+                        RichText::new(t(
+                            "Клик по обложке трека в плеере открывает текст на весь экран вместо альбома, повторный — возвращает обратно.",
+                            "Clicking the track's cover in the player opens fullscreen lyrics instead of the album; clicking it again goes back.",
+                        ))
+                        .small()
+                        .color(theme::muted()),
+                    );
+                    if self.cover_opens_fullscreen_save_failed {
                         ui.colored_label(
                             theme::error(),
                             t(
@@ -14105,6 +14188,8 @@ mod tests {
             show_bitrate: false,
             show_bitrate_save_failed: false,
             animated_backdrop: true,
+            cover_opens_fullscreen: false,
+            cover_opens_fullscreen_save_failed: false,
             theme: theme::Theme::default(),
             accent: theme::Accent::default().color(),
             accent_save_at: None,

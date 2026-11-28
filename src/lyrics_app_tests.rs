@@ -357,6 +357,108 @@ fn player_bar_shows_a_hand_only_on_its_cover_title_and_artists() {
 }
 
 #[test]
+fn the_player_cover_toggles_fullscreen_lyrics_once_its_setting_is_on() {
+    let ctx = egui::Context::default();
+    let mut app = prepared(&ctx, Language::English);
+    let size = egui::vec2(1200.0, 760.0);
+    let mut frame = 0;
+    // The player's cover: the 40-point square at the bottom of the window.
+    let cover = |output: &egui::FullOutput| {
+        account_ui_shapes(output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - 40.0).abs() < 0.5
+                        && (rect.rect.height() - 40.0).abs() < 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.center().y.total_cmp(&b.center().y))
+            .expect("the player's cover")
+    };
+    let overlays = |output: &egui::FullOutput, cover: egui::Rect| {
+        account_ui_shapes(output)
+            .into_iter()
+            .filter(|shape| {
+                matches!(shape, egui::Shape::Rect(rect)
+                    if rect.rect == cover && rect.fill == egui::Color32::from_black_alpha(165))
+            })
+            .count()
+    };
+    let mut output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    for _ in 0..3 {
+        output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    }
+    let rect = cover(&output);
+    let point = rect.center();
+    let click = |app: &mut MusicApp, frame: &mut u32| {
+        for events in [
+            vec![egui::Event::PointerMoved(point)],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            account_ui_frame(&ctx, app, size, frame, events);
+        }
+    };
+    // Off by default: the cover keeps opening the album, without the icon.
+    assert!(!app.cover_opens_fullscreen);
+    let hovered = account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        vec![egui::Event::PointerMoved(point)],
+    );
+    assert_eq!(overlays(&hovered, rect), 0);
+    click(&mut app, &mut frame);
+    assert!(!app.lyrics.fullscreen);
+
+    app.cover_opens_fullscreen = true;
+    account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        vec![egui::Event::PointerMoved(point)],
+    );
+    let hovered = account_ui_frame(
+        &ctx,
+        &mut app,
+        size,
+        &mut frame,
+        vec![egui::Event::PointerMoved(point)],
+    );
+    assert_eq!(
+        overlays(&hovered, rect),
+        1,
+        "the darkened cover under its icon"
+    );
+    assert_eq!(
+        hovered.platform_output.cursor_icon,
+        egui::CursorIcon::PointingHand
+    );
+    click(&mut app, &mut frame);
+    assert!(app.lyrics.fullscreen && app.lyrics.open);
+    // The same cover, under the fullscreen lyrics, goes back.
+    let output = account_ui_frame(&ctx, &mut app, size, &mut frame, Vec::new());
+    assert_eq!(cover(&output), rect);
+    click(&mut app, &mut frame);
+    assert!(!app.lyrics.fullscreen);
+}
+
+#[test]
 fn richer_metadata_for_the_same_track_keeps_its_lyrics_and_their_search() {
     let ctx = egui::Context::default();
     let mut app = prepared(&ctx, Language::English);
